@@ -298,6 +298,8 @@ directory was removed keeps `movedTo: null` (nowhere to recover from).
     "originalPath": "/abs/dir",
     "movedAt": 1730000000000,
     "bytes": 1024, "files": 10, "dirs": 3,
+    "origin": null,                  // session header.origin when it was recorded ("subagent" marks a subagent log)
+    "parentSessionId": null,         // session header.parentSession when it was recorded
     "restorable": true,
     "restorableCode": null           // "RESTORE_ORIGINAL_EXISTS" | "RESTORE_ORIGINAL_MISSING" | …
   }],
@@ -307,6 +309,10 @@ directory was removed keeps `movedTo: null` (nowhere to recover from).
 An unreadable trash entry is listed with `restorable: false` rather than omitted; such an entry
 reports `kind: null`, `originalPath: null`, and its entry id as `title`; `bytes`/`files`/`dirs` fall
 back to `0`, and `movedAt` falls back to the entry directory's mtime.
+
+`origin` and `parentSessionId` are recorded from the Session header when the entry is created, so a
+subagent log stays recognizable after its parent is gone (the trash UI marks it). Entries written by
+older builds carry no such fields and report `null` for both.
 
 `POST /api/cleanup.trash.restore` — request `{ "entryId": "…" }` → `{ ok: true, restoredTo: "/abs/dir" }`.
 
@@ -803,7 +809,8 @@ window.__ModuleLoader__.load({
 
 1. **Locale dictionaries** — `ctx.effect(() => ctx.locale.register('cleanup', { zh, en }))` then
    `const t = ctx.locale.bind('cleanup')`. Guard against a missing `ctx.locale` (skip UI if absent).
-2. **`shell.overlay`** — one entry `id: 'dsh-cleanup-dialog'`, `order: 900`, the review dialog.
+2. **`shell.overlay`** — one entry `id: 'dsh-cleanup-dialog'`, `order: 900`, the review dialog for a
+   review opened from a context menu (a settings-page review renders inside that page instead, §9).
 3. **`settings.section`** — one entry `id: 'cleanup'`, `order: 85`,
    `label: () => t('section.label')`, `locale: 'cleanup'`, the storage page.
 4. **`contextMenu.icon`** — key `cleanup.trash`, a 16px trash glyph (inline SVG, `currentColor`).
@@ -815,6 +822,12 @@ window.__ModuleLoader__.load({
    - `target: 'workspace'`: one danger action `delete-workspace-dir`,
      `label: t('menu.deleteWorkspace')`, `icon: { key: 'cleanup.trash' }`,
      `run()` opens the dialog for `{ kind: 'workspace', id: target.workspaceId, title: target.displayTitle, path: target.path }`.
+   - `target: 'workspace'`: one danger action `clear-workspace-sessions`, `order: 350` (above the
+     folder deletion), `label: t('menu.clearWorkspaceSessions')`, `icon: { key: 'cleanup.trash' }`,
+     `separatorBefore: true` (the folder deletion no longer carries one, so the two destructive rows
+     share a single divider). `run()` pre-flights §4.9 with `filters: { workspaceId }` and hands the
+     result to §9's workspace clear; an empty or failed pre-flight answers through
+     `ctx.contextMenus.notify` instead of opening a dialog.
    - Reading `target.value` twice is a bug: the registry passes the *value*, so implement
      `resolve(target)` against the plain `{ sessionId, displayTitle }` / `{ workspaceId, path, displayTitle }`.
 
@@ -841,8 +854,11 @@ const ROUTE = {
 
 ## 9. Client: the review dialog
 
-A single overlay component driven by a module-level store (`getSnapshot`/`subscribe`, consumed
-with `React.useSyncExternalStore`). States:
+A single review dialog driven by a module-level store (`getSnapshot`/`subscribe`, consumed with
+`React.useSyncExternalStore`). It is mounted twice — once as the `shell.overlay` entry and once
+inside the storage-cleanup settings page (§10) — and the store records which **surface** opened it
+(`overlay` for the context menus, `settings` for that page). Only the copy matching the current
+surface renders, so exactly one review is on screen. States:
 
 | state | UI |
 |---|---|
@@ -855,8 +871,8 @@ with `React.useSyncExternalStore`). States:
 | `done` | result summary: counts and bytes, plus every distinct trash location when trashed. **Failure-aware**: when nothing succeeded and something failed it is presented as a failure (error title, failed count primary), and with any failed item it does not auto-close |
 | `failed` | code → localized message, `message` as a fallback line, "重试" and "关闭" |
 
-Review shows, in order: title (`删除会话` / `删除工作区目录`), target rows (title, path in mono,
-size/files/dirs from the plan), warning list, blocker list (red, with the localized reason), mode
+Review shows, in order: title (`删除会话` / `删除工作区目录`), the **target rows** (below), warning
+list, blocker list (red, with the localized reason), mode
 selector (two radio-like buttons; permanent disabled when `allowPermanentDeletion` is false or
 the config forbids it), for a workspace target a checkbox "同时删除该目录内的会话记录"
 (re-plans on toggle; `includeSessions`), typed confirmation input when `confirmation` is non-null,
@@ -867,6 +883,35 @@ keeps both modes. A top-level `PERMANENT_MULTIPLE_DIRECTORIES` answer still rend
 `failed` state in case the two halves disagree.
 Escape and the backdrop dismiss it in `review`/`failed` but not while `deleting`. Focus starts on
 the cancel button; the dialog is `role="dialog"` `aria-modal="true"` with an accessible title.
+
+**Target rows and selection.** The list is grouped by *reviewed target*, never by plan item: one row
+per target (checkbox, badge, title, path, size/files). A Session row owns the plan item of the same
+id plus every subagent descendant whose `parentSessionId` chain reaches it; a workspace row owns its
+directory item plus the Sessions swept in by the folder predicate. Ride-along items are collapsed
+under their row behind a `展开 · N 个子代理会话` toggle (or `N 个目录内会话` for a folder), so a
+Session with 30 subagent logs still renders as one row. Items that belong to no row are listed last
+instead of disappearing.
+
+Each row's checkbox narrows what is planned: un-checking re-plans with only the checked targets, and
+`全选` re-checks every row while `反选` inverts the set. A checked parent never brings an un-checked
+row back through its subagent closure: when a plan would contain one, the dialog re-plans with
+`includeDescendants: false` so the checkbox wins (the switch reflects it). `state.targets` keeps
+every reviewed row (the plan carries the checked subset in `plan.targets`), so un-checking is
+reversible — including the last row: an empty selection keeps every row on screen (dimmed with
+`已取消选择，不会删除`), drops the plan, shows `请至少选择一个目标`, and keeps the destructive button
+disabled, so the Host is never asked to plan an empty target set. Inside a workspace clear the same
+checkboxes narrow the current batch, and an un-checked row is recorded in `clear.excluded` so no
+later candidates page brings it back. Subagent
+descendants follow a `同时删除子代理会话` switch (`includeDescendants`), shown whenever a Session
+target is planned and re-planning on toggle, so the collapsed group disappears and reappears with it.
+
+A review opened from the settings page renders **inside** that page, not in `shell.overlay`: the host
+paints the overlay seat at `z-index: 20` inside the app frame while the settings sheet is a fixed
+layer at `z-index: 1000`, so an overlay dialog could only be shown by closing the sheet. The
+sheet-hosted copy is fixed and stacked above the sheet's own panel, which keeps the user's place:
+dismissing the review returns to the same tab with the sheet still open, Escape closes only the
+dialog (never the sheet underneath, including while a delete is in flight), and closing the sheet
+closes the review. A context-menu review keeps the overlay path and closes nothing else.
 
 When the plan is blocked **only** by blockers that a restart clears — `SESSION_LIVE`,
 `SESSION_RUNNING`, or `WORKSPACE_HAS_LIVE_SESSIONS` for a folder held by a live session — the review
@@ -887,6 +932,40 @@ frame element) instead of dropping focus to `<body>`.
 On success: refresh client data — call `ctx.get('sessions')?.refresh?.()` (guard the promise) — and
 let the Workspace follow stream update by itself. The same refresh runs after a trash restore/purge,
 so a restored session reappears in the sidebar.
+
+### Workspace clear
+
+`clear-workspace-sessions` (§7 item 5) deletes every Session log of one workspace and keeps the
+folder and its registration. One plan holds at most 64 targets (§4.3), so the clear walks the
+workspace in batches inside the same dialog:
+
+- **Pre-flight.** §4.9 with `filters: { workspaceId, requireDeletable: false }`, `sort: 'oldest'`,
+  `limit: 500`. Rows with `deletable: false` (open or running in this app run) are counted as
+  skipped and never queued — a plan holding them could never execute. The dialog always opens and
+  stays: a workspace with nothing deletable lands in `done` with `没有可清理的会话` plus how many logs
+  are merely in use, and a failed pre-flight lands in the ordinary `failed` state, where `重试`
+  re-runs the pre-flight. Neither case is reported through `ctx.contextMenus.notify` (only a
+  malformed menu target is).
+- **Review.** The first batch of at most 64 targets becomes an ordinary plan. The title is
+  `清空工作区会话`, the footer button reads `清空会话`, and a note states how many logs the workspace
+  holds, that the review covers the first batch, and that only logs are deleted. The review rows are
+  checkboxes here too (`全选` / `反选` included): un-checking a row re-plans the batch without it and
+  records the id in `clear.excluded`, so neither the drained queue nor a refilled page ever brings it
+  back, and the result reports how many rows were left out. The mode selector still applies (trash by
+  default). When every matched log merely waits for a restart (open or running in this app run), the
+  same rows open in the review with their blockers and `安排删除` — queueing is withheld only while a
+  batch can actually run.
+- **Confirmed walk.** Each executed batch folds its totals into the running `clear.done` and
+  immediately plans and executes the next batch without a second review. Progress reads
+  `第 N 批 · 已清理 M 条`. When the queued targets drain, the next candidates page is fetched, bounded
+  by `CLEAR_MAX_ROUNDS`. The walk stops early on a plan blocker, a failed request, or that bound; a
+  fetched page that holds matches but nothing deletable (all in use, or all excluded) ends the walk
+  as `blocked` with the remaining count instead of claiming the workspace is clear. Retrying a
+  failed walk resumes it: refetch when a page is pending, otherwise re-run the current batch — the
+  folded totals are never dropped, and a walk with nothing left to try keeps the failure on screen.
+- **Result.** `done` renders the folded totals, the reason the walk stopped, the skipped count and
+  where the logs can be restored from. A failed request renders the ordinary `failed` state with the
+  already-cleared total above the error.
 
 ## 10. Client: the settings page
 
@@ -910,12 +989,21 @@ A `settings.section` page titled "存储清理" with four tabs: **工作区**, *
   opens the dialog. Multi-select checkbox per row plus a batch bar "删除选中 (n)".
 - Sessions tab: one row per session — title (fall back to `cwd` + short id), created date,
   size, badges for `运行中` / `已打开` / `归档` / `子代理` / `不可删除`, a coloured row checkbox, and a
-  `删除…` button. Group nothing. A sort selector offers newest / oldest / largest (largest only among
+  `删除…` button. Subagent logs whose parent is on the page collapse under that parent behind a
+  `展开 · N 个子代理会话` toggle; a log whose parent was filtered out or is past the page limit stays a
+  top-level row and keeps its `子代理` badge. Grouping is layout only: every row keeps its own
+  checkbox, measure and delete controls. A workspace selector comes first — `全部工作区`, `未分组`, and
+  one entry per registered workspace — and narrows the list before the sort and archive filters
+  apply; changing it restarts paging. Membership is inherited: a subagent log takes its parent's
+  workspace through `parentSessionId`, so it never shows up under `未分组` while its parent is
+  registered (and it folds under that parent in the workspace view); only a log whose parent is gone
+  stays ungrouped. A sort selector offers newest / oldest / largest (largest only among
   measured rows, unmeasured last), an archive filter offers all / only archived / hide archived, and a
   batch bar `删除选中 (n)` opens the review dialog with every selected session as a target. Pagination
   stays at 300 rows with `显示更多`, and its expanded limit survives switching tabs. Row controls carry
   the row title in their accessible name.
-- Trash tab: one row per entry — title, original path, moved time, size, `恢复` and
+- Trash tab: one row per entry — title, original path, moved time, size, a `子代理` badge and a
+  `父会话 …` line when the entry recorded a Session family (§4.5), `恢复` and
   `彻底删除`; a `清空回收站` action in the tab header, both permanent actions confirmed inline
   (a second click within the row, not a browser `confirm()`). When `inventory.trash` reports
   `overRetention`/`overCapacity`, a warning banner states the size/max and oldest-age/retention and

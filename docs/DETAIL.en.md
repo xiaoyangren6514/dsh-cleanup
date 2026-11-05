@@ -7,10 +7,11 @@ kind: "package-bundle"
 
 [中文](https://github.com/xiaoyangren6514/dsh-cleanup/blob/main/docs/DETAIL.md) | English
 
-`dsh-cleanup` is a bundle for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) that adds the two deletions DSH deliberately leaves out:
+`dsh-cleanup` is a bundle for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) that adds the deletions DSH deliberately leaves out:
 
 - **Deleting a registered workspace's real folder** from disk, recursively.
 - **Deleting a Session's event log**, including its subagent Sessions.
+- **Clearing every Session log of one workspace**, keeping its folder and registration.
 
 DSH itself only unregisters a workspace — the folder, its files, and its Session history stay on disk — and Sessions can only be archived, never deleted. `dsh-cleanup` fills that gap while keeping the destructive surface narrow: targets are addressed by DSH identity, never by arbitrary path; every deletion is planned, reviewed, and confirmed; and the default outcome is a recoverable trash.
 
@@ -25,6 +26,7 @@ DSH itself only unregisters a workspace — the folder, its files, and its Sessi
 |---|---|
 | Delete a registered workspace folder (recursive) | Sidebar workspace right-click → **Delete workspace folder…** |
 | Delete a Session (with its subagent Session logs) | Sidebar Session right-click → **Delete Session…** |
+| Clear every Session log of a workspace (the folder and its registration stay) | Sidebar workspace right-click → **Clear workspace sessions…** |
 | Storage overview with sizes, bulk selection, sorting and archived filtering | Settings → **Storage cleanup** |
 | Recoverable trash with restore and explicit purge | Settings → Storage cleanup → **Trash** |
 | Deferral queue for Sessions open in the Host, executed at the next start | Review dialog → **Schedule deletion (runs automatically after this app exits)**; manage it in Settings |

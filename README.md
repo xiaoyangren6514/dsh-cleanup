@@ -7,7 +7,7 @@ kind: "package-bundle"
 
 English | [中文](README.zh.md)
 
-A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) bundle that adds the two deletions DSH deliberately leaves out: removing a **registered workspace's real folder** from disk, and **deleting a Session's event log** including its subagent Sessions. Every deletion goes through plan → review → confirm, defaults to a recoverable trash, and never happens on a single click.
+A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) bundle that adds the deletions DSH deliberately leaves out: removing a **registered workspace's real folder** from disk, **deleting a Session's event log** including its subagent Sessions, and **clearing every Session log of one workspace** while keeping its folder. Every deletion goes through plan → review → confirm, defaults to a recoverable trash, and never happens on a single click.
 
 DSH itself only unregisters a workspace (the folder and its Sessions stay on disk) and only archives Sessions. `dsh-cleanup` fills that gap without exposing `rm -rf`: you can only delete things DSH already knows about, by id, after seeing exactly what will disappear.
 
@@ -27,6 +27,7 @@ DSH itself only unregisters a workspace (the folder and its Sessions stay on dis
 |---|---|
 | Delete a registered workspace's **real folder** (recursive) | Sidebar workspace right-click → **Delete workspace folder…** |
 | Delete a **Session** (with its subagent Session logs) | Sidebar Session right-click → **Delete session…** |
+| Clear **every Session log** of a workspace (the folder and its registration stay) | Sidebar workspace right-click → **Clear workspace sessions…** |
 | See how much every workspace and Session uses, delete in bulk | Settings → **Storage cleanup** |
 | Recover a mistake (deletions go to the trash by default) | Settings → Storage cleanup → **Trash** |
 | Queue a Session that is open in the current Host for deletion at the next start | Review dialog → **Schedule deletion (runs automatically after this app exits)**; inspect/cancel it in Settings |

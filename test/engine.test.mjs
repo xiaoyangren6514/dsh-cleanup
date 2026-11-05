@@ -127,7 +127,7 @@ const TOTALS_KEYS = ['bytes', 'dirs', 'files', 'sessions', 'workspaces']
 const MESSAGE_KEYS = ['code', 'message', 'sessionId', 'workspaceId']
 const RESULT_ITEM_KEYS = ['bytes', 'error', 'id', 'kind', 'movedTo', 'status']
 const RESULT_TOTALS_KEYS = ['bytes', 'deleted', 'failed', 'trashed']
-const TRASH_ENTRY_KEYS = ['bytes', 'dirs', 'files', 'id', 'kind', 'movedAt', 'originalPath', 'restorable', 'restorableCode', 'title']
+const TRASH_ENTRY_KEYS = ['bytes', 'dirs', 'files', 'id', 'kind', 'movedAt', 'origin', 'originalPath', 'parentSessionId', 'restorable', 'restorableCode', 'title']
 
 /** Assert a plan envelope is ok and return the plan. */
 function planOf(response, label = 'plan') {
@@ -1915,9 +1915,31 @@ describe('trash routes', () => {
     assert.equal(entry.dirs, 0)
     assert.equal(entry.restorable, true)
     assert.equal(entry.restorableCode, null)
+    assert.equal(entry.origin, null, 'a folder entry has no session origin')
+    assert.equal(entry.parentSessionId, null)
     assert.deepEqual(response.totals, { entries: 1, bytes: 5 })
     const entryStat = await fsp.stat(path.join(world.trashRoot, entry.id))
     assert.equal(entryStat.mode & 0o777, 0o700, 'trash entry directories are created with mode 0o700')
+  })
+
+  test('records the session family so a subagent log stays recognizable in the trash', async () => {
+    const world = await makeWorld({
+      sessions: [
+        { id: 'root', cwd: '/proj', createdAt: 1000 },
+        { id: 'child', cwd: '/proj', origin: 'subagent', parentSession: 'root', createdAt: 1001 },
+      ],
+    })
+    const engine = world.engine()
+    const plan = planOf(await engine.plan({ targets: [{ kind: 'session', id: 'root' }], mode: 'trash', includeDescendants: true }))
+    assert.equal((await engine.execute({ planId: plan.planId })).ok, true)
+    const response = await engine.trashList()
+    assert.equal(response.entries.length, 2)
+    const child = response.entries.find((entry) => entry.origin === 'subagent')
+    assert.ok(child, 'the subagent entry keeps its origin')
+    assert.equal(child.parentSessionId, 'root')
+    const root = response.entries.find((entry) => entry.origin === null)
+    assert.ok(root, 'the root entry carries no origin')
+    assert.equal(root.parentSessionId, null)
   })
 
   test('lists an unreadable entry instead of omitting it', async () => {
