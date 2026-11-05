@@ -1,0 +1,84 @@
+{
+  "name": "dsh-cleanup",
+  "version": "0.4.0",
+  "type": "module",
+  "description": "Workspace folder and Session log deletion with a recoverable trash, an explicit review step, and a storage overview page",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "icon": "./icon.svg",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib/*.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "locale/ui/*.json",
+    "icon.svg",
+    "README.md",
+    "README.zh.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "SPEC.md",
+    "docs/FAQ.md",
+    "docs/DETAIL.md",
+    "docs/DETAIL.en.md"
+  ],
+  "scripts": {
+    "test": "node --test 'test/**/*.test.mjs'",
+    "check": "node scripts/check-contract.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xiaoyangren6514/dsh-cleanup.git"
+  },
+  "homepage": "https://github.com/xiaoyangren6514/dsh-cleanup#readme",
+  "author": "fly <longquankey@126.com>",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "cleanup",
+    "storage",
+    "trash",
+    "sessions",
+    "workspaces"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml",
+      "platforms": [
+        "darwin",
+        "linux",
+        "win32"
+      ]
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-context-menu",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ]
+    }
+  },
+  "engines": {
+    "dsh": "^0.2.2-alpha.3",
+    "node": ">=20"
+  }
+}

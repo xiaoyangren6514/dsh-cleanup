@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "存储清理",
+    "description": "删除工作区目录与会话记录：先预览影响范围，默认移入可恢复的回收站。",
+    "detail": "docs/DETAIL.md"
+  }
+}

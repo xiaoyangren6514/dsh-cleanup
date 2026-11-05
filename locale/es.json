@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Limpieza de almacenamiento",
+    "description": "Elimina carpetas de espacio de trabajo y registros de sesión tras una revisión, con una papelera recuperable por defecto.",
+    "detail": "docs/DETAIL.md"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Storage cleanup",
+    "description": "Delete workspace folders and session logs behind a review step, with a recoverable trash by default.",
+    "detail": "docs/DETAIL.en.md"
+  }
+}

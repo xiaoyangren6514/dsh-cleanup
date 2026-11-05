@@ -1,0 +1,288 @@
+#!/usr/bin/env node
+/**
+ * Contract checker for dsh-cleanup.
+ *
+ * The plugin has four surfaces that must agree: the frozen SPEC, the Host route table, the wire codes
+ * the engine can emit, and the client locale dictionaries. Reviews keep finding drifts that no test
+ * catches (a route added without SPEC text, a code emitted without a translation), so this script
+ * compares them mechanically and fails CI on any disagreement.
+ *
+ * Usage: `npm run check` (exit code 1 on drift).
+ *
+ * Checks:
+ *  1. SPEC route list == index.js route table (and every route is a POST under /api).
+ *  2. Every error/warning code the engine can emit is listed in SPEC and localized by the client.
+ *  3. Every SPEC §4.6/§5.4 code is either emitted, or documented as client/settings-only.
+ *  4. Client locale: zh/en key parity, identical `{param}` sets, every literal `t()` key present,
+ *     every plural base has `_one`/`_other`, and any `locale/ui/<lang>.json` matches the en key set
+ *     (extra plural categories allowed for the language's fallback chain).
+ *
+ * @module dsh-cleanup/scripts/check-contract
+ */
+import { readFile, readdir } from 'node:fs/promises'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+const failures = []
+const notes = []
+
+/** @param {string} message */
+function fail(message) {
+  failures.push(message)
+}
+
+/** @param {string} file @returns {Promise<string>} */
+const read = (file) => readFile(path.join(ROOT, file), 'utf8')
+
+/** @param {string} file @returns {Promise<string>} */
+async function readOptional(file) {
+  try {
+    return await read(file)
+  } catch {
+    return ''
+  }
+}
+
+/** @param {string[]} values @returns {string[]} */
+const unique = (values) => [...new Set(values)].sort()
+
+/**
+ * Extract one JS object literal by its `const <name> = {` opener, with string-aware brace matching.
+ * @param {string} source - client.js text.
+ * @param {string} name - constant name.
+ * @returns {Record<string, string>} evaluated object.
+ */
+function extractObjectLiteral(source, name) {
+  const opener = new RegExp(`(?:^|\\n)\\s*const ${name} = \\{`)
+  const match = opener.exec(source)
+  if (match === null) throw new Error(`cannot find const ${name} in client.js`)
+  const open = source.indexOf('{', match.index + match[0].length - 1)
+  let depth = 0
+  let inString = false
+  let quote = ''
+  let end = -1
+  for (let index = open; index < source.length; index += 1) {
+    const character = source[index]
+    const previous = source[index - 1]
+    if (inString) {
+      if (character === quote && previous !== '\\') inString = false
+      continue
+    }
+    if (character === "'" || character === '"') {
+      inString = true
+      quote = character
+      continue
+    }
+    if (character === '{') depth += 1
+    else if (character === '}') {
+      depth -= 1
+      if (depth === 0) {
+        end = index + 1
+        break
+      }
+    }
+  }
+  if (end < 0) throw new Error(`unterminated const ${name}`)
+  // The literal contains only string keys/values and `{param}` templates; evaluating it is safe
+  // because the input is this repository's own source file.
+  // eslint-disable-next-line no-new-func
+  return new Function(`return (${source.slice(open, end)})`)()
+}
+
+/** @param {string} text @param {string} heading @returns {string} section body up to the next heading */
+function section(text, heading) {
+  const start = text.indexOf(heading)
+  if (start < 0) return ''
+  const following = text.slice(start + heading.length)
+  const boundary = /\n#{2,3} /u.exec(following)
+  return boundary === null ? text.slice(start) : text.slice(start, start + heading.length + boundary.index)
+}
+
+/** @param {string} text @param {RegExp} pattern @returns {string[]} */
+const matches = (text, pattern) => [...text.matchAll(pattern)].map((match) => match[1])
+
+/** @param {string} template */
+function paramsOf(template) {
+  return unique(matches(String(template), /\{([a-zA-Z0-9_]+)\}/g))
+}
+
+async function main() {
+  const [spec, engineSource, indexSource, clientSource] = await Promise.all([
+    read('SPEC.md'),
+    read('lib/engine.js'),
+    read('index.js'),
+    read('client.js'),
+  ])
+
+  // ---- 1. routes -------------------------------------------------------------------------------
+  const specRoutes = unique(matches(spec, /`[^`\n]*?(\/api\/cleanup\.[a-zA-Z.]+)[^`\n]*`/g))
+  const indexRoutes = unique(matches(indexSource, /'(\/api\/cleanup\.[a-zA-Z.]+)'/g))
+  const routeTable = unique(matches(indexSource, /\['(\/api\/cleanup\.[a-zA-Z.]+)'/g))
+  for (const route of routeTable) {
+    if (!indexRoutes.includes(route)) fail(`route ${route} is in the table but not registered by name`)
+    if (!route.startsWith('/api/')) fail(`route ${route} is not under /api`)
+  }
+  for (const route of indexRoutes) {
+    if (!routeTable.includes(route)) fail(`route ${route} is referenced but missing from the route table`)
+    if (!specRoutes.includes(route)) fail(`route ${route} is implemented but not documented in SPEC`)
+  }
+  for (const route of specRoutes) {
+    if (!indexRoutes.includes(route)) fail(`route ${route} is documented in SPEC but not implemented`)
+  }
+  notes.push(`routes: ${indexRoutes.length} implemented, ${specRoutes.length} documented`)
+  const registeredMethods = new Set(matches(indexSource, /methods: \[([^\]]+)\]/g).flatMap((list) => matches(list, /'([A-Z]+)'/g)))
+  if (registeredMethods.size !== 1 || !registeredMethods.has('POST')) fail(`expected every route to be POST, found ${[...registeredMethods].join(',')}`)
+
+  // ---- 2. emitted codes -----------------------------------------------------------------------
+  const pathsSource = await read('lib/paths.js')
+  // Codes lib/paths.js defines are passed through by §5.3; the engine never spells them literally.
+  const pathCodes = unique(matches(pathsSource, /: '([A-Z][A-Z0-9_]{2,})',?$/gm))
+  const emitted = {
+    error: unique([
+      ...matches(engineSource, /\b(?:fail|blocker|DomainError)\(\s*'([A-Z][A-Z0-9_]{2,})'/g),
+      ...matches(engineSource, /restorableCode: '([A-Z][A-Z0-9_]{2,})'/g),
+      ...pathCodes,
+    ]),
+    warning: unique([
+      ...matches(engineSource, /\bwarning\(\s*'([A-Z][A-Z0-9_]{2,})'/g),
+      // Codes carried by object literals (e.g. git findings, settings warnings, run-plan fallbacks).
+      ...matches(engineSource, /\bcode: '([A-Z][A-Z0-9_]{2,})'/g),
+    ]),
+  }
+  const specCodes = unique([
+    ...matches(section(spec, '### 4.6 Error codes'), /`([A-Z][A-Z0-9_]{2,})`/g),
+    ...matches(section(spec, '### 5.4 Warnings'), /`([A-Z][A-Z0-9_]{2,})`/g),
+  ])
+  // Codes the client/tests raise or handle without the engine emitting them (documented exceptions).
+  const restoreVocabulary = new Set(matches(section(spec, '### 4.5 Trash routes'), /`([A-Z][A-Z0-9_]{2,})`/g))
+  const settingsCodes = new Set(matches(section(spec, '### 4.8 Settings'), /`([A-Z][A-Z0-9_]{2,})`/g))
+  const documentationOnly = new Set([
+    'PATH_NOT_DIRECTORY', 'PATH_NOT_SESSION_DIR', // SPEC §4.6: defined by paths.js, never on the wire
+  ])
+  const documentedElsewhere = new Set([...restoreVocabulary, ...settingsCodes, ...documentationOnly])
+  // Codes the SPEC explicitly says never reach the wire are not "emitted" for translation purposes.
+  emitted.error = emitted.error.filter((code) => !documentationOnly.has(code))
+  emitted.warning = emitted.warning.filter((code) => !documentationOnly.has(code))
+  const emittedAll = new Set([...emitted.error, ...emitted.warning])
+  for (const code of emittedAll) {
+    if (!specCodes.includes(code) && !documentedElsewhere.has(code)) {
+      fail(`engine can emit ${code} but it is missing from SPEC §4.6/§5.4 (or the §4.5/§4.8 vocabularies)`)
+    }
+  }
+  for (const code of specCodes) {
+    if (!emittedAll.has(code) && !documentedElsewhere.has(code)) {
+      fail(`SPEC lists ${code} but the engine never emits it and it is not a documented client-only code`)
+    }
+  }
+  notes.push(`codes: ${emitted.error.length} error + ${emitted.warning.length} warning emitted, ${specCodes.length} documented`)
+
+  // ---- 3. client locale -----------------------------------------------------------------------
+  const zh = extractObjectLiteral(clientSource, 'zh')
+  const en = extractObjectLiteral(clientSource, 'en')
+  const zhKeys = unique(Object.keys(zh))
+  const enKeys = unique(Object.keys(en))
+  for (const key of enKeys) if (!zhKeys.includes(key)) fail(`locale: zh is missing en key "${key}"`)
+  for (const key of zhKeys) if (!enKeys.includes(key)) fail(`locale: en is missing zh key "${key}"`)
+  for (const key of enKeys) {
+    const zhParams = paramsOf(zh[key])
+    const enParams = paramsOf(en[key])
+    if (zhParams.join(',') !== enParams.join(',')) fail(`locale: param mismatch for "${key}" (zh ${zhParams}, en ${enParams})`)
+  }
+  const literalKeys = unique([
+    ...matches(clientSource, /\bt\('([a-zA-Z0-9_.]+)'(?=\s*[,)])/g),
+    ...matches(clientSource, /\bhasKey\('([a-zA-Z0-9_.]+)'(?=\s*[,)])/g),
+  ])
+  // Dynamic prefixes (`t('error.' + code)`) are intentionally not literal keys.
+  for (const key of literalKeys) {
+    if (!enKeys.includes(key)) fail(`locale: literal key "${key}" is used but not defined`)
+  }
+  const pluralBases = unique(enKeys.filter((key) => key.endsWith('_one')).map((key) => key.slice(0, -4)))
+  for (const base of pluralBases) {
+    if (!enKeys.includes(`${base}_other`)) fail(`locale: plural base "${base}" has no _other variant`)
+  }
+  // Only settings-response codes rendered from the Host message by design are exempt: every
+  // envelope/warning code the engine can put in front of a user MUST have a translation.
+  const translationExempt = new Set(['EXISTING_DATA_STAYS'])
+  for (const code of emitted.error) {
+    if (translationExempt.has(code)) continue
+    if (!enKeys.includes(`error.${code}`)) fail(`locale: emitted error code ${code} has no error.${code} translation`)
+  }
+  for (const code of emitted.warning) {
+    if (translationExempt.has(code)) continue
+    if (!enKeys.includes(`warn.${code}`) && !enKeys.includes(`error.${code}`)) {
+      fail(`locale: emitted code ${code} has neither warn.${code} nor error.${code} translation`)
+    }
+  }
+  notes.push(`client locale: ${enKeys.length} keys, ${pluralBases.length} plural bases, ${literalKeys.length} literal keys`)
+
+  // Optional per-language dictionaries: same keys as en, except additional plural categories.
+  let localeFiles = []
+  try {
+    localeFiles = (await readdir(path.join(ROOT, 'locale/ui'))).filter((name) => name.endsWith('.json') && name !== 'en.json' && name !== 'zh.json')
+  } catch {
+    localeFiles = []
+  }
+  for (const file of localeFiles) {
+    const language = file.replace(/\.json$/u, '')
+    let dictionary
+    try {
+      dictionary = JSON.parse(await readFile(path.join(ROOT, 'locale/ui', file), 'utf8'))
+    } catch (error) {
+      fail(`locale/ui/${file}: not valid JSON (${error.message})`)
+      continue
+    }
+    for (const key of enKeys) {
+      if (!(key in dictionary)) fail(`locale/ui/${file}: missing en key "${key}"`)
+    }
+    for (const key of Object.keys(dictionary)) {
+      if (enKeys.includes(key)) continue
+      const pluralCategory = /^(.+)_(zero|one|two|few|many|other)$/u.exec(key)
+      if (pluralCategory === null || !pluralBases.includes(pluralCategory[1])) {
+        fail(`locale/ui/${file}: unexpected key "${key}"`)
+      }
+    }
+    for (const key of enKeys) {
+      if (!(key in dictionary)) continue
+      if (paramsOf(dictionary[key]).join(',') !== paramsOf(en[key]).join(',')) {
+        fail(`locale/ui/${file}: param mismatch for "${key}"`)
+      }
+    }
+    notes.push(`extra locale: ${language}`)
+  }
+
+  // ---- 4. manifest hooks ----------------------------------------------------------------------
+  const pkg = JSON.parse(await read('package.json'))
+  for (const file of pkg.files ?? []) {
+    if (file.includes('*')) continue
+    const text = await readOptional(file)
+    if (text === '' && !(await exists(file))) fail(`package.json files: missing ${file}`)
+  }
+  if (pkg.dsh?.bundle?.patch === undefined) fail('package.json: missing dsh.bundle.patch')
+  if (pkg.dsh?.client?.platform !== 'web') fail('package.json: dsh.client.platform must be web')
+
+  // ---- report ---------------------------------------------------------------------------------
+  for (const note of notes) process.stdout.write(`• ${note}\n`)
+  if (failures.length > 0) {
+    process.stdout.write(`\n✖ contract check failed (${failures.length}):\n`)
+    for (const failure of failures) process.stdout.write(`  - ${failure}\n`)
+    process.exitCode = 1
+    return
+  }
+  process.stdout.write('\n✓ contract check passed\n')
+}
+
+/** @param {string} file @returns {Promise<boolean>} */
+async function exists(file) {
+  try {
+    await readFile(path.join(ROOT, file))
+    return true
+  } catch {
+    return false
+  }
+}
+
+main().catch((error) => {
+  process.stderr.write(`contract check crashed: ${error?.stack ?? error}\n`)
+  process.exitCode = 1
+})

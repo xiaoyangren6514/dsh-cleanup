@@ -1,0 +1,4 @@
+- insert:
+    - id: dsh-cleanup
+      name: 'dsh-cleanup'
+      config: {}

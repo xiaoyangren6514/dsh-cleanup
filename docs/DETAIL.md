@@ -1,0 +1,123 @@
+---
+description: "dsh-cleanup 长文详情：为 DeepSeek Harness 删除工作区目录与会话日志，复核优先的安全模型、安装方式、兼容性与隐私姿态。"
+kind: "package-bundle"
+---
+
+# dsh-cleanup —— 安全地删除工作区目录与会话日志
+
+中文 | [English](https://github.com/xiaoyangren6514/dsh-cleanup/blob/main/docs/DETAIL.en.md)
+
+`dsh-cleanup` 是一个 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）插件，补上 DSH 刻意不提供的两个删除：
+
+- **删除一个已注册工作区的真实目录**（递归）。
+- **删除一个会话的事件日志**，连同它的子代理会话。
+
+DSH 本身对工作区只做「移除注册」——目录、文件与会话历史都留在磁盘上；对会话只有「归档」，没有删除。`dsh-cleanup` 补上这一段，同时把破坏面收窄：目标只能用 DSH 的身份指定、绝不用任意路径；每次删除都经过计划、复核与确认；默认结果是可恢复的回收站。
+
+- 包名：`dsh-cleanup` 0.4.0
+- 仓库：<https://github.com/xiaoyangren6514/dsh-cleanup>
+- 许可证：MIT © 2026 fly
+- 验证环境：DSH 0.2.2-rc.1
+
+## 能做什么
+
+| 能力 | 位置 |
+|---|---|
+| 删除一个已注册的工作区目录（递归） | 侧栏工作区右键 → **删除工作区目录…** |
+| 删除一个会话（含子代理会话日志） | 侧栏会话右键 → **删除会话…** |
+| 存储总览：大小、批量选择、排序与归档筛选 | 设置 → **存储清理** |
+| 可恢复的回收站：恢复与显式彻底删除 | 设置 → 存储清理 → **回收站** |
+| Host 内已打开会话的延迟队列，下次启动执行 | 复核弹窗 → **安排删除（本次启动结束后自动执行）**；在设置里管理 |
+| 清理策略：回收站位置/保留期/容量、审计日志、扫描预算、永久删除开关、Git 安全检查 | 设置 → 存储清理 → **清理设置** |
+| 删除/跳过/恢复/清空的审计与上次启动结果 | 设置 → 存储清理 → 清理设置 → **最近删除** |
+| 按规则挑会话（天龄、归档、大小、工作区、来源），预览后复核 | 设置 → 存储清理 → 会话 → **按规则选择** |
+| 让 agent 只读检查可清理对象 | 工具 `cleanup_inventory` |
+
+**删除是用户动作。** 面向 agent 的唯一入口是只读清单工具：模型可以报告有哪些对象、占多少空间、为什么被阻塞，但没有任何删除入口。
+
+## 安全模型
+
+从一次点击到一个字节被删除，中间有四道闸。
+
+### 1. 先计划，后执行
+
+删除请求先向 Host 要一份*计划*：具体目标、包含的文件与目录、总字节数、警告（例如 Git 未提交改动）、阻塞项（例如 live 会话），以及永久删除工作区目录时的「输入目录名」要求。计划一次性、5 分钟内有效。执行前会重新校验世界：目标被移动、身份变化或出现新的阻塞，Host 就以 `STATE_CHANGED` 拒绝，一个字节都不动。
+
+### 2. 默认进回收站
+
+删除会把目标移动到 `<DSH_HOME>/trash/dsh-cleanup/` 下的回收站，而不是直接抹掉，所以常见的误操作可以恢复。永久删除是显式的第二种模式；永久删除工作区目录还要**手动输入目录名**，且一份永久计划最多包含一个已存在的工作区目录——一个输入的名称绝不能授权删除另一个目录。批量永久删除会被拒绝；多个目录请逐个删除，或改用回收站模式。
+
+跨磁盘卷时 `rename` 会失败。插件拒绝这种情况，让你明确选择永久删除，而不是偷偷把几个 G 的数据复制到回收站所在磁盘。
+
+### 3. 只删已注册、路径未漂移的目标
+
+工作区目录只能通过 DSH 注册表里的工作区 id 删除。执行前会重新 `lstat` + `realpath`，路径必须仍等于注册表保存的规范路径；符号链接或被替换的目录一律拒绝。静态路径策略还会拒绝文件系统根目录、家目录、`~/.dsh`、Host 进程工作目录**及其祖先目录**、回收站自身、包含 `~/.dsh` 的路径，以及层级过浅、不可能是项目的路径。
+
+因此「能删的东西」的集合 = 「DSH 认识它」∩「文件系统此刻仍然同意」，并在执行时重新检查。
+
+### 4. 绝不碰正在使用的会话
+
+DSH 会让 Agent 及其会话写句柄存活到进程结束，并且没有公开释放 API。写句柄仍存在时删除会话日志会损坏日志。插件在即时删除与延迟删除时都会探测会话持久化的写句柄，包括**另一个 Host 进程**持有的会话：运行中回 `SESSION_RUNNING`，已打开但空闲回 `SESSION_LIVE`。只要有 live 会话的工作目录在某个工作区目录内，删除该工作区目录同样被阻塞。
+
+对于当前 Host 内已打开的会话，复核弹窗提供**安排删除（本次启动结束后自动执行）**：复核过的目标与选项写入 `<DSH_HOME>/cleanup/deferred.json`，在下次 Host 启动时尽早执行（尽力而为：在浏览器恢复任何会话之前），走完整的计划 → 准入 → 执行管线执行。被阻塞的条目会记录原因而不是整轮失败，队列可在设置里查看和取消。运行中的插件热重载刻意不消费该队列。
+
+### 记账护栏
+
+- **回收站归属校验。** 回收站条目带归属标记；`trashRoot` 只能指向本插件专用的目录，外来目录既不会被列出，也不会被删除，因此把回收站指到无关目录不会毁掉那里的内容。
+- **自有状态。** 延迟队列、设置覆盖文件与审计日志位于 `<DSH_HOME>/cleanup/`，仅所有者可读写，并采用原子写。它们属于用户可写状态，不是安全边界。
+
+## 安装
+
+```sh
+# 从 npm 安装（包发布之后）
+dsh plugin --profile web add dsh-cleanup@0.4.0
+
+# 从 GitHub 安装并固定到提交
+dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#<sha>
+
+# 从本地 checkout 安装
+git clone https://github.com/xiaoyangren6514/dsh-cleanup.git
+dsh plugin --profile web add ./dsh-cleanup
+```
+
+安装后**刷新一次浏览器页面**：Host 半部会热更新，但浏览器半部是新的客户端模块，页面需要重新加载。卸载用 `dsh plugin --profile web remove dsh-cleanup`；回收站与 `<DSH_HOME>/cleanup/` 状态会保留。
+
+从本地 checkout 链接安装的目录在使用期间必须留在原地，否则 profile 可能无法启动。
+
+### Discover 与社区索引
+
+DSH 0.2.2-rc.1 **没有官方插件市场或官方索引**。Discover 页签由可选的实验性 plugin-market bundle 提供，且默认不配置任何索引源——需要用户自己添加索引 URL。社区维护的 DSH 插件索引包括 [awesome-dsh-plugin.com](https://awesome-dsh-plugin.com)（索引 <https://cdn.jsdelivr.net/npm/dsh-plugin-catalog/index.json>）与 [dshopen.org](https://dshopen.org)。本包发布并出现在此类索引之后，添加索引 URL 即可从 Discover 安装，或继续使用上面的 CLI 命令。
+
+## 环境与兼容性
+
+- **DSH 0.2.2-rc.1** 已验证；`engines.dsh: ^0.2.2-alpha.3` 会在安装/启用前检查，不兼容的运行时被拒绝，而不是半支持运行。
+- Host 半部需要 **Node.js ≥ 20**。
+- **Web 界面**——浏览器半部通过 DSH 客户端模块加载器与 `shell.overlay`、`settings.section`、`contextMenu.*` 扩展点注册。
+- **macOS（`darwin`）、Linux 与 Windows（`win32`）**——`dsh.bundle.platforms: ["darwin", "linux", "win32"]`。Windows 上使用盘符根与反斜杠路径：盘符根（`C:\`）、系统目录（`C:\Windows`、`Program Files`、`ProgramData`）与家目录的上级都受保护，路径比较按不区分大小写处理，目录层级按「相对盘符根的段数」计算，因此 `C:\proj` 与 `/proj` 一样被视为顶层目录而拒绝。映射为符号链接的 junction 与符号链接同等拒绝。POSIX 专属的权限用例在 Windows 上跳过。
+- **本地文件系统路径**——不感知远程或非本地文件系统提供者。回收站必须与目标在同一卷，否则一律拒绝并提示改用永久删除。
+
+## 语言
+
+插件界面文案（设置页、复核弹窗、菜单、通知）只提供**简体中文与英文**。DSH 0.2.2-rc.1 另内置日语、西班牙语、法语、德语、俄语、巴西葡萄牙语；在这些界面语言下，本插件回落为英文，不会展示未翻译或机翻内容。插件管理器显示元数据（`locale/*.json`）保留**八种语言**。
+
+长文详情以**中文为默认文档**（即本文），英文版见 [DETAIL.en.md](https://github.com/xiaoyangren6514/dsh-cleanup/blob/main/docs/DETAIL.en.md)：中文界面读本文，英文界面读英文版，未单独翻译的语言读中文默认文档。
+
+## 隐私
+
+插件完全在本地工作：
+
+- 不发起对外网络请求，无遥测、无分析、无远程同步；浏览器半部只调用同源的本地 Host API。
+- 只读取 Host 已经在管理的路径（工作区目录、会话日志、自己的回收站与状态文件），只写入 `<DSH_HOME>/trash/dsh-cleanup/` 与 `<DSH_HOME>/cleanup/`。
+- 不读写 DSH 自身配置、不修改 profile 的 `cordis.patch.yml`、不把会话内容发送到任何地方。
+- Git 安全检查只读执行本地 `git` 并仅报告计数；可在清理设置里关闭；Git 不存在、目录不是仓库或探测超时时静默跳过。
+
+## 相关链接
+
+- [README](https://github.com/xiaoyangren6514/dsh-cleanup/blob/main/README.zh.md)
+- [使用与故障排查 FAQ](https://github.com/xiaoyangren6514/dsh-cleanup/blob/main/docs/FAQ.md)
+- [冻结契约 SPEC](https://github.com/xiaoyangren6514/dsh-cleanup/blob/main/SPEC.md)
+- [问题反馈](https://github.com/xiaoyangren6514/dsh-cleanup/issues)
+
+## 许可证
+
+MIT © 2026 fly。见 [LICENSE](https://github.com/xiaoyangren6514/dsh-cleanup/blob/main/LICENSE)。

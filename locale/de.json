@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Speicher bereinigen",
+    "description": "Arbeitsbereichsordner und Sitzungsprotokolle löschen – mit Prüfschritt und standardmäßig wiederherstellbarem Papierkorb.",
+    "detail": "docs/DETAIL.md"
+  }
+}
