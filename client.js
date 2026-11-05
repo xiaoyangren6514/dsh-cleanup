@@ -68,6 +68,11 @@ window.__ModuleLoader__.load({
     const CLEAR_BATCH_TARGETS = 64
     const CLEAR_CANDIDATE_LIMIT = 500
     const CLEAR_MAX_ROUNDS = 40
+    /**
+     * A clear re-reads the workspace when a batch plan hits a target that vanished outside this
+     * run (`UNKNOWN_SESSION`). The bound keeps a misbehaving/looping Host from walking forever.
+     */
+    const CLEAR_RESYNC_MAX = 2
     /** Debounce before re-asking the Host for candidate rows. */
     const WIZARD_DEBOUNCE_MS = 300
     /** Client-side bounds mirroring SPEC §4.9. */
@@ -381,6 +386,7 @@ window.__ModuleLoader__.load({
       'dialog.select.invert': '反选',
       'dialog.select.required': '请至少选择一个目标',
       'dialog.select.excluded': '已取消选择，不会删除',
+      'dialog.select.pending': '重新规划中…',
       'dialog.groups.show': '展开',
       'dialog.groups.hide': '收起',
       'dialog.groups.descendants_one': '{count} 个子代理会话',
@@ -404,10 +410,12 @@ window.__ModuleLoader__.load({
       'dialog.mode.perm': '永久删除（不可恢复）',
       'dialog.mode.permDisabled': '当前配置已禁用永久删除',
       'dialog.mode.permMulti': '每份计划只能永久删除一个工作区目录；批量删除请选择回收站模式。',
+      'dialog.mode.permAutoTrash': '永久删除一次只允许一个工作区目录；已自动改为移入回收站。',
       'dialog.mode.trashHint': '目标会移动到回收站，之后可在“存储清理 → 回收站”中恢复。',
       'dialog.mode.permHint': '永久删除不进入回收站，无法撤销，请确认已经备份。',
       'dialog.includeSessions': '同时删除该目录内的会话记录',
       'dialog.includeDescendants': '同时删除子代理会话',
+      'dialog.descendants.autoOff': '已自动关闭「同时删除子代理会话」：取消勾选的子代理会话必须保留。重新勾选该行后可再开启。',
       'dialog.confirm.label': '请输入文件夹名称“{name}”以确认永久删除',
       'dialog.confirm.placeholder': '文件夹名称',
       'dialog.confirm.mismatch': '输入的文件夹名称不匹配',
@@ -420,6 +428,7 @@ window.__ModuleLoader__.load({
       'dialog.item.meta': '{size} · {files} · {dirs}',
       'dialog.item.metaFiles': '{size} · {files}',
       'dialog.totals': '合计 {size} · {files} · {dirs}',
+      'dialog.totalsRefreshing': '正在重新计算复核结果…',
       'dialog.expires': '本次检查结果在 {time} 前有效',
       'dialog.blocker.hint': '请先处理上面的问题，然后重试。',
       'dialog.blocker.sessionHeld.title': '本次启动内无法删除',
@@ -463,6 +472,8 @@ window.__ModuleLoader__.load({
       'dialog.clear.review_other': '“{title}”共有 {count} 条会话记录；本次复核前 {batch} 条，确认后自动分批处理其余部分。',
       'dialog.clear.reviewEmpty_one': '“{title}”共有 {count} 条会话记录；在上方勾选要清空的会话，再确认。',
       'dialog.clear.reviewEmpty_other': '“{title}”共有 {count} 条会话记录；在上方勾选要清空的会话，再确认。',
+      'dialog.clear.reviewLogs_one': '本次复核包含 {count} 条日志（含子代理会话）。',
+      'dialog.clear.reviewLogs_other': '本次复核包含 {count} 条日志（含子代理会话）。',
       'dialog.clear.scope': '只删除会话记录，工作区目录与它的注册信息保持不变。',
       'dialog.clear.skipped_one': '另有 {count} 条正在本次启动中使用，无法立即删除，将被跳过；重启 DSH 后可再次清空。',
       'dialog.clear.skipped_other': '另有 {count} 条正在本次启动中使用，无法立即删除，将被跳过；重启 DSH 后可再次清空。',
@@ -486,7 +497,7 @@ window.__ModuleLoader__.load({
       'menu.deleteSession': '删除会话…',
       'menu.deleteWorkspace': '删除工作区目录…',
       'menu.clearWorkspaceSessions': '清空工作区会话…',
-      'menu.clearWorkspaceSessions.failed': '无法读取该工作区的会话列表，请稍后重试。',
+      'menu.clearWorkspaceSessions.failed': '无法识别该工作区的菜单目标，请刷新后重试。',
       'warn.WORKSPACE_MISSING': '工作区目录已不存在，只会删除注册信息。',
       'warn.WORKSPACE_HAS_GIT': '目录包含 .git，未提交的改动会一起丢失。',
       'warn.SCAN_TRUNCATED': '已达到扫描上限，显示的大小只是下限。',
@@ -532,6 +543,7 @@ window.__ModuleLoader__.load({
       'error.PATH_CHANGED': '该目录已被移动或替换，请刷新后重试。',
       'error.CONTAINS_DSH_HOME': '该目录包含 DSH 主目录，已拒绝删除。',
       'error.IO_ERROR': '文件系统操作失败，请稍后重试。',
+      'error.UNCHECKED_TARGET_LEAK': '有已取消勾选的目标仍会被删除，已停止本次操作；请刷新后重试。',
       'error.INTERNAL': '服务器内部错误，请重试。',
       'error.DEFERRED_FULL': '待删除安排已满，请先取消一些后再试。',
       'error.DEFERRED_BUSY': '另一个进程正在更新或执行待删除队列，请稍后重试。',
@@ -813,6 +825,7 @@ window.__ModuleLoader__.load({
       'dialog.select.invert': 'Invert',
       'dialog.select.required': 'Select at least one target',
       'dialog.select.excluded': 'Not selected — nothing is deleted',
+      'dialog.select.pending': 'Re-planning…',
       'dialog.groups.show': 'Show',
       'dialog.groups.hide': 'Hide',
       'dialog.groups.descendants_one': '{count} subagent session',
@@ -836,10 +849,12 @@ window.__ModuleLoader__.load({
       'dialog.mode.perm': 'Delete permanently (irrecoverable)',
       'dialog.mode.permDisabled': 'Permanent deletion is disabled in this configuration',
       'dialog.mode.permMulti': 'One workspace folder per plan for permanent deletion; use the trash mode for batches.',
+      'dialog.mode.permAutoTrash': 'Permanent deletion accepts one workspace folder at a time; switched to trash.',
       'dialog.mode.trashHint': 'The target moves to the trash and can be restored later from Storage cleanup → Trash.',
       'dialog.mode.permHint': 'Permanent deletion skips the trash and cannot be undone; make sure the target is backed up.',
       'dialog.includeSessions': 'Also delete session logs inside this folder',
       'dialog.includeDescendants': 'Also delete its subagent sessions',
+      'dialog.descendants.autoOff': '“Also delete its subagent sessions” was turned off automatically: an un-checked subagent session must be kept. Re-check that row to enable it again.',
       'dialog.confirm.label': 'Type the folder name "{name}" to confirm permanent deletion',
       'dialog.confirm.placeholder': 'Folder name',
       'dialog.confirm.mismatch': 'The folder name does not match',
@@ -852,6 +867,7 @@ window.__ModuleLoader__.load({
       'dialog.item.meta': '{size} · {files} · {dirs}',
       'dialog.item.metaFiles': '{size} · {files}',
       'dialog.totals': 'Total {size} · {files} · {dirs}',
+      'dialog.totalsRefreshing': 'Recalculating the review…',
       'dialog.expires': 'This check is valid until {time}',
       'dialog.blocker.hint': 'Resolve the issues above, then try again.',
       'dialog.blocker.sessionHeld.title': 'Cannot be deleted in this app run',
@@ -895,6 +911,8 @@ window.__ModuleLoader__.load({
       'dialog.clear.review_other': "“{title}” holds {count} session logs; this review covers the first {batch}, and confirming clears the rest batch by batch.",
       'dialog.clear.reviewEmpty_one': "“{title}” holds {count} session log; check the ones to clear above, then confirm.",
       'dialog.clear.reviewEmpty_other': "“{title}” holds {count} session logs; check the ones to clear above, then confirm.",
+      'dialog.clear.reviewLogs_one': 'This review covers {count} session log (including subagent sessions).',
+      'dialog.clear.reviewLogs_other': 'This review covers {count} session logs (including subagent sessions).',
       'dialog.clear.scope': 'Only the session logs are deleted; the workspace folder and its registration stay as they are.',
       'dialog.clear.skipped_one': '{count} more is in use in this app run and is skipped; run the clear again after restarting DSH.',
       'dialog.clear.skipped_other': '{count} more are in use in this app run and are skipped; run the clear again after restarting DSH.',
@@ -918,7 +936,7 @@ window.__ModuleLoader__.load({
       'menu.deleteSession': 'Delete session…',
       'menu.deleteWorkspace': 'Delete workspace folder…',
       'menu.clearWorkspaceSessions': 'Clear workspace sessions…',
-      'menu.clearWorkspaceSessions.failed': "Could not read this workspace’s session list; try again later.",
+      'menu.clearWorkspaceSessions.failed': 'Could not resolve this workspace menu target; refresh and try again.',
       'warn.WORKSPACE_MISSING': 'The workspace folder no longer exists; only the registration will be removed.',
       'warn.WORKSPACE_HAS_GIT': 'The folder contains .git, so uncommitted work will be lost.',
       'warn.SCAN_TRUNCATED': 'The scan budget was reached; the shown size is a lower bound.',
@@ -964,6 +982,7 @@ window.__ModuleLoader__.load({
       'error.PATH_CHANGED': 'The folder was moved or replaced. Refresh and try again.',
       'error.CONTAINS_DSH_HOME': 'This folder contains the DSH home directory; deletion is refused.',
       'error.IO_ERROR': 'A file system operation failed. Try again later.',
+      'error.UNCHECKED_TARGET_LEAK': 'A target you un-checked would still be deleted, so the operation stopped; refresh and try again.',
       'error.INTERNAL': 'The server hit an internal error. Try again.',
       'error.DEFERRED_FULL': 'The scheduled-deletion queue is full. Cancel some entries and try again.',
       'error.DEFERRED_BUSY': 'Another process is updating or applying the deferred queue. Try again in a moment.',
@@ -1166,6 +1185,11 @@ window.__ModuleLoader__.load({
       const value = typeof id === 'string' ? id : ''
       if (value.length <= 10) return value
       return value.slice(value.length - 8)
+    }
+
+    /** Turn an arbitrary target/session key into a DOM-id-safe fragment. */
+    function domIdSafe(value) {
+      return String(value ?? '').replace(/[^a-zA-Z0-9_-]/g, '-')
     }
 
     function isAbortError(error) {
@@ -2399,8 +2423,9 @@ window.__ModuleLoader__.load({
     /** Request body for `POST api/cleanup.defer` (task-9 protocol). */
     function deferRequestBody(state, plan) {
       // The reviewed plan is the authority: `state.targets` holds every row the dialog can show,
-      // while the checkboxes may have narrowed what is actually planned (SPEC §9).
-      const planned = plan && Array.isArray(plan.targets) && plan.targets.length > 0 ? plan.targets : state.targets
+      // while the checkboxes may have narrowed what is actually planned. A plan without targets is
+      // unreadable, never a reason to fall back to rows the user un-checked (SPEC §9).
+      const planned = plan && Array.isArray(plan.targets) ? plan.targets : []
       const body = {
         targets: planned.map(function (target) { return { kind: target.kind, id: target.id } }),
         mode: state.mode === 'permanent' ? 'permanent' : 'trash',
@@ -2624,7 +2649,7 @@ window.__ModuleLoader__.load({
       const files = plural(t, 'count.file', item ? item.files : 0)
       const dirs = plural(t, 'count.dir', item ? item.dirs : 0)
       const meta = item === null
-        ? t('dialog.select.excluded')
+        ? t(context.pending === true ? 'dialog.select.pending' : 'dialog.select.excluded')
         : (isWorkspace
           ? t('dialog.item.meta', { size: sizeText, files: files, dirs: dirs })
           : t('dialog.item.metaFiles', { size: sizeText, files: files }))
@@ -2665,15 +2690,16 @@ window.__ModuleLoader__.load({
           type: 'button',
           className: 'dsh-cleanup-target-more',
           'aria-expanded': context.expanded ? 'true' : 'false',
+          'aria-controls': context.listId,
           disabled: context.disabled,
           onClick: context.onToggleExpanded,
         },
           (context.expanded ? t('dialog.groups.hide') : t('dialog.groups.show')) + ' · ' + plural(t, context.summaryKey, items.length),
         ),
-        context.expanded
-          ? h('div', { className: 'dsh-cleanup-target-child-list' },
-            items.map(function (item) { return renderPlanItem(t, item, context.catalog) }))
-          : null,
+        h('div', { id: context.listId, className: 'dsh-cleanup-target-child-list' },
+          context.expanded
+            ? items.map(function (item) { return renderPlanItem(t, item, context.catalog) })
+            : null),
       )
     }
 
@@ -2795,6 +2821,9 @@ window.__ModuleLoader__.load({
               group: group,
               selectable: selectable,
               checked: selectable ? selection[groupKey] === true : true,
+              // A row can be checked while the plan in flight still lacks its item: show a pending
+              // state instead of the "not selected" copy that would contradict the checkbox.
+              pending: state.refreshing === true && selection[groupKey] === true && group.main === null,
               disabled: disabled,
               onToggle: context.onToggleSelection,
             }),
@@ -2802,6 +2831,7 @@ window.__ModuleLoader__.load({
               t: t,
               catalog: catalog,
               items: rideAlong,
+              listId: 'dsh-cleanup-target-kids-' + domIdSafe(groupKey),
               summaryKey: isWorkspace ? 'dialog.groups.swept' : 'dialog.groups.descendants',
               expanded: context.expandedGroups[groupKey] === true,
               disabled: disabled,
@@ -2824,13 +2854,18 @@ window.__ModuleLoader__.load({
             h('span', null, t('dialog.includeDescendants')),
           )
           : null,
-        plan === null
-          ? null
-          : h('div', { className: 'dsh-cleanup-totals' }, t('dialog.totals', {
-            size: formatBytes(typeof totals.bytes === 'number' ? totals.bytes : 0),
-            files: plural(t, 'count.file', totals.files),
-            dirs: plural(t, 'count.dir', totals.dirs),
-          })),
+        state.descendantsAutoOff === true && state.clear === null
+          ? h('div', { className: 'dsh-cleanup-muted', key: 'descendants-auto-off' }, t('dialog.descendants.autoOff'))
+          : null,
+        state.refreshing === true
+          ? h('div', { className: 'dsh-cleanup-muted', key: 'totals-refreshing' }, t('dialog.totalsRefreshing'))
+          : (plan === null
+            ? null
+            : h('div', { className: 'dsh-cleanup-totals' }, t('dialog.totals', {
+              size: formatBytes(typeof totals.bytes === 'number' ? totals.bytes : 0),
+              files: plural(t, 'count.file', totals.files),
+              dirs: plural(t, 'count.dir', totals.dirs),
+            }))),
         plan !== null && typeof plan.expiresAt === 'number'
           ? h('div', { className: 'dsh-cleanup-muted' }, t('dialog.expires', { time: formatTime(plan.expiresAt) || t('common.none') }))
           : null,
@@ -2909,6 +2944,12 @@ window.__ModuleLoader__.load({
           }),
         ),
         h('div', { className: 'dsh-cleanup-muted' }, t(state.mode === 'permanent' ? 'dialog.mode.permHint' : 'dialog.mode.trashHint')),
+        state.modeNotice === true
+          ? h('div', { className: 'dsh-cleanup-notice', key: 'mode-notice' },
+            h('span', { className: 'dsh-cleanup-notice-mark', 'aria-hidden': 'true' }, 'i'),
+            h('span', null, t('dialog.mode.permAutoTrash')),
+          )
+          : null,
       ))
 
       if (hasWorkspaceTarget) {
@@ -2949,7 +2990,7 @@ window.__ModuleLoader__.load({
     const DONE_TRASHED_PATHS_MAX = 4
 
     /**
-     * Review-time explanation for a workspace clear (SPEC §7 item 6): how many Session logs the
+     * Review-time explanation for a workspace clear (SPEC §7 item 5): how many Session logs the
      * workspace holds, that this review covers the first batch, and what is kept.
      */
     function renderClearReviewNote(t, state) {
@@ -2977,6 +3018,14 @@ window.__ModuleLoader__.load({
       }
       if (excluded > 0) {
         children.push(h('div', { className: 'dsh-cleanup-muted', key: 'excluded' }, plural(t, 'dialog.clear.excluded', excluded)))
+      }
+      // The batch is counted in root Sessions, but one plan item can expand into subagent logs; say
+      // what the review really covers instead of implying the two numbers are the same.
+      const plan = state.plan && typeof state.plan === 'object' ? state.plan : null
+      const planItems = plan && Array.isArray(plan.items) ? plan.items.length : 0
+      const plannedRoots = plan && Array.isArray(plan.targets) ? plan.targets.length : 0
+      if (planItems > plannedRoots && planItems > 0) {
+        children.push(h('div', { className: 'dsh-cleanup-muted', key: 'logs' }, plural(t, 'dialog.clear.reviewLogs', planItems)))
       }
       return h('div', {
         className: 'dsh-cleanup-clear-note',
@@ -3146,6 +3195,9 @@ window.__ModuleLoader__.load({
       // what this reviewed plan will delete (its plan items), and state the Host
       // queue size separately.
       const planItemCount = planItems.length > 0 ? planItems.length : Math.max(1, targets.length)
+      // `clear.total` counts root Sessions; the plan's items may also include subagent logs, so the
+      // remaining count must be measured against the reviewed root targets, not the item count.
+      const plannedRoots = Array.isArray(plan.targets) && plan.targets.length > 0 ? plan.targets.length : Math.max(1, targets.length)
       const queueCount = typeof deferred.count === 'number' && isFinite(deferred.count) && deferred.count > 0
         ? Math.floor(deferred.count)
         : 1
@@ -3161,9 +3213,9 @@ window.__ModuleLoader__.load({
       }
       // A clear that could only queue part of the workspace says so, so nobody thinks the rest went too.
       const clear = state.clear && typeof state.clear === 'object' ? state.clear : null
-      if (clear !== null && typeof clear.total === 'number' && clear.total > planItemCount) {
+      if (clear !== null && typeof clear.total === 'number' && clear.total > plannedRoots) {
         children.push(h('div', { className: 'dsh-cleanup-muted', key: 'clear-more' },
-          plural(t, 'dialog.clear.deferredMore', clear.total - planItemCount)))
+          plural(t, 'dialog.clear.deferredMore', clear.total - plannedRoots)))
       }
       children.push(h('div', { className: 'dsh-cleanup-muted', key: 'note' }, t('dialog.deferred.note')))
       return h('div', {
@@ -3331,7 +3383,16 @@ window.__ModuleLoader__.load({
           if (surface === 'settings') {
             // Only a sheet-hosted review dies with the sheet; an overlay review opened while the sheet
             // happened to be open belongs to the other copy and must survive it.
-            if (api.dialogStore.getSnapshot().surface === 'settings') api.closeDialog()
+            const snapshot = api.dialogStore.getSnapshot()
+            if (snapshot.surface !== 'settings') return
+            // A delete already on the wire is not cancelled by closing the sheet: its result would be
+            // lost while the Host keeps executing. Keep the state (and its summary) so re-opening the
+            // page shows it; a clean result must not be dropped by the dwell timer in the meantime.
+            if (snapshot.phase === 'deleting' || snapshot.phase === 'deferring') {
+              api.dialogStore.setState({ keepSummary: true })
+              return
+            }
+            api.closeDialog()
             return
           }
           api.disposeDialog()
@@ -4321,6 +4382,7 @@ window.__ModuleLoader__.load({
       function renderSessionNode(session) {
         const children = childrenByParent[session.id] || []
         const expanded = expandedSessions[session.id] === true
+        const childListId = 'dsh-cleanup-session-kids-' + domIdSafe(session.id)
         return h('div', { className: 'dsh-cleanup-session-group', key: session.id },
           renderSessionRow(session),
           children.length > 0
@@ -4329,11 +4391,13 @@ window.__ModuleLoader__.load({
                 type: 'button',
                 className: 'dsh-cleanup-target-more',
                 'aria-expanded': expanded ? 'true' : 'false',
+                'aria-controls': childListId,
                 onClick: function () { toggleSessionGroup(session.id) },
               }, (expanded ? t('dialog.groups.hide') : t('dialog.groups.show')) + ' · ' + plural(t, 'dialog.groups.descendants', children.length)),
-              expanded
-                ? h('div', { className: 'dsh-cleanup-target-child-list' }, children.map(function (child) { return renderSessionNode(child) }))
-                : null,
+              h('div', { id: childListId, className: 'dsh-cleanup-target-child-list' },
+                expanded
+                  ? children.map(function (child) { return renderSessionNode(child) })
+                  : null),
             )
             : null,
         )
@@ -4584,7 +4648,10 @@ window.__ModuleLoader__.load({
               h(Sep, null),
               h('span', { className: 'dsh-cleanup-size' }, formatBytes(entry.bytes)),
               typeof entry.parentSessionId === 'string' && entry.parentSessionId !== ''
-                ? h('span', { className: 'dsh-cleanup-muted' }, t('trash.parentSession', { id: shortId(entry.parentSessionId) }))
+                ? h('span', {
+                  className: 'dsh-cleanup-muted',
+                  title: entry.parentSessionId,
+                }, t('trash.parentSession', { id: shortId(entry.parentSessionId) }))
                 : null,
               restoreNote ? h('span', { className: 'dsh-cleanup-muted' }, restoreNote) : null,
             ),
@@ -5939,12 +6006,12 @@ window.__ModuleLoader__.load({
 
       /**
        * True when the plan brings back a reviewed row the user un-checked. The Host expands every
-       * checked Session into its subagent closure, so a checked parent can smuggle an explicitly
-       * removed row back in; the checkbox is authoritative, so the plan is redone without
-       * descendants instead (SPEC §9).
+       * checked Session into its subagent closure, and a workspace target sweeps the Sessions
+       * inside its folder, so either can smuggle an explicitly removed row back in. The checkbox is
+       * authoritative: the first fallback drops descendant expansion, and a plan that still leaks
+       * is refused instead of deleting an un-checked target (SPEC §9).
        */
       function planLeaksUncheckedTargets(plan, state) {
-        if (state.includeDescendants !== true) return false
         const checked = {}
         for (let i = 0; i < state.selection.length; i += 1) checked[state.selection[i]] = true
         const items = plan && Array.isArray(plan.items) ? plan.items : []
@@ -5960,6 +6027,15 @@ window.__ModuleLoader__.load({
         return false
       }
 
+      /** Count workspace targets in the checked subset. */
+      function plannedWorkspaceTargets(planned) {
+        let count = 0
+        for (let i = 0; i < planned.length; i += 1) {
+          if (planned[i] && planned[i].kind === 'workspace') count += 1
+        }
+        return count
+      }
+
       function startPlan() {
         const state = dialogStore.getSnapshot()
         if (state.phase === 'idle' || state.targets.length === 0) return
@@ -5968,6 +6044,14 @@ window.__ModuleLoader__.load({
           // Every row is un-checked: drop the stale plan so the review renders the empty selection
           // (with its "select at least one" hint) instead of numbers for targets the user removed.
           dialogStore.setState({ plan: null, refreshing: false, error: null, failureStage: null })
+          return
+        }
+        if (state.mode === 'permanent' && plannedWorkspaceTargets(planned) > 1) {
+          // The Host refuses a permanent plan over several directories. The selection can grow after
+          // the user narrowed it, so re-validate the real planned set here and fall back to trash
+          // with an explanation instead of sending a plan that can only fail (SPEC §9).
+          dialogStore.setState({ mode: 'trash', typed: '', modeNotice: true })
+          startPlan()
           return
         }
         const handle = beginDialogFetch()
@@ -6000,9 +6084,21 @@ window.__ModuleLoader__.load({
             return
           }
           if (planLeaksUncheckedTargets(plan, state)) {
-            // Drop descendant expansion and plan again: the un-checked row must stay on disk.
-            dialogStore.setState({ includeDescendants: false })
-            startPlan()
+            if (state.includeDescendants === true) {
+              // Drop descendant expansion and plan again: the un-checked row must stay on disk.
+              dialogStore.setState({ includeDescendants: false, descendantsAutoOff: true })
+              startPlan()
+              return
+            }
+            // Even without descendants the Host's plan still contains a target the user removed
+            // (for example a folder sweep). Refuse to delete it: fail closed instead of ignoring the
+            // checkbox (SPEC §9).
+            dialogStore.setState({
+              phase: 'failed',
+              refreshing: false,
+              failureStage: 'plan',
+              error: { code: 'UNCHECKED_TARGET_LEAK' },
+            })
             return
           }
           dialogStore.setState({
@@ -6024,6 +6120,12 @@ window.__ModuleLoader__.load({
       function openDialog(rawTargets, options) {
         const targets = normalizeTargets(rawTargets)
         if (targets.length === 0) return
+        // A workspace clear owns the dialog until it settles, and no review may replace one whose
+        // delete/queue request is on the wire: closing it would abort the request and drop its result
+        // (SPEC §9).
+        const current = dialogStore.getSnapshot()
+        if (current.clear !== null && current.phase !== 'idle') return
+        if (current.phase === 'deleting' || current.phase === 'deferring') return
         const surface = options && options.surface === 'settings' ? 'settings' : 'overlay'
         const active = typeof document !== 'undefined' ? document.activeElement : null
         const activeIsBody = typeof document !== 'undefined' && active === document.body
@@ -6041,7 +6143,7 @@ window.__ModuleLoader__.load({
 
       // ------------------------------------------------ workspace session clear
 
-      /** Fresh bookkeeping for one "清空工作区会话…" run (SPEC §7 item 6). */
+      /** Fresh bookkeeping for one "清空工作区会话…" run (SPEC §7 item 5). */
       function initialClearState(workspace) {
         return {
           workspaceId: workspace.id,
@@ -6050,6 +6152,10 @@ window.__ModuleLoader__.load({
           total: 0,
           deletable: 0,
           skipped: 0,
+          /** `kind:id` keys already counted in `skipped`; a refilled page may repeat them. */
+          skippedKeys: {},
+          /** `UNKNOWN_SESSION` queue rebuilds already attempted for this clear. */
+          resyncs: 0,
           /** `kind:id` keys the user un-checked; they must never reappear in a later batch. */
           excluded: {},
           /** Targets waiting for their own batch; the batch in flight lives in `targets`. */
@@ -6089,6 +6195,27 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * Fold one candidates page's in-use rows into the clear's running count without double
+       * counting: the same live Session reappears on every refilled page until the app restarts
+       * (SPEC §9).
+       * @param {object} clear - current clear bookkeeping.
+       * @param {object[]} skippedTargets - rows this page reported as not deletable.
+       * @returns {{ skipped: number, skippedKeys: Record<string, boolean>, added: number }}
+       */
+      function absorbSkipped(clear, skippedTargets) {
+        const keys = Object.assign({}, clear && clear.skippedKeys && typeof clear.skippedKeys === 'object' ? clear.skippedKeys : {})
+        let added = 0
+        for (let i = 0; i < skippedTargets.length; i += 1) {
+          const key = targetKey(skippedTargets[i])
+          if (keys[key] === true) continue
+          keys[key] = true
+          added += 1
+        }
+        const previous = typeof clear?.skipped === 'number' ? clear.skipped : 0
+        return { skipped: previous + added, skippedKeys: keys, added: added }
+      }
+
+      /**
        * True when every skipped row waits only on this app run (an open or running Session). Those
        * rows cannot be deleted now but can be queued for the next start, so the clear offers that
        * route instead of a dead end.
@@ -6119,12 +6246,17 @@ window.__ModuleLoader__.load({
 
       /**
        * Context-menu entry "清空工作区会话…": pre-flight the workspace, then open the ordinary
-       * review on its first batch. Resolves `{ ok, empty?, total? }` so the caller can report an
-       * empty or failed pre-flight in a toast instead of flashing an empty dialog.
+       * review on its first batch. The dialog always opens (an empty or failed pre-flight is shown
+       * inside it); the resolved `{ ok, empty?, total? }` only lets the caller answer a malformed
+       * menu target with a toast.
        */
       function openWorkspaceClear(workspace) {
         const workspaceId = workspace && typeof workspace.id === 'string' ? workspace.id : ''
         if (workspaceId === '') return Promise.resolve({ ok: false, reason: 'badTarget' })
+        // A clear already in progress owns the dialog (its folded totals and queue would be lost if a
+        // second context-menu action reset the store mid-walk).
+        const running = dialogStore.getSnapshot()
+        if (running.clear !== null && running.phase !== 'idle') return Promise.resolve({ ok: false, reason: 'busy' })
         const active = typeof document !== 'undefined' ? document.activeElement : null
         const activeIsBody = typeof document !== 'undefined' && active === document.body
         returnFocus = active && !activeIsBody && typeof active.focus === 'function' ? active : null
@@ -6165,6 +6297,7 @@ window.__ModuleLoader__.load({
           }
           const picked = clearTargetsFrom(envelope.candidates, clear.excluded)
           const total = typeof envelope.total === 'number' && envelope.total >= 0 ? envelope.total : envelope.candidates.length
+          const absorbed = absorbSkipped(clear, picked.skippedTargets)
           if (picked.targets.length === 0) {
             if (picked.skippedTargets.length > 0 && skippedRowsWaitForRestart(envelope.candidates)) {
               // Every log waits only on this app run: show them with their blockers and offer the
@@ -6174,7 +6307,8 @@ window.__ModuleLoader__.load({
                 clear: Object.assign({}, dialogStore.getSnapshot().clear, {
                   total: total,
                   deletable: 0,
-                  skipped: picked.skipped,
+                  skipped: absorbed.skipped,
+                  skippedKeys: absorbed.skippedKeys,
                   queued: picked.skippedTargets.slice(CLEAR_BATCH_TARGETS),
                   truncated: false,
                 }),
@@ -6195,18 +6329,20 @@ window.__ModuleLoader__.load({
               clear: Object.assign({}, dialogStore.getSnapshot().clear, {
                 total: total,
                 deletable: 0,
-                skipped: picked.skipped,
+                skipped: absorbed.skipped,
+                skippedKeys: absorbed.skippedKeys,
                 stop: { code: 'empty', remaining: total },
               }),
             })
-            return { ok: true, empty: true, total: total, skipped: picked.skipped }
+            return { ok: true, empty: true, total: total, skipped: absorbed.skipped }
           }
           const current = dialogStore.getSnapshot()
           dialogStore.setState({
             clear: Object.assign({}, current.clear, {
               total: total,
               deletable: picked.targets.length,
-              skipped: picked.skipped,
+              skipped: absorbed.skipped,
+              skippedKeys: absorbed.skippedKeys,
               queued: picked.targets.slice(CLEAR_BATCH_TARGETS),
               truncated: envelope.truncated === true,
             }),
@@ -6318,12 +6454,28 @@ window.__ModuleLoader__.load({
         // back to a single-batch review (or closing the window and losing the summary).
         if (state.clear !== null) {
           if (state.clear.truncated === true && state.clear.rounds < CLEAR_MAX_ROUNDS) {
-            dialogStore.setState({ phase: 'deleting', failureStage: null, error: null, refreshing: false })
+            dialogStore.setState({
+              phase: 'deleting',
+              failureStage: null,
+              error: null,
+              refreshing: false,
+              clear: Object.assign({}, state.clear, { resyncs: 0 }),
+            })
             refillClearQueue()
             return
           }
           if (state.targets.length > 0) {
-            dialogStore.setState({ phase: 'deleting', failureStage: null, error: null, refreshing: false, deletingStartedAt: Date.now() })
+            // An explicit retry gets a fresh `UNKNOWN_SESSION` budget: the user asked to try again,
+            // so the walk may rebuild the queue a couple more times instead of dead-ending on the
+            // previous attempt's exhausted counter.
+            dialogStore.setState({
+              phase: 'deleting',
+              failureStage: null,
+              error: null,
+              refreshing: false,
+              deletingStartedAt: Date.now(),
+              clear: Object.assign({}, state.clear, { resyncs: 0 }),
+            })
             runClearBatch()
             return
           }
@@ -6360,7 +6512,7 @@ window.__ModuleLoader__.load({
           }
           if (workspaceTargets > 1) return
         }
-        dialogStore.setState({ mode: mode, typed: '' })
+        dialogStore.setState({ mode: mode, typed: '', modeNotice: false })
         startPlan()
       }
 
@@ -6438,7 +6590,7 @@ window.__ModuleLoader__.load({
         if (state.phase !== 'review' || state.refreshing === true) return
         if (state.clear !== null) return
         if (state.includeDescendants === (value === true)) return
-        dialogStore.setState({ includeDescendants: value === true, typed: '' })
+        dialogStore.setState({ includeDescendants: value === true, typed: '', descendantsAutoOff: false })
         startPlan()
       }
 
@@ -6467,6 +6619,10 @@ window.__ModuleLoader__.load({
         const state = dialogStore.getSnapshot()
         const plan = state.plan
         if (state.phase !== 'review' || state.refreshing === true || !plan) return
+        if (!Array.isArray(plan.targets) || plan.targets.length === 0) {
+          dialogStore.setState({ phase: 'failed', refreshing: false, failureStage: 'defer', error: { transport: 'badResponse' } })
+          return
+        }
         if (!planDeferrability(plan).canDefer) return
         const confirmation = isTypedConfirmation(plan.confirmation) ? plan.confirmation : null
         if (confirmation !== null && state.typed.trim() !== String(confirmation.expected)) return
@@ -6570,8 +6726,9 @@ window.__ModuleLoader__.load({
         notifyMutation()
         clearDoneTimer()
         // Only a fully successful result may dismiss itself; a result with failed items stays on
-        // screen (and in the live region) until the user explicitly closes it.
-        if (resultCounts(result).failed === 0) {
+        // screen (and in the live region) until the user explicitly closes it. A review preserved
+        // across a settings-sheet unmount stays until the user closes it too (SPEC §9).
+        if (resultCounts(result).failed === 0 && dialogStore.getSnapshot().keepSummary !== true) {
           doneTimer = setTimeout(function () {
             doneTimer = null
             if (dialogStore.getSnapshot().phase === 'done') closeDialog()
@@ -6581,6 +6738,19 @@ window.__ModuleLoader__.load({
 
       function failDelete(stage, error) {
         dialogStore.setState({ phase: 'failed', refreshing: false, failureStage: stage, error: error })
+      }
+
+      /** `kind:id` keys a delete result reports as removed from disk. */
+      function completedTargetKeys(result) {
+        const keys = Object.create(null)
+        const items = result && Array.isArray(result.items) ? result.items : []
+        for (let i = 0; i < items.length; i += 1) {
+          const item = items[i]
+          if (!item || typeof item.id !== 'string') continue
+          if (item.status !== 'trashed' && item.status !== 'deleted') continue
+          keys[String(item.kind) + ':' + item.id] = true
+        }
+        return keys
       }
 
       /**
@@ -6593,7 +6763,14 @@ window.__ModuleLoader__.load({
         const clear = state.clear
         if (clear === null) return
         const counts = resultCounts(result)
+        // A batch plan expands subagent descendants, so a batch can delete a log that is queued for
+        // a later batch. Prune those ids before the next plan: planning a vanished target fails the
+        // whole batch with UNKNOWN_SESSION (SPEC §9).
+        const completed = completedTargetKeys(result)
+        const queued = clear.queued.filter(function (target) { return completed[targetKey(target)] !== true })
         const next = Object.assign({}, clear, {
+          queued: queued,
+          resyncs: 0,
           done: {
             count: clear.done.count + counts.count,
             bytes: clear.done.bytes + counts.bytes,
@@ -6644,7 +6821,10 @@ window.__ModuleLoader__.load({
           clear: Object.assign({}, clear, { stop: stopCode === null ? null : { code: stopCode, remaining: remaining } }),
         })
         clearDoneTimer()
-        if (stopCode === null && clear.done.failed === 0) {
+        const excludedCount = clear.excluded && typeof clear.excluded === 'object' ? Object.keys(clear.excluded).length : 0
+        // Only a fully drained clear may dismiss itself. "Skipped", "excluded" or a stopped walk all
+        // mean the workspace is not empty, so the summary must stay until the user closes it (SPEC §9).
+        if (stopCode === null && clear.done.failed === 0 && clear.skipped === 0 && excludedCount === 0 && dialogStore.getSnapshot().keepSummary !== true) {
           doneTimer = setTimeout(function () {
             doneTimer = null
             if (dialogStore.getSnapshot().phase === 'done') closeDialog()
@@ -6652,8 +6832,32 @@ window.__ModuleLoader__.load({
         }
       }
 
-      /** Plan and execute the current batch without returning to the review state. */
+      /** True when a clear batch plan brings back a target the user un-checked earlier. */
+      function planLeaksExcludedTargets(plan, clear) {
+        if (!clear || typeof clear !== 'object') return false
+        const excluded = clear.excluded && typeof clear.excluded === 'object' ? clear.excluded : null
+        if (excluded === null) return false
+        const items = plan && Array.isArray(plan.items) ? plan.items : []
+        for (let i = 0; i < items.length; i += 1) {
+          const item = items[i]
+          if (!item || item.kind !== 'session' || typeof item.id !== 'string') continue
+          if (excluded['session:' + item.id] === true) return true
+        }
+        return false
+      }
+
+      /**
+       * Plan and execute the current batch without returning to the review state. The batch first
+       * asks for descendant expansion (a clear deletes every log); when that brings back a target the
+       * user un-checked in this batch, it re-plans without descendants once, and refuses if the target
+       * still leaks — a checkbox the user cleared must never be deleted by a later batch (SPEC §9).
+       */
       function runClearBatch() {
+        requestClearBatchPlan(true)
+      }
+
+      /** @param {boolean} includeDescendants - ask the Host for the subagent closure. */
+      function requestClearBatchPlan(includeDescendants) {
         const state = dialogStore.getSnapshot()
         if (state.clear === null || state.targets.length === 0) return
         const handle = beginDialogFetch()
@@ -6661,14 +6865,34 @@ window.__ModuleLoader__.load({
           targets: state.targets.map(function (target) { return { kind: target.kind, id: target.id } }),
           mode: state.mode,
           includeSessions: false,
-          includeDescendants: true,
+          includeDescendants: includeDescendants === true,
         }
         request(ROUTE.plan, body, handle.controller.signal).then(function (envelope) {
           if (!settleDialogFetch(handle)) return
           if (envelope.transport) { failDelete('plan', { transport: envelope.transport }); return }
-          if (envelope.ok !== true) { failDelete('plan', toApiError(envelope)); return }
+          if (envelope.ok !== true) {
+            const error = toApiError(envelope)
+            // A reviewed target can disappear outside this app run (another Host process, a second
+            // window). The Host refuses the whole plan for it, so rebuild the queue from fresh
+            // candidates instead of aborting the walk (SPEC §9).
+            if (error.code === 'UNKNOWN_SESSION' && state.clear !== null && state.clear.resyncs < CLEAR_RESYNC_MAX) {
+              resyncClearQueue()
+              return
+            }
+            failDelete('plan', error)
+            return
+          }
           const plan = envelope.plan
           if (!isPlan(plan)) { failDelete('plan', { transport: 'badResponse' }); return }
+          if (planLeaksExcludedTargets(plan, dialogStore.getSnapshot().clear)) {
+            if (includeDescendants) {
+              requestClearBatchPlan(false)
+              return
+            }
+            // Even without descendants the plan still contains an un-checked row: fail closed.
+            failDelete('plan', { code: 'UNCHECKED_TARGET_LEAK' })
+            return
+          }
           if (Array.isArray(plan.blockers) && plan.blockers.length > 0) {
             // A target became undeletable between batches: keep the plan for context and stop.
             dialogStore.setState({ plan: plan, refreshing: false })
@@ -6694,6 +6918,58 @@ window.__ModuleLoader__.load({
         })
       }
 
+      /**
+       * Recover a clear whose batch plan named a target that no longer exists: re-read the
+       * workspace, keep the exclusions and folded totals, and continue with a fresh queue. Bounded
+       * by CLEAR_RESYNC_MAX so a repeatedly failing Host cannot loop forever (SPEC §9).
+       */
+      function resyncClearQueue() {
+        const state = dialogStore.getSnapshot()
+        const clear = state.clear
+        if (clear === null) return
+        dialogStore.setState({ clear: Object.assign({}, clear, { resyncs: clear.resyncs + 1 }) })
+        const handle = beginDialogFetch()
+        request(ROUTE.candidates, clearCandidatesBody(clear), handle.controller.signal).then(function (envelope) {
+          if (!settleDialogFetch(handle)) return
+          if (envelope.transport) { failDelete('plan', { transport: envelope.transport }); return }
+          if (envelope.ok !== true) { failDelete('plan', toApiError(envelope)); return }
+          if (!Array.isArray(envelope.candidates)) { failDelete('plan', { transport: 'badResponse' }); return }
+          const current = dialogStore.getSnapshot().clear
+          if (current === null) return
+          const picked = clearTargetsFrom(envelope.candidates, current.excluded)
+          const absorbed = absorbSkipped(current, picked.skippedTargets)
+          const pageTotal = typeof envelope.total === 'number' && envelope.total >= 0 ? envelope.total : envelope.candidates.length
+          if (picked.targets.length === 0) {
+            dialogStore.setState({
+              targets: [],
+              plan: null,
+              refreshing: false,
+              clear: Object.assign({}, current, { skipped: absorbed.skipped, skippedKeys: absorbed.skippedKeys, queued: [] }),
+            })
+            settleClear(pageTotal > 0 && absorbed.added > 0 ? 'blocked' : null, pageTotal)
+            return
+          }
+          const nextBatch = picked.targets.slice(0, CLEAR_BATCH_TARGETS)
+          dialogStore.setState({
+            targets: nextBatch,
+            selection: nextBatch.map(targetKey),
+            plan: null,
+            refreshing: false,
+            clear: Object.assign({}, current, {
+              skipped: absorbed.skipped,
+              skippedKeys: absorbed.skippedKeys,
+              queued: picked.targets.slice(CLEAR_BATCH_TARGETS),
+              truncated: envelope.truncated === true,
+            }),
+          })
+          runClearBatch()
+        }).catch(function (error) {
+          if (isAbortError(error)) return
+          if (!settleDialogFetch(handle)) return
+          failDelete('plan', { transport: 'network' })
+        })
+      }
+
       /** Load the next candidates page after the queue drained mid-workspace. */
       function refillClearQueue() {
         const state = dialogStore.getSnapshot()
@@ -6706,12 +6982,14 @@ window.__ModuleLoader__.load({
           if (envelope.ok !== true) { failDelete('plan', toApiError(envelope)); return }
           if (!Array.isArray(envelope.candidates)) { failDelete('plan', { transport: 'badResponse' }); return }
           const picked = clearTargetsFrom(envelope.candidates, clear.excluded)
-          // A page that yields nothing deletable may still hold matches: all of them in use, or every
-          // row the user excluded. Report that instead of claiming the workspace is clear.
+          const absorbed = absorbSkipped(clear, picked.skippedTargets)
+          // A page that yields nothing deletable may still hold matches. Only rows not already counted
+          // as skipped mean the walk is actually blocked; a page that merely repeats known in-use
+          // Sessions is drained, and reporting it as blocked would double count them (SPEC §9).
           const pageTotal = typeof envelope.total === 'number' ? envelope.total : envelope.candidates.length
           if (picked.targets.length === 0) {
-            dialogStore.setState({ clear: Object.assign({}, clear, { skipped: clear.skipped + picked.skipped }) })
-            settleClear(pageTotal > 0 ? 'blocked' : null, pageTotal)
+            dialogStore.setState({ clear: Object.assign({}, clear, { skipped: absorbed.skipped, skippedKeys: absorbed.skippedKeys }) })
+            settleClear(absorbed.added > 0 && pageTotal > 0 ? 'blocked' : null, pageTotal)
             return
           }
           const nextBatch = picked.targets.slice(0, CLEAR_BATCH_TARGETS)
@@ -6722,7 +7000,8 @@ window.__ModuleLoader__.load({
             clear: Object.assign({}, clear, {
               queued: picked.targets.slice(CLEAR_BATCH_TARGETS),
               truncated: envelope.truncated === true,
-              skipped: clear.skipped + picked.skipped,
+              skipped: absorbed.skipped,
+              skippedKeys: absorbed.skippedKeys,
               rounds: clear.rounds + 1,
             }),
           })
@@ -7732,14 +8011,18 @@ window.__ModuleLoader__.load({
       function setSessionFilter(filter) {
         if (filter !== 'all' && filter !== 'archived' && filter !== 'active') return
         if (pageStore.getSnapshot().sessionFilter === filter) return
-        pageStore.setState({ sessionFilter: filter })
+        // Rows hidden by the new filter must not stay selected for a batch deletion the user can no
+        // longer see in the list; the review would show them, but clearing is the least surprising.
+        pageStore.setState({ sessionFilter: filter, selectedSessions: [] })
       }
 
       /** Workspace filter for the Sessions tab; a narrower list restarts paging. */
       function setSessionWorkspace(workspace) {
         const value = typeof workspace === 'string' ? workspace : SESSION_WORKSPACE_ANY
         if (pageStore.getSnapshot().sessionWorkspace === value) return
-        pageStore.setState({ sessionWorkspace: value, sessionLimit: SESSION_PAGE_SIZE })
+        // A selection made under the previous workspace filter must not leak into a batch deletion
+        // of the newly narrowed list (SPEC §10).
+        pageStore.setState({ sessionWorkspace: value, sessionLimit: SESSION_PAGE_SIZE, selectedSessions: [] })
       }
 
       /** The "show more" limit lives in the store, so a tab switch keeps it. */
@@ -8054,7 +8337,7 @@ window.__ModuleLoader__.load({
           })
         }, 'dsh-cleanup: workspace menu action')
 
-        // SPEC §7 item 6: clear every Session log of a workspace without touching its folder.
+        // SPEC §7 item 5: clear every Session log of a workspace without touching its folder.
         // The separator before this row groups both destructive actions at the bottom of the menu.
         ctx.effect(function () {
           return contextMenus.register({
@@ -8136,9 +8419,9 @@ window.__ModuleLoader__.load({
       }, 'dsh-cleanup: session catalog bridge')
 
       /**
-       * Context-menu entry "清空工作区会话…" (SPEC §7 item 6): pre-flight the workspace, then open
-       * the ordinary review on its first batch. An empty or failed pre-flight answers in a toast
-       * instead of flashing an empty dialog.
+       * Context-menu entry "清空工作区会话…" (SPEC §7 item 5): pre-flight the workspace, then open
+       * the ordinary review on its first batch. The dialog always opens (an empty or failed
+       * pre-flight is shown inside it); only a malformed menu target answers with a toast.
        */
       function clearWorkspaceSessions(target) {
         const workspace = {
@@ -8177,7 +8460,7 @@ window.__ModuleLoader__.load({
         // Which surface opened the review: `overlay` for the context menus, `settings` for
         // the storage-cleanup page. Only the matching copy of the dialog renders it.
         surface: 'overlay',
-        // Non-null while a workspace clear walks the workspace batch by batch (SPEC §7 item 6).
+        // Non-null while a workspace clear walks the workspace batch by batch (SPEC §7 item 5).
         clear: null,
         // Checked targets (`kind:id`). Only the checked ones are planned; the review can narrow
         // the selection before confirming, and a workspace clear keeps the pre-flight batch.
@@ -8193,6 +8476,15 @@ window.__ModuleLoader__.load({
         failureStage: null,
         result: null,
         deferred: null,
+        // A permanent review whose planned selection grew again falls back to trash; this notice
+        // explains the mode change instead of sending a plan the Host would refuse (SPEC §9).
+        modeNotice: false,
+        // The descendant switch was forced off because an un-checked subagent row must stay on
+        // disk; the review explains it next to the switch (SPEC §9).
+        descendantsAutoOff: false,
+        // The settings sheet unmounted while a delete/queue request was in flight. Keep the finished
+        // summary on screen when the page is reopened instead of letting the dwell timer drop it.
+        keepSummary: false,
         deletingStartedAt: null,
       }
     }

@@ -15,7 +15,7 @@ kind: "package-bundle"
 
 DSH itself only unregisters a workspace — the folder, its files, and its Session history stay on disk — and Sessions can only be archived, never deleted. `dsh-cleanup` fills that gap while keeping the destructive surface narrow: targets are addressed by DSH identity, never by arbitrary path; every deletion is planned, reviewed, and confirmed; and the default outcome is a recoverable trash.
 
-- Package: `dsh-cleanup` 0.4.0
+- Package: `dsh-cleanup` 0.5.0
 - Repository: <https://github.com/xiaoyangren6514/dsh-cleanup>
 - License: MIT © 2026 fly
 - Tested with: DSH 0.2.2-rc.1
@@ -27,6 +27,9 @@ DSH itself only unregisters a workspace — the folder, its files, and its Sessi
 | Delete a registered workspace folder (recursive) | Sidebar workspace right-click → **Delete workspace folder…** |
 | Delete a Session (with its subagent Session logs) | Sidebar Session right-click → **Delete Session…** |
 | Clear every Session log of a workspace (the folder and its registration stay) | Sidebar workspace right-click → **Clear workspace sessions…** |
+| Filter the Sessions list by workspace; subagent logs fold under the Session they belong to | Settings → Storage cleanup → Sessions |
+| Check individual review targets (a checkbox per target, plus **Select all** / **Invert**) | Review dialog |
+| Trash entries keep the subagent family: a `Subagent` badge and a `Parent` line | Settings → Storage cleanup → Trash |
 | Storage overview with sizes, bulk selection, sorting and archived filtering | Settings → **Storage cleanup** |
 | Recoverable trash with restore and explicit purge | Settings → Storage cleanup → **Trash** |
 | Deferral queue for Sessions open in the Host, executed at the next start | Review dialog → **Schedule deletion (runs automatically after this app exits)**; manage it in Settings |
@@ -36,6 +39,14 @@ DSH itself only unregisters a workspace — the folder, its files, and its Sessi
 | Read-only agent inspection of cleanable Sessions and folders | Tool `cleanup_inventory` |
 
 **Deletion is a user action.** The only agent-facing surface is a read-only inventory tool: the model can report what exists, how large it is, and why something is blocked, but it has no way to delete anything.
+
+### The review dialog and per-row selection
+
+The review dialog groups the plan by *reviewed target*: one row per Session or workspace, with its subagent logs (or the Sessions swept in by a folder) collapsed underneath. Every row always carries a checkbox — a single-target review included — and rows can be checked one by one or through **Select all** / **Invert**; only checked targets enter the plan, un-checking re-plans with the remaining targets, and an empty selection keeps every row on screen with "Select at least one target" and a disabled destructive button. While a re-plan is in flight, checked rows that are not in the new plan yet read "Re-planning…" and the totals area reads "Recalculating the review…", so the previous plan is never presented as current. Permanent deletion accepts one workspace folder per plan: a selection change that crosses that limit switches back to trash with an explanation instead of sending a plan the Host would refuse. If a re-plan still contains an un-checked target (for example one swept back in by a workspace folder), the client fails closed with `UNCHECKED_TARGET_LEAK` and sends no delete request.
+
+### Clearing a workspace's Sessions
+
+"Clear workspace sessions…" deletes only the Session logs of one workspace; the folder and its registration stay untouched. It pre-flights, lets the user review the first batch (at most 64 logs), and then continues automatically batch by batch: the pre-flight lists logs opened or running in this app run as skipped and says how many (the same Session is never counted twice across refilled pages), each executed batch prunes the ids it actually removed, and a target deleted by another process makes the client re-read the workspace and rebuild the queue instead of failing the whole walk. The result auto-closes only when nothing is left over (no failures, no skipped rows, no excluded rows, no early stop); otherwise it stays until the user dismisses it. When every remaining log can only be deleted after a restart, the review offers "Schedule deletion" and the queued result reports how many are not included.
 
 ## Safety model
 
@@ -72,7 +83,7 @@ For Sessions opened in the current Host, the review dialog offers **Schedule del
 
 ```sh
 # From npm (after publication)
-dsh plugin --profile web add dsh-cleanup@0.4.0
+dsh plugin --profile web add dsh-cleanup@0.5.0
 
 # From GitHub, pinned to a commit
 dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#<sha>

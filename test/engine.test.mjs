@@ -1942,6 +1942,23 @@ describe('trash routes', () => {
     assert.equal(root.parentSessionId, null)
   })
 
+  test('reports empty-string family fields from a hand-edited meta.json as null', async () => {
+    const world = await makeWorld({ sessions: [{ id: 'solo', cwd: '/proj', createdAt: 1000 }] })
+    const engine = world.engine()
+    const plan = planOf(await engine.plan({ targets: [{ kind: 'session', id: 'solo' }], mode: 'trash' }))
+    assert.equal((await engine.execute({ planId: plan.planId })).ok, true)
+    const [entry] = (await engine.trashList()).entries
+    const metaPath = path.join(world.trashRoot, entry.id, 'meta.json')
+    const meta = JSON.parse(await fsp.readFile(metaPath, 'utf8'))
+    meta.origin = ''
+    meta.parentSessionId = ''
+    await fsp.writeFile(metaPath, JSON.stringify(meta))
+    const [patched] = (await engine.trashList()).entries
+    assert.equal(patched.origin, null, 'an empty origin string is reported as null')
+    assert.equal(patched.parentSessionId, null, 'an empty parent id is reported as null')
+    assert.equal(patched.restorable, true, 'the entry stays listable/restorable')
+  })
+
   test('lists an unreadable entry instead of omitting it', async () => {
     const world = await makeWorld({})
     await fsp.mkdir(path.join(world.trashRoot, 'junk-entry', 'payload'), { recursive: true })

@@ -1,6 +1,6 @@
 {
   "name": "dsh-cleanup",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "type": "module",
   "description": "Workspace folder and Session log deletion with a recoverable trash, an explicit review step, and a storage overview page",
   "license": "MIT",
@@ -37,7 +37,8 @@
   ],
   "scripts": {
     "test": "node --test 'test/**/*.test.mjs'",
-    "check": "node scripts/check-contract.mjs"
+    "check": "node scripts/check-contract.mjs",
+    "sync-locale": "node scripts/sync-locale-mirrors.mjs"
   },
   "repository": {
     "type": "git",

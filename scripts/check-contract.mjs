@@ -14,8 +14,11 @@
  *  2. Every error/warning code the engine can emit is listed in SPEC and localized by the client.
  *  3. Every SPEC §4.6/§5.4 code is either emitted, or documented as client/settings-only.
  *  4. Client locale: zh/en key parity, identical `{param}` sets, every literal `t()` key present,
- *     every plural base has `_one`/`_other`, and any `locale/ui/<lang>.json` matches the en key set
- *     (extra plural categories allowed for the language's fallback chain).
+ *     and every plural base has `_one`/`_other`. The published mirrors `locale/ui/en.json` and
+ *     `locale/ui/zh.json` must be identical to the inline `en`/`zh` dictionaries (same key set,
+ *     same values; key order is free). Any other `locale/ui/<lang>.json` must carry the en key set
+ *     and matching `{param}` sets, with extra plural categories allowed for the language's
+ *     fallback chain.
  *
  * @module dsh-cleanup/scripts/check-contract
  */
@@ -159,6 +162,9 @@ async function main() {
   const settingsCodes = new Set(matches(section(spec, '### 4.8 Settings'), /`([A-Z][A-Z0-9_]{2,})`/g))
   const documentationOnly = new Set([
     'PATH_NOT_DIRECTORY', 'PATH_NOT_SESSION_DIR', // SPEC §4.6: defined by paths.js, never on the wire
+    // Client-only plan guard (SPEC §9): the Host never emits it, so it is not part of the §4.6 wire
+    // vocabulary; listed here so adding it to §4.6 later does not fail this check.
+    'UNCHECKED_TARGET_LEAK',
   ])
   const documentedElsewhere = new Set([...restoreVocabulary, ...settingsCodes, ...documentationOnly])
   // Codes the SPEC explicitly says never reach the wire are not "emitted" for translation purposes.
@@ -216,15 +222,66 @@ async function main() {
   }
   notes.push(`client locale: ${enKeys.length} keys, ${pluralBases.length} plural bases, ${literalKeys.length} literal keys`)
 
+  // Published mirrors: `locale/ui/en.json` and `locale/ui/zh.json` are generated from the inline
+  // dictionaries above and ship in the package, so a packaged copy must stay identical to the
+  // runtime one (key set and every string value; key order is free). The inline `const zh`/`const en`
+  // stay the source of truth – never hand-edit a mirror.
+  const mirrorNotes = []
+  for (const [language, inline] of [['en', en], ['zh', zh]]) {
+    const file = `locale/ui/${language}.json`
+    const hint = `regenerate it from the inline ${language} dictionary in client.js`
+    let mirror
+    try {
+      mirror = JSON.parse(await read(file))
+    } catch (error) {
+      fail(`${file}: cannot be read as JSON (${error.message}); ${hint}`)
+      continue
+    }
+    if (mirror === null || typeof mirror !== 'object' || Array.isArray(mirror)) {
+      fail(`${file}: expected a JSON object mapping keys to strings; ${hint}`)
+      continue
+    }
+    const inlineKeys = Object.keys(inline)
+    const mirrorKeys = Object.keys(mirror)
+    const missing = inlineKeys.filter((key) => !Object.hasOwn(mirror, key))
+    const extra = mirrorKeys.filter((key) => !Object.hasOwn(inline, key))
+    if (missing.length > 0) {
+      fail(`${file}: missing ${missing.length} key(s) present in client.js: ${missing.map((key) => `"${key}"`).join(', ')}; ${hint}`)
+    }
+    if (extra.length > 0) {
+      fail(`${file}: has ${extra.length} key(s) absent from client.js: ${extra.map((key) => `"${key}"`).join(', ')}; ${hint}`)
+    }
+    for (const key of inlineKeys) {
+      if (!Object.hasOwn(mirror, key)) continue
+      const value = mirror[key]
+      if (typeof value !== 'string') {
+        fail(`${file}: value for "${key}" must be a string, found ${JSON.stringify(value)}; ${hint}`)
+        continue
+      }
+      if (value === inline[key]) continue
+      const mirrorParams = paramsOf(value)
+      const inlineParams = paramsOf(inline[key])
+      if (mirrorParams.join(',') !== inlineParams.join(',')) {
+        fail(`${file}: param mismatch for "${key}" (mirror ${mirrorParams}, client.js ${inlineParams}); ${hint}`)
+      } else {
+        fail(`${file}: value mismatch for "${key}" (mirror and client.js must be identical); ${hint}`)
+      }
+    }
+    mirrorNotes.push(`${language}.json ${mirrorKeys.length} keys`)
+  }
+  if (mirrorNotes.length > 0) notes.push(`locale mirrors checked against client.js: ${mirrorNotes.join(', ')}`)
+
   // Optional per-language dictionaries: same keys as en, except additional plural categories.
+  // en/zh are the exact mirrors above; this loop is for any future `locale/ui/<lang>.json`.
   let localeFiles = []
   try {
-    localeFiles = (await readdir(path.join(ROOT, 'locale/ui'))).filter((name) => name.endsWith('.json') && name !== 'en.json' && name !== 'zh.json')
+    localeFiles = (await readdir(path.join(ROOT, 'locale/ui'))).filter((name) => name.endsWith('.json'))
   } catch {
     localeFiles = []
   }
   for (const file of localeFiles) {
     const language = file.replace(/\.json$/u, '')
+    if (language === 'en' || language === 'zh') continue
     let dictionary
     try {
       dictionary = JSON.parse(await readFile(path.join(ROOT, 'locale/ui', file), 'utf8'))

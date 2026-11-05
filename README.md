@@ -1,5 +1,5 @@
 ---
-description: "Delete registered workspace folders and Session logs behind an explicit review step, with a recoverable trash, a deferral queue for live Sessions, and a read-only storage overview page."
+description: "Delete registered workspace folders, Session logs, and a workspace's whole Session history behind an explicit review step, with a recoverable trash, a deferral queue for live Sessions, and a read-only storage overview page."
 kind: "package-bundle"
 ---
 
@@ -14,7 +14,7 @@ DSH itself only unregisters a workspace (the folder and its Sessions stay on dis
 | | |
 |---|---|
 | Package | `dsh-cleanup` (imports no `@deepseek-ai/*` package, zero runtime dependencies) |
-| Version | 0.4.0 |
+| Version | 0.5.0 |
 | Repository | <https://github.com/xiaoyangren6514/dsh-cleanup> |
 | Author | fly |
 | License | [MIT](LICENSE) |
@@ -27,7 +27,10 @@ DSH itself only unregisters a workspace (the folder and its Sessions stay on dis
 |---|---|
 | Delete a registered workspace's **real folder** (recursive) | Sidebar workspace right-click → **Delete workspace folder…** |
 | Delete a **Session** (with its subagent Session logs) | Sidebar Session right-click → **Delete session…** |
-| Clear **every Session log** of a workspace (the folder and its registration stay) | Sidebar workspace right-click → **Clear workspace sessions…** |
+| Clear **every Session log** of a workspace in automatic batches after one review (the folder and its registration stay) | Sidebar workspace right-click → **Clear workspace sessions…** |
+| Choose exactly what a review deletes — one checkbox per reviewed target, **Select all** / **Invert**, and a permanent mode that drops back to trash when the selection spans several folders | Review dialog |
+| Filter the Sessions list by workspace; subagent logs fold under the Session they belong to | Settings → Storage cleanup → Sessions |
+| See which trash entries were subagent logs and which Session they belong to | Settings → Storage cleanup → Trash (`Subagent` badge, `Parent` line) |
 | See how much every workspace and Session uses, delete in bulk | Settings → **Storage cleanup** |
 | Recover a mistake (deletions go to the trash by default) | Settings → Storage cleanup → **Trash** |
 | Queue a Session that is open in the current Host for deletion at the next start | Review dialog → **Schedule deletion (runs automatically after this app exits)**; inspect/cancel it in Settings |
@@ -60,7 +63,7 @@ Install the bundle into a DSH profile, then refresh the Web page once. The Host 
 
 ```sh
 # From npm (after the package is published)
-dsh plugin --profile web add dsh-cleanup@0.4.0
+dsh plugin --profile web add dsh-cleanup@0.5.0
 
 # From GitHub, pinned to a commit
 dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#<sha>

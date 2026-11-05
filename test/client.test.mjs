@@ -147,7 +147,7 @@ function createContext() {
     if (path.endsWith('cleanup.measure')) {
       return respond({ ok: true, workspaces: {}, sessions: { 'session-a': { bytes: 2048, files: 3 } } })
     }
-    if (path.endsWith('cleanup.plan')) return respond(planResponse(body))
+    if (path.endsWith('cleanup.plan')) return respond(await planResponse(body))
     if (path.endsWith('cleanup.defer')) return respond({ ok: true, deferred: { count: 1, entryIds: ['entry-1'], replaced: false } })
     if (path.endsWith('cleanup.candidates')) return respond(candidatesResponse(body))
     if (path.endsWith('cleanup.delete')) return respond(deleteResponse(body))
@@ -187,6 +187,29 @@ function cleanPlan(mode) {
     blockers: [],
     confirmation: null,
   }
+}
+
+/** A plan whose targets/items mirror the request, like the real Host plan payload. */
+function planEchoingTargets(body) {
+  const targets = body.targets.map((target) => ({ kind: target.kind, id: target.id, title: target.id, path: null }))
+  const items = body.targets.map((target) => ({
+    kind: target.kind === 'workspace' ? 'workspace-dir' : 'session',
+    id: target.id,
+    workspaceId: null,
+    title: null,
+    path: '/tmp/' + target.id,
+    bytes: 10,
+    files: 1,
+    dirs: 0,
+    parentSessionId: null,
+    isDescendant: false,
+    truncated: false,
+  }))
+  return Object.assign(cleanPlan(body.mode), {
+    targets,
+    items,
+    totals: { workspaces: 0, sessions: items.length, files: items.length, dirs: 0, bytes: items.length * 10 },
+  })
 }
 
 /** Load a fresh copy of client.js with its own module-loader capture. */
@@ -233,6 +256,45 @@ async function waitFor(predicate, label, timeoutMs = 2000) {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/**
+ * Capture the dialog's auto-dismiss dwell timer instead of waiting 3.2s. Only timers scheduled with
+ * a delay of at least 3s are captured (that is the dwell timer); everything else keeps running.
+ * @returns {{ armed: Function, fire: Function, restore: Function }}
+ */
+function spyDoneTimer() {
+  const realSetTimeout = globalThis.setTimeout
+  const realClearTimeout = globalThis.clearTimeout
+  const timers = []
+  globalThis.setTimeout = function (callback, delay) {
+    if (typeof delay === 'number' && delay >= 3000) {
+      const handle = { callback: callback, cancelled: false }
+      timers.push(handle)
+      return handle
+    }
+    return realSetTimeout.apply(globalThis, arguments)
+  }
+  globalThis.clearTimeout = function (handle) {
+    if (handle && typeof handle === 'object' && typeof handle.callback === 'function') {
+      handle.cancelled = true
+      return
+    }
+    return realClearTimeout.apply(globalThis, arguments)
+  }
+  return {
+    armed: function () {
+      return timers.filter(function (timer) { return timer.cancelled !== true })
+    },
+    fire: function () {
+      const timer = this.armed()[0]
+      if (timer) timer.callback()
+    },
+    restore: function () {
+      globalThis.setTimeout = realSetTimeout
+      globalThis.clearTimeout = realClearTimeout
+    },
+  }
+}
 /** The api object a slot registration injects into its component. */
 const slotApi = (world, slot) => world.registrations.find((entry) => entry.options.name === slot).options.inject().api
 
@@ -564,6 +626,7 @@ test('dialog: the selection can be widened again and the subagent switch reaches
   const { mod } = await loadClient()
   mod.apply(world.ctx)
   const api = slotApi(world, 'shell.overlay')
+  world.setPlanResponse((body) => ({ ok: true, plan: planEchoingTargets(body) }))
   api.openDialog([
     { kind: 'session', id: 'session-a', title: '会话 A' },
     { kind: 'session', id: 'session-b', title: '会话 B' },
@@ -612,6 +675,7 @@ test('dialog: invert flips every row and select-all restores them', async () => 
   const { mod } = await loadClient()
   mod.apply(world.ctx)
   const api = slotApi(world, 'shell.overlay')
+  world.setPlanResponse((body) => ({ ok: true, plan: planEchoingTargets(body) }))
   api.openDialog([
     { kind: 'session', id: 'session-a', title: '会话 A' },
     { kind: 'session', id: 'session-b', title: '会话 B' },
@@ -681,6 +745,142 @@ test('dialog: un-checking a subagent row wins over descendant expansion', async 
   assert.equal(settled.includeDescendants, false)
   const itemIds = settled.plan.items.map((item) => item.id)
   assert.equal(itemIds.includes('session-b'), false, 'the un-checked row is not planned at all')
+  assert.equal(settled.descendantsAutoOff, true, 'the forced-off switch is explained instead of silently flipping')
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  const reviewText = collectText(renderDeep(overlay.component({ api, t: api.t })))
+  assert.match(reviewText, /已自动关闭/, 'the switch-off reason is visible next to the switch')
+  api.disposeDialog()
+})
+
+
+test('dialog: widening a permanent selection falls back to trash instead of a plan the Host must refuse', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setPlanResponse((body) => ({ ok: true, plan: planEchoingTargets(body) }))
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  const api = overlay.options.inject().api
+  api.openDialog([
+    { kind: 'workspace', id: 'ws-a', title: 'A', path: '/tmp/a' },
+    { kind: 'workspace', id: 'ws-b', title: 'B', path: '/tmp/b' },
+  ])
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review' && api.dialogStore.getSnapshot().refreshing !== true, 'initial review')
+
+  // Narrow to one folder so permanent becomes available, switch, then re-check the second row.
+  api.setDialogSelection('workspace:ws-b', false)
+  await waitFor(() => api.dialogStore.getSnapshot().refreshing !== true && api.dialogStore.getSnapshot().plan.targets.length === 1, 'narrowed review')
+  api.setDialogMode('permanent')
+  await waitFor(() => api.dialogStore.getSnapshot().mode === 'permanent' && api.dialogStore.getSnapshot().refreshing !== true, 'permanent review')
+  api.setDialogSelection('workspace:ws-b', true)
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review' && api.dialogStore.getSnapshot().refreshing !== true && api.dialogStore.getSnapshot().plan.targets.length === 2, 'widened review')
+
+  const settled = api.dialogStore.getSnapshot()
+  assert.equal(settled.mode, 'trash', 'the review falls back to trash instead of planning a permanent multi-folder deletion')
+  assert.equal(settled.modeNotice, true, 'the fallback is explained')
+  assert.equal(settled.failureStage, null, 'the fallback does not dead-end in failed')
+  const lastPlan = world.calls.filter((call) => call.url.endsWith('cleanup.plan')).at(-1)
+  assert.equal(lastPlan.body.mode, 'trash')
+  const text = collectText(renderDeep(overlay.component({ api, t: api.t })))
+  assert.match(text, /已自动改为移入回收站/)
+  api.disposeDialog()
+})
+
+test('dialog: a re-checked row shows a pending state while the plan is in flight', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  let delayMs = 0
+  world.setPlanResponse(async (body) => {
+    if (delayMs > 0) {
+      const wait = delayMs
+      delayMs = 0
+      await new Promise((resolve) => setTimeout(resolve, wait))
+    }
+    return { ok: true, plan: planEchoingTargets(body) }
+  })
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  const api = overlay.options.inject().api
+  api.openDialog([
+    { kind: 'workspace', id: 'ws-a', title: 'A', path: '/tmp/a' },
+    { kind: 'workspace', id: 'ws-b', title: 'B', path: '/tmp/b' },
+  ])
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review' && api.dialogStore.getSnapshot().refreshing !== true, 'initial review')
+  api.setDialogSelection('workspace:ws-b', false)
+  await waitFor(() => api.dialogStore.getSnapshot().refreshing !== true && api.dialogStore.getSnapshot().plan.targets.length === 1, 'narrowed review')
+
+  // The next plan response is slow: the re-checked row has no item yet while the request is open.
+  delayMs = 400
+  api.setDialogSelection('workspace:ws-b', true)
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  const mid = api.dialogStore.getSnapshot()
+  assert.equal(mid.refreshing, true, 'the test is observing the in-flight window')
+  const text = collectText(renderDeep(overlay.component({ api, t: api.t })))
+  assert.match(text, /重新规划中/, 'a checked row without an item yet is rendered as pending')
+  assert.doesNotMatch(text, /已取消选择/, 'the pending row must not claim the user un-checked it')
+  assert.match(text, /正在重新计算复核结果/, 'the totals are withheld while the plan is stale')
+
+  await waitFor(() => api.dialogStore.getSnapshot().refreshing !== true && api.dialogStore.getSnapshot().plan.targets.length === 2, 'widened review settles')
+  api.disposeDialog()
+})
+
+test('dialog: a plan that still contains an un-checked target fails closed without deleting', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  // The Host's folder sweep keeps bringing the un-checked Session back, even without descendants.
+  world.setPlanResponse((body) => {
+    const items = [
+      { kind: 'workspace-dir', id: 'ws-a', workspaceId: null, title: 'A', path: '/tmp/a', bytes: 1, files: 1, dirs: 0, parentSessionId: null, isDescendant: false },
+      { kind: 'session', id: 'session-a', workspaceId: 'ws-a', title: null, path: '/tmp/session-a', bytes: 1, files: 1, dirs: 0, parentSessionId: null, isDescendant: false },
+    ]
+    return {
+      ok: true,
+      plan: Object.assign(cleanPlan(body.mode), {
+        targets: body.targets.map((target) => ({ kind: target.kind, id: target.id, title: target.id, path: null })),
+        items,
+        totals: { workspaces: 1, sessions: 1, files: 2, dirs: 0, bytes: 2 },
+      }),
+    }
+  })
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  const api = overlay.options.inject().api
+  api.openDialog([
+    { kind: 'workspace', id: 'ws-a', title: 'A', path: '/tmp/a' },
+    { kind: 'session', id: 'session-a', title: '会话 A' },
+  ])
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'initial review')
+  api.setDialogSelection('session:session-a', false)
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'failed', 'failed phase')
+  const settled = api.dialogStore.getSnapshot()
+  assert.equal(settled.failureStage, 'plan')
+  assert.equal(settled.error.code, 'UNCHECKED_TARGET_LEAK')
+  assert.equal(settled.descendantsAutoOff, true, 'descendant expansion was dropped before refusing')
+  assert.equal(world.calls.filter((call) => call.url.endsWith('cleanup.delete')).length, 0, 'the un-checked target is never deleted')
+  const text = collectText(renderDeep(overlay.component({ api, t: api.t })))
+  assert.match(text, /已取消勾选的目标仍会被删除/)
+  api.disposeDialog()
+})
+
+test('dialog: scheduling refuses a plan without targets instead of queueing un-checked rows', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setPlanResponse((body) => ({
+    ok: true,
+    plan: Object.assign(cleanPlan(body.mode), {
+      targets: [],
+      blockers: [{ code: 'SESSION_LIVE', message: 'live', sessionId: 'session-a', workspaceId: null }],
+    }),
+  }))
+  const api = slotApi(world, 'shell.overlay')
+  api.openDialog([{ kind: 'session', id: 'session-a', title: '会话 A' }])
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  api.deferPlan()
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'failed', 'failed phase')
+  const settled = api.dialogStore.getSnapshot()
+  assert.equal(settled.failureStage, 'defer')
+  assert.deepEqual(settled.error, { transport: 'badResponse' })
+  assert.equal(world.calls.filter((call) => call.url.endsWith('cleanup.defer')).length, 0, 'nothing is queued without reviewed targets')
   api.disposeDialog()
 })
 
@@ -919,6 +1119,8 @@ test('settings: the Trash tab badges a subagent entry and names its parent', asy
   const text = collectText(tree)
   assert.match(text, /子代理/, 'a subagent entry is badged')
   assert.match(text, /父会话/, 'the parent Session is named')
+  const parentLine = findAll(tree, (element) => element && element.props && element.props.title === 'root-1')
+  assert.equal(parentLine.length, 1, 'the short parent id keeps the full id reachable as a hover title')
   store.dispose()
 })
 
@@ -1075,6 +1277,230 @@ test('settings: a subagent log follows its parent into a workspace and is not "u
   tree = renderDeep(section.component({ api, t: api.t }))
   assert.equal(elementsByClass(tree, 'dsh-cleanup-item').length, 1, 'only the parent row renders')
   assert.equal(elementsByClass(tree, 'dsh-cleanup-target-more').length, 1, 'the child folds under its parent')
+  store.dispose()
+})
+
+
+test('workspace clear: a log deleted as a descendant is not planned again by a later batch', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setCandidatesResponse(() => ({ ok: true, candidates: candidateRows(65), total: 65, truncated: false, totals: { count: 65, bytes: 0 } }))
+  let lastPlan = null
+  world.setPlanResponse((body) => {
+    const items = body.targets.map((target) => ({ kind: 'session', id: target.id, workspaceId: null, title: null, path: '/tmp/' + target.id, bytes: 1, files: 1, dirs: 0, parentSessionId: null, isDescendant: false }))
+    // The first batch expands session-0's subagent closure, which also deletes session-64 (queued next).
+    if (body.targets.some((target) => target.id === 'session-0') && body.includeDescendants === true) {
+      items.push({ kind: 'session', id: 'session-64', workspaceId: null, title: null, path: '/tmp/session-64', bytes: 1, files: 1, dirs: 0, parentSessionId: 'session-0', isDescendant: true })
+    }
+    lastPlan = Object.assign(cleanPlan(body.mode), {
+      targets: body.targets.map((target) => ({ kind: target.kind, id: target.id, title: target.id, path: null })),
+      items,
+      totals: { workspaces: 0, sessions: items.length, files: items.length, dirs: 0, bytes: items.length },
+    })
+    return { ok: true, plan: lastPlan }
+  })
+  world.setDeleteResponse(() => ({
+    ok: true,
+    result: {
+      items: lastPlan.items.map((item) => ({ kind: item.kind, id: item.id, status: 'trashed', error: null, movedTo: '/tmp/trash/' + item.id, bytes: item.bytes })),
+      totals: { trashed: lastPlan.items.length, deleted: 0, failed: 0, bytes: lastPlan.items.length },
+    },
+  }))
+  clearMenuAction(world).run()
+  const api = slotApi(world, 'shell.overlay')
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  assert.equal(api.dialogStore.getSnapshot().targets.length, 64)
+  api.confirmDelete()
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'done', 'done phase', 5000)
+  const settled = api.dialogStore.getSnapshot().clear
+  assert.equal(world.calls.filter((call) => call.url.endsWith('cleanup.plan')).length, 1, 'the queued duplicate is pruned instead of planned again')
+  assert.equal(settled.done.count, 65, 'the descendant is folded into the finished totals once')
+  assert.equal(settled.batches, 1)
+  assert.equal(settled.stop, null)
+  api.disposeDialog()
+})
+
+test('workspace clear: an UNKNOWN_SESSION plan failure rebuilds the queue and continues', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  let candidateCalls = 0
+  world.setCandidatesResponse(() => {
+    candidateCalls += 1
+    if (candidateCalls === 1) return { ok: true, candidates: candidateRows(66), total: 66, truncated: false, totals: { count: 66, bytes: 0 } }
+    // The second batch's target vanished between batches; only session-65 is still on disk.
+    return { ok: true, candidates: [{ id: 'session-65', cwd: '/tmp/proj-65', deletable: true }], total: 1, truncated: false, totals: { count: 1, bytes: 0 } }
+  })
+  const plans = []
+  let planCalls = 0
+  world.setPlanResponse((body) => {
+    planCalls += 1
+    // The review plan is call 1; the first walk batch's plan (call 2) names a vanished target.
+    if (planCalls === 2) return { ok: false, error: { code: 'UNKNOWN_SESSION', message: 'Unknown session "session-64".' } }
+    const plan = planEchoingTargets(body)
+    plans.push(plan)
+    return { ok: true, plan }
+  })
+  world.setDeleteResponse(() => {
+    const plan = plans.shift()
+    return {
+      ok: true,
+      result: {
+        items: plan.items.map((item) => ({ kind: item.kind, id: item.id, status: 'deleted', error: null, movedTo: null, bytes: item.bytes })),
+        totals: { trashed: 0, deleted: plan.items.length, failed: 0, bytes: plan.items.length },
+      },
+    }
+  })
+  clearMenuAction(world).run()
+  const api = slotApi(world, 'shell.overlay')
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  assert.equal(api.dialogStore.getSnapshot().targets.length, 64)
+  api.confirmDelete()
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'done', 'done phase', 5000)
+  const settled = api.dialogStore.getSnapshot().clear
+  assert.equal(candidateCalls, 2, 'the queue is rebuilt from fresh candidates')
+  assert.equal(planCalls, 3)
+  assert.equal(settled.resyncs, 0, 'a successful batch resets the recovery budget')
+  assert.equal(settled.done.count, 65, 'the vanished log is skipped instead of failing the walk')
+  assert.equal(settled.stop, null)
+  api.disposeDialog()
+})
+
+test('workspace clear: an UNKNOWN_SESSION recovery is bounded and stays retryable', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  let candidateCalls = 0
+  world.setCandidatesResponse(() => {
+    candidateCalls += 1
+    return { ok: true, candidates: candidateRows(66), total: 66, truncated: false, totals: { count: 66, bytes: 0 } }
+  })
+  const plans = []
+  let planCalls = 0
+  world.setPlanResponse((body) => {
+    planCalls += 1
+    if (planCalls === 1) { const plan = planEchoingTargets(body); plans.push(plan); return { ok: true, plan } }
+    return { ok: false, error: { code: 'UNKNOWN_SESSION', message: 'Unknown session "session-64".' } }
+  })
+  world.setDeleteResponse(() => {
+    const plan = plans.shift()
+    return {
+      ok: true,
+      result: {
+        items: plan.items.map((item) => ({ kind: item.kind, id: item.id, status: 'deleted', error: null, movedTo: null, bytes: item.bytes })),
+        totals: { trashed: 0, deleted: plan.items.length, failed: 0, bytes: plan.items.length },
+      },
+    }
+  })
+  clearMenuAction(world).run()
+  const api = slotApi(world, 'shell.overlay')
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  api.confirmDelete()
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'failed', 'failed phase', 5000)
+  let settled = api.dialogStore.getSnapshot()
+  assert.equal(settled.failureStage, 'plan')
+  assert.equal(settled.clear.resyncs, 2, 'the recovery is bounded')
+  assert.equal(candidateCalls, 3, 'one pre-flight plus two rebuilds')
+  assert.equal(planCalls, 4)
+  // An explicit retry gets a fresh recovery budget: it rebuilds again, then fails bounded again.
+  const plansBeforeRetry = planCalls
+  api.retryDialog()
+  await waitFor(() => planCalls > plansBeforeRetry + 2 && api.dialogStore.getSnapshot().phase === 'failed', 'retry rebuilds then fails bounded')
+  settled = api.dialogStore.getSnapshot()
+  assert.equal(settled.failureStage, 'plan')
+  assert.equal(settled.clear.resyncs, 2, 'the retried walk is bounded again')
+  assert.ok(candidateCalls > 3, 'the explicit retry attempts fresh rebuilds')
+  api.disposeDialog()
+})
+
+test('workspace clear: a partial clear keeps the skipped-row summary on screen', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setCandidatesResponse(() => ({
+    ok: true,
+    candidates: candidateRows(3).concat([
+      { id: 'live-1', cwd: '/tmp/live-1', deletable: false, blockerCodes: ['SESSION_LIVE'] },
+      { id: 'live-2', cwd: '/tmp/live-2', deletable: false, blockerCodes: ['SESSION_LIVE'] },
+    ]),
+    total: 5,
+    truncated: false,
+    totals: { count: 5, bytes: 0 },
+  }))
+  let lastPlan = null
+  world.setPlanResponse((body) => { lastPlan = planEchoingTargets(body); return { ok: true, plan: lastPlan } })
+  world.setDeleteResponse(() => ({
+    ok: true,
+    result: {
+      items: lastPlan.items.map((item) => ({ kind: item.kind, id: item.id, status: 'trashed', error: null, movedTo: '/tmp/trash/' + item.id, bytes: item.bytes })),
+      totals: { trashed: lastPlan.items.length, deleted: 0, failed: 0, bytes: lastPlan.items.length },
+    },
+  }))
+  clearMenuAction(world).run()
+  const api = slotApi(world, 'shell.overlay')
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  assert.equal(api.dialogStore.getSnapshot().clear.skipped, 2, 'in-use rows are counted once')
+  const timer = spyDoneTimer()
+  try {
+    api.confirmDelete()
+    await waitFor(() => api.dialogStore.getSnapshot().phase === 'done', 'done phase', 5000)
+    assert.equal(timer.armed().length, 0, 'a partial clear does not arm the auto-dismiss timer')
+    assert.equal(api.dialogStore.getSnapshot().phase, 'done', 'a partial clear keeps its summary on screen')
+  } finally {
+    timer.restore()
+  }
+  api.disposeDialog()
+})
+
+test('workspace clear: the review note says how many logs the batch really covers', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setCandidatesResponse(() => ({ ok: true, candidates: candidateRows(1), total: 1, truncated: false, totals: { count: 1, bytes: 0 } }))
+  world.setPlanResponse((body) => {
+    const items = [
+      { kind: 'session', id: 'session-0', workspaceId: null, title: null, path: '/tmp/session-0', bytes: 1, files: 1, dirs: 0, parentSessionId: null, isDescendant: false },
+      { kind: 'session', id: 'child-1', workspaceId: null, title: null, path: '/tmp/child-1', bytes: 1, files: 1, dirs: 0, parentSessionId: 'session-0', isDescendant: true },
+    ]
+    return {
+      ok: true,
+      plan: Object.assign(cleanPlan(body.mode), {
+        targets: body.targets.map((target) => ({ kind: target.kind, id: target.id, title: target.id, path: null })),
+        items,
+        totals: { workspaces: 0, sessions: 2, files: 2, dirs: 0, bytes: 2 },
+      }),
+    }
+  })
+  clearMenuAction(world).run()
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  const api = overlay.options.inject().api
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  const text = collectText(renderDeep(overlay.component({ api, t: api.t })))
+  assert.match(text, /本次复核包含 2 条日志/, 'the note distinguishes root Sessions from the logs a plan deletes')
+  api.disposeDialog()
+})
+
+test('settings: changing a Sessions filter drops selections hidden by it', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setSessions(() => [
+    { id: 's-a', workspaceId: 'ws-a', cwd: '/a', createdAt: 2000, eventCount: 1, sizeBytes: 10, origin: null, parentSessionId: null, live: false, running: false, archived: false, pinned: false, deletable: true, blockerCodes: [] },
+    { id: 's-b', workspaceId: 'ws-b', cwd: '/b', createdAt: 1000, eventCount: 1, sizeBytes: 10, origin: null, parentSessionId: null, live: false, running: false, archived: true, pinned: false, deletable: true, blockerCodes: [] },
+  ])
+  const api = slotApi(world, 'settings.section')
+  const store = api.createPageStore()
+  await store.loadInventory()
+  store.toggleSessionSelect('s-b')
+  assert.deepEqual(store.getSnapshot().selectedSessions, ['s-b'])
+  store.setSessionWorkspace('ws-a')
+  assert.deepEqual(store.getSnapshot().selectedSessions, [], 'a narrower workspace filter drops hidden selections')
+
+  store.toggleSessionSelect('s-a')
+  assert.deepEqual(store.getSnapshot().selectedSessions, ['s-a'])
+  store.setSessionFilter('archived')
+  assert.deepEqual(store.getSnapshot().selectedSessions, [], 'the archive filter drops hidden selections too')
   store.dispose()
 })
 
@@ -1263,4 +1689,530 @@ test('the module source never requires a Harness client package', () => {
   const unique = [...new Set(requires)]
   assert.deepEqual(unique, ['react'], 'client.js may only require react, found: ' + unique.join(', '))
   assert.equal(/@deepseek-ai\//.test(source.replace(/^[\s\S]*?\/\*[\s\S]*?\*\//, '')), false)
+})
+
+// =============================================================================================
+// Review-round hardening: regressions for the 0.5.0 review findings and their edge cases.
+// =============================================================================================
+
+test('workspace clear: a residue-free clear still dismisses itself after the dwell', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setCandidatesResponse(() => ({ ok: true, candidates: candidateRows(3), total: 3, truncated: false, totals: { count: 3, bytes: 0 } }))
+  let lastPlan = null
+  world.setPlanResponse((body) => { lastPlan = planEchoingTargets(body); return { ok: true, plan: lastPlan } })
+  world.setDeleteResponse(() => ({
+    ok: true,
+    result: {
+      items: lastPlan.items.map((item) => ({ kind: item.kind, id: item.id, status: 'trashed', error: null, movedTo: '/tmp/trash/' + item.id, bytes: item.bytes })),
+      totals: { trashed: lastPlan.items.length, deleted: 0, failed: 0, bytes: lastPlan.items.length },
+    },
+  }))
+  const timer = spyDoneTimer()
+  try {
+    clearMenuAction(world).run()
+    const api = slotApi(world, 'shell.overlay')
+    await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+    api.confirmDelete()
+    await waitFor(() => api.dialogStore.getSnapshot().phase === 'done', 'done phase', 5000)
+    assert.equal(timer.armed().length, 1, 'a clean clear arms the auto-dismiss timer')
+    timer.fire()
+    assert.equal(api.dialogStore.getSnapshot().phase, 'idle')
+    api.disposeDialog()
+  } finally {
+    timer.restore()
+  }
+})
+
+test('workspace clear: a stopped walk keeps its summary', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  let page = 0
+  world.setCandidatesResponse(() => {
+    page += 1
+    if (page === 1) return { ok: true, candidates: candidateRows(1), total: 1, truncated: true, totals: { count: 1, bytes: 0 } }
+    return { ok: true, candidates: [{ id: 'live-1', cwd: '/tmp/l1', deletable: false }], total: 1, truncated: false, totals: { count: 1, bytes: 0 } }
+  })
+  let lastPlan = null
+  world.setPlanResponse((body) => { lastPlan = planEchoingTargets(body); return { ok: true, plan: lastPlan } })
+  world.setDeleteResponse(() => ({
+    ok: true,
+    result: {
+      items: lastPlan.items.map((item) => ({ kind: item.kind, id: item.id, status: 'trashed', error: null, movedTo: '/tmp/trash/' + item.id, bytes: item.bytes })),
+      totals: { trashed: lastPlan.items.length, deleted: 0, failed: 0, bytes: lastPlan.items.length },
+    },
+  }))
+  const timer = spyDoneTimer()
+  try {
+    clearMenuAction(world).run()
+    const api = slotApi(world, 'shell.overlay')
+    await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+    api.confirmDelete()
+    await waitFor(() => api.dialogStore.getSnapshot().phase === 'done', 'done phase', 5000)
+    assert.equal(api.dialogStore.getSnapshot().clear.stop.code, 'blocked')
+    assert.equal(timer.armed().length, 0, 'an early stop must not auto-dismiss')
+    api.disposeDialog()
+  } finally {
+    timer.restore()
+  }
+})
+
+test('workspace clear: an excluded row keeps the summary on screen', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setCandidatesResponse(() => ({ ok: true, candidates: candidateRows(3), total: 3, truncated: false, totals: { count: 3, bytes: 0 } }))
+  let lastPlan = null
+  world.setPlanResponse((body) => { lastPlan = planEchoingTargets(body); return { ok: true, plan: lastPlan } })
+  world.setDeleteResponse(() => ({
+    ok: true,
+    result: {
+      items: lastPlan.items.map((item) => ({ kind: item.kind, id: item.id, status: 'deleted', error: null, movedTo: null, bytes: item.bytes })),
+      totals: { trashed: 0, deleted: lastPlan.items.length, failed: 0, bytes: lastPlan.items.length },
+    },
+  }))
+  const timer = spyDoneTimer()
+  try {
+    clearMenuAction(world).run()
+    const api = slotApi(world, 'shell.overlay')
+    await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+    api.setDialogSelection('session:session-1', false)
+    await waitFor(() => api.dialogStore.getSnapshot().refreshing !== true && api.dialogStore.getSnapshot().plan.targets.length === 2, 're-planned batch')
+    api.confirmDelete()
+    await waitFor(() => api.dialogStore.getSnapshot().phase === 'done', 'done phase', 5000)
+    const settled = api.dialogStore.getSnapshot().clear
+    assert.equal(settled.done.count, 2)
+    assert.deepEqual(settled.excluded, { 'session:session-1': true })
+    assert.equal(timer.armed().length, 0, 'an excluded row must keep the summary')
+    api.disposeDialog()
+  } finally {
+    timer.restore()
+  }
+})
+
+test('review dialog: a review preserved across a settings-sheet unmount keeps its clean summary', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setCandidatesResponse(() => ({ ok: true, candidates: candidateRows(1), total: 1, truncated: false, totals: { count: 1, bytes: 0 } }))
+  let lastPlan = null
+  world.setPlanResponse((body) => { lastPlan = planEchoingTargets(body); return { ok: true, plan: lastPlan } })
+  world.setDeleteResponse(() => ({
+    ok: true,
+    result: {
+      items: lastPlan.items.map((item) => ({ kind: item.kind, id: item.id, status: 'trashed', error: null, movedTo: '/tmp/trash/' + item.id, bytes: item.bytes })),
+      totals: { trashed: lastPlan.items.length, deleted: 0, failed: 0, bytes: lastPlan.items.length },
+    },
+  }))
+  const timer = spyDoneTimer()
+  try {
+    clearMenuAction(world).run()
+    const api = slotApi(world, 'shell.overlay')
+    await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+    // This is what the settings copy's unmount effect does while a request is in flight.
+    api.dialogStore.setState({ keepSummary: true })
+    api.confirmDelete()
+    await waitFor(() => api.dialogStore.getSnapshot().phase === 'done', 'done phase', 5000)
+    assert.equal(timer.armed().length, 0, 'a preserved review must not be dropped by the dwell timer')
+    api.disposeDialog()
+  } finally {
+    timer.restore()
+  }
+})
+
+test('workspace clear: an UNKNOWN_SESSION rebuild keeps exclusions and folded totals', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  let candidateCalls = 0
+  world.setCandidatesResponse(() => {
+    candidateCalls += 1
+    if (candidateCalls === 1) return { ok: true, candidates: candidateRows(66), total: 66, truncated: false, totals: { count: 66, bytes: 0 } }
+    // The rebuild returns the remaining queued roots; the excluded session is gone from the list.
+    return { ok: true, candidates: [{ id: 'session-64', cwd: '/tmp/p64', deletable: true }, { id: 'session-65', cwd: '/tmp/p65', deletable: true }], total: 2, truncated: false, totals: { count: 2, bytes: 0 } }
+  })
+  let lastPlan = null
+  let planCalls = 0
+  world.setPlanResponse((body) => {
+    planCalls += 1
+    if (planCalls === 3) return { ok: false, error: { code: 'UNKNOWN_SESSION', message: 'gone' } }
+    lastPlan = planEchoingTargets(body)
+    return { ok: true, plan: lastPlan }
+  })
+  world.setDeleteResponse(() => ({
+    ok: true,
+    result: {
+      items: lastPlan.items.map((item) => ({ kind: item.kind, id: item.id, status: 'trashed', error: null, movedTo: '/tmp/trash/' + item.id, bytes: item.bytes })),
+      totals: { trashed: lastPlan.items.length, deleted: 0, failed: 0, bytes: lastPlan.items.length },
+    },
+  }))
+  clearMenuAction(world).run()
+  const api = slotApi(world, 'shell.overlay')
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  api.setDialogSelection('session:session-5', false)
+  await waitFor(() => api.dialogStore.getSnapshot().refreshing !== true && api.dialogStore.getSnapshot().plan.targets.length === 63, 'excluded batch review')
+  assert.deepEqual(api.dialogStore.getSnapshot().clear.excluded, { 'session:session-5': true })
+  api.confirmDelete()
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'done', 'done phase', 5000)
+  const settled = api.dialogStore.getSnapshot()
+  assert.equal(candidateCalls, 2, 'one rebuild after the failed second batch')
+  assert.equal(settled.clear.resyncs, 0, 'the rebuilt batch resets the recovery budget')
+  assert.equal(settled.clear.done.count, 65, '63 from the reviewed batch plus 2 rebuilt targets')
+  assert.deepEqual(settled.clear.excluded, { 'session:session-5': true }, 'the exclusion survives the rebuild')
+  api.disposeDialog()
+})
+
+test('workspace clear: a rebuild that yields no targets settles normally', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  let candidateCalls = 0
+  world.setCandidatesResponse(() => {
+    candidateCalls += 1
+    if (candidateCalls === 1) return { ok: true, candidates: candidateRows(66), total: 66, truncated: false, totals: { count: 66, bytes: 0 } }
+    return { ok: true, candidates: [], total: 0, truncated: false, totals: { count: 0, bytes: 0 } }
+  })
+  let lastPlan = null
+  let planCalls = 0
+  world.setPlanResponse((body) => {
+    planCalls += 1
+    if (planCalls === 2) return { ok: false, error: { code: 'UNKNOWN_SESSION', message: 'gone' } }
+    lastPlan = planEchoingTargets(body)
+    return { ok: true, plan: lastPlan }
+  })
+  world.setDeleteResponse(() => ({
+    ok: true,
+    result: {
+      items: lastPlan.items.map((item) => ({ kind: item.kind, id: item.id, status: 'trashed', error: null, movedTo: '/tmp/trash/' + item.id, bytes: item.bytes })),
+      totals: { trashed: lastPlan.items.length, deleted: 0, failed: 0, bytes: lastPlan.items.length },
+    },
+  }))
+  clearMenuAction(world).run()
+  const api = slotApi(world, 'shell.overlay')
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  api.confirmDelete()
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'done', 'done phase', 5000)
+  const settled = api.dialogStore.getSnapshot().clear
+  assert.equal(candidateCalls, 2)
+  assert.equal(settled.resyncs, 1, 'one rebuild happened')
+  assert.equal(settled.stop, null, 'an empty rebuild is a clean finish, not a stop')
+  assert.equal(settled.done.count, 64)
+  api.disposeDialog()
+})
+
+test('workspace clear: repeated in-use rows across refilled pages are counted once', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  let page = 0
+  world.setCandidatesResponse(() => {
+    page += 1
+    if (page === 1) return { ok: true, candidates: candidateRows(1).concat([{ id: 'live-1', cwd: '/tmp/l1', deletable: false }]), total: 2, truncated: true, totals: { count: 2, bytes: 0 } }
+    // The refilled page repeats the same in-use Session and adds another deletable log.
+    return { ok: true, candidates: [{ id: 'live-1', cwd: '/tmp/l1', deletable: false }, { id: 'session-1', cwd: '/tmp/p1', deletable: true }], total: 2, truncated: false, totals: { count: 2, bytes: 0 } }
+  })
+  let lastPlan = null
+  world.setPlanResponse((body) => { lastPlan = planEchoingTargets(body); return { ok: true, plan: lastPlan } })
+  world.setDeleteResponse(() => ({
+    ok: true,
+    result: {
+      items: lastPlan.items.map((item) => ({ kind: item.kind, id: item.id, status: 'trashed', error: null, movedTo: '/tmp/trash/' + item.id, bytes: item.bytes })),
+      totals: { trashed: lastPlan.items.length, deleted: 0, failed: 0, bytes: lastPlan.items.length },
+    },
+  }))
+  clearMenuAction(world).run()
+  const api = slotApi(world, 'shell.overlay')
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  api.confirmDelete()
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'done', 'done phase', 5000)
+  const settled = api.dialogStore.getSnapshot().clear
+  assert.equal(settled.skipped, 1, 'the same live Session is counted once across refills')
+  assert.equal(settled.done.count, 2, 'both deletable logs were cleared')
+  assert.equal(settled.stop, null, 'a repeated in-use row is not a block')
+  api.disposeDialog()
+})
+
+test('workspace clear: the deferred view measures the remainder in root targets', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  const rows = []
+  for (let index = 0; index < 65; index += 1) rows.push({ id: 'live-' + index, cwd: '/tmp/live-' + index, deletable: false, blockerCodes: ['SESSION_LIVE'] })
+  world.setCandidatesResponse(() => ({ ok: true, candidates: rows, total: 65, truncated: false, totals: { count: 65, bytes: 0 } }))
+  world.setPlanResponse((body) => {
+    const targets = body.targets.map((target) => ({ kind: target.kind, id: target.id, title: target.id, path: null }))
+    const items = targets.map((target) => ({ kind: 'session', id: target.id, workspaceId: null, title: null, path: '/tmp/' + target.id, bytes: 1, files: 1, dirs: 0, parentSessionId: null, isDescendant: false }))
+    return {
+      ok: true,
+      plan: Object.assign(cleanPlan(body.mode), {
+        targets,
+        items,
+        blockers: [{ code: 'SESSION_LIVE', message: 'live', sessionId: body.targets[0].id, workspaceId: null }],
+        totals: { workspaces: 0, sessions: items.length, files: items.length, dirs: 0, bytes: items.length },
+      }),
+    }
+  })
+  clearMenuAction(world).run()
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  const api = overlay.options.inject().api
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review' && api.dialogStore.getSnapshot().refreshing !== true, 'deferred-route review')
+  assert.equal(api.dialogStore.getSnapshot().clear.skipped, 65)
+  assert.equal(api.dialogStore.getSnapshot().targets.length, 64)
+  api.deferPlan()
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'deferred', 'deferred phase')
+  const text = collectText(renderDeep(overlay.component({ api, t: api.t })))
+  assert.match(text, /工作区还有 1 条会话未包含/, 'the remainder is measured in root targets, not expanded items')
+  api.disposeDialog()
+})
+
+test('workspace clear: a later batch that brings back an excluded target re-plans without descendants', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  // The workspace has 65 member logs: session-kid is reviewed first, session-dad stays queued and is the
+  // kid's parent. The user un-checks the kid; a later batch starting from dad would expand the child
+  // closure back in.
+  const rows = [{ id: 'session-kid', cwd: '/tmp/kid', deletable: true }]
+  for (let index = 0; index < 63; index += 1) rows.push({ id: 'session-' + index, cwd: '/tmp/p' + index, deletable: true })
+  rows.push({ id: 'session-dad', cwd: '/tmp/dad', deletable: true })
+  world.setCandidatesResponse(() => ({ ok: true, candidates: rows, total: rows.length, truncated: false, totals: { count: rows.length, bytes: 0 } }))
+  let lastPlan = null
+  world.setPlanResponse((body) => {
+    const targets = body.targets.map((target) => ({ kind: target.kind, id: target.id, title: target.id, path: null }))
+    const items = body.targets.map((target) => ({ kind: 'session', id: target.id, workspaceId: null, title: null, path: '/tmp/' + target.id, bytes: 1, files: 1, dirs: 0, parentSessionId: null, isDescendant: false }))
+    if (body.includeDescendants === true && body.targets.some((target) => target.id === 'session-dad')) {
+      items.push({ kind: 'session', id: 'session-kid', workspaceId: null, title: null, path: '/tmp/kid', bytes: 1, files: 1, dirs: 0, parentSessionId: 'session-dad', isDescendant: true })
+    }
+    lastPlan = Object.assign(cleanPlan(body.mode), {
+      targets,
+      items,
+      totals: { workspaces: 0, sessions: items.length, files: items.length, dirs: 0, bytes: items.length },
+    })
+    return { ok: true, plan: lastPlan }
+  })
+  world.setDeleteResponse(() => ({
+    ok: true,
+    result: {
+      items: lastPlan.items.map((item) => ({ kind: item.kind, id: item.id, status: 'trashed', error: null, movedTo: '/tmp/trash/' + item.id, bytes: item.bytes })),
+      totals: { trashed: lastPlan.items.length, deleted: 0, failed: 0, bytes: lastPlan.items.length },
+    },
+  }))
+  clearMenuAction(world).run()
+  const api = slotApi(world, 'shell.overlay')
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  api.setDialogSelection('session:session-kid', false)
+  await waitFor(() => api.dialogStore.getSnapshot().refreshing !== true && api.dialogStore.getSnapshot().plan.targets.length === 63, 'excluded batch review')
+  api.confirmDelete()
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'done', 'done phase', 8000)
+  const settled = api.dialogStore.getSnapshot().clear
+  assert.equal(settled.stop, null)
+  assert.equal(settled.done.count, 64, 'the later batch deletes dad but not the excluded kid')
+  const batchPlans = world.calls.filter((call) => call.url.endsWith('cleanup.plan')).filter((call) => call.body.includeDescendants === true || call.body.includeDescendants === false)
+  const lastTwo = batchPlans.slice(-2)
+  assert.deepEqual(lastTwo.map((call) => call.body.includeDescendants), [true, false], 'the leaked batch drops descendant expansion')
+  assert.equal(lastPlan.items.some((item) => item.id === 'session-kid'), false, 'the re-planned batch excludes the un-checked kid')
+  assert.equal(api.dialogStore.getSnapshot().clear.excluded['session:session-kid'], true, 'the exclusion is still remembered')
+  api.disposeDialog()
+})
+
+test('review dialog: a second review or clear cannot silently replace a clear in progress', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setCandidatesResponse(() => ({ ok: true, candidates: candidateRows(3), total: 3, truncated: false, totals: { count: 3, bytes: 0 } }))
+  let lastPlan = null
+  world.setPlanResponse((body) => { lastPlan = planEchoingTargets(body); return { ok: true, plan: lastPlan } })
+  world.setDeleteResponse(() => ({
+    ok: true,
+    result: {
+      items: lastPlan.items.map((item) => ({ kind: item.kind, id: item.id, status: 'trashed', error: null, movedTo: '/tmp/trash/' + item.id, bytes: item.bytes })),
+      totals: { trashed: lastPlan.items.length, deleted: 0, failed: 0, bytes: lastPlan.items.length },
+    },
+  }))
+  clearMenuAction(world).run()
+  const api = slotApi(world, 'shell.overlay')
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  const before = api.dialogStore.getSnapshot()
+  const plansBefore = world.calls.filter((call) => call.url.endsWith('cleanup.plan')).length
+  // A context-menu review and a second clear action both arrive while the walk owns the dialog.
+  api.openDialog([{ kind: 'session', id: 'session-a', title: 'other' }])
+  await clearMenuAction(world).run()
+  await sleep(40)
+  const after = api.dialogStore.getSnapshot()
+  assert.notEqual(after.clear, null, 'the clear still owns the dialog')
+  assert.deepEqual(after.targets.map((target) => target.id), before.targets.map((target) => target.id))
+  assert.equal(world.calls.filter((call) => call.url.endsWith('cleanup.plan')).length, plansBefore, 'the intruding actions sent no plan')
+  api.confirmDelete()
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'done', 'done phase', 5000)
+  api.disposeDialog()
+})
+
+test('review dialog: a workspace plan may carry swept sessions that are not reviewed rows', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setPlanResponse(() => ({
+    ok: true,
+    plan: Object.assign(cleanPlan('trash'), {
+      targets: [{ kind: 'workspace', id: 'ws-a', title: 'A', path: '/tmp/a' }],
+      items: [
+        { kind: 'workspace-dir', id: 'ws-a', workspaceId: null, title: 'A', path: '/tmp/a', bytes: 10, files: 2, dirs: 1, parentSessionId: null, isDescendant: false },
+        { kind: 'session', id: 'swept-1', workspaceId: 'ws-a', title: null, path: '/tmp/a/s1', bytes: 1, files: 1, dirs: 0, parentSessionId: null, isDescendant: false },
+        { kind: 'session', id: 'swept-2', workspaceId: 'ws-a', title: null, path: '/tmp/a/s2', bytes: 1, files: 1, dirs: 0, parentSessionId: null, isDescendant: false },
+      ],
+      totals: { workspaces: 1, sessions: 2, files: 4, dirs: 1, bytes: 12 },
+    }),
+  }))
+  world.setDeleteResponse(() => ({
+    ok: true,
+    result: {
+      items: [
+        { kind: 'workspace-dir', id: 'ws-a', status: 'trashed', error: null, movedTo: '/tmp/trash/ws-a', bytes: 10 },
+        { kind: 'session', id: 'swept-1', status: 'trashed', error: null, movedTo: '/tmp/trash/swept-1', bytes: 1 },
+        { kind: 'session', id: 'swept-2', status: 'trashed', error: null, movedTo: '/tmp/trash/swept-2', bytes: 1 },
+      ],
+      totals: { trashed: 3, deleted: 0, failed: 0, bytes: 12 },
+    },
+  }))
+  const api = slotApi(world, 'shell.overlay')
+  api.openDialog([{ kind: 'workspace', id: 'ws-a', title: 'Ȁ', path: '/tmp/a' }])
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review' && api.dialogStore.getSnapshot().refreshing !== true, 'review, not fail-closed')
+  assert.equal(api.dialogStore.getSnapshot().failureStage, null, 'swept sessions are not an un-checked-row leak')
+  api.confirmDelete()
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'done', 'done phase')
+  assert.equal(api.dialogStore.getSnapshot().error, null)
+  assert.equal(world.calls.filter((call) => call.url.endsWith('cleanup.delete')).length, 1)
+  api.disposeDialog()
+})
+
+test('review dialog: the manual permanent guard for several folders still refuses', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setPlanResponse((body) => ({ ok: true, plan: planEchoingTargets(body) }))
+  const api = slotApi(world, 'shell.overlay')
+  api.openDialog([
+    { kind: 'workspace', id: 'ws-a', title: 'A', path: '/tmp/a' },
+    { kind: 'workspace', id: 'ws-b', title: 'B', path: '/tmp/b' },
+  ])
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review' && api.dialogStore.getSnapshot().refreshing !== true, 'initial review')
+  api.setDialogMode('permanent')
+  await sleep(40)
+  const settled = api.dialogStore.getSnapshot()
+  assert.equal(settled.mode, 'trash', 'two planned folders keep permanent out of reach')
+  assert.equal(settled.modeNotice, false, 'a refused manual switch is not explained as an automatic fallback')
+  assert.equal(world.calls.filter((call) => call.url.endsWith('cleanup.plan') && call.body.mode === 'permanent').length, 0)
+  api.disposeDialog()
+})
+
+test('review dialog: the pending row state clears once the re-plan lands', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  let delayMs = 0
+  world.setPlanResponse(async (body) => {
+    if (delayMs > 0) {
+      const wait = delayMs
+      delayMs = 0
+      await new Promise((resolve) => setTimeout(resolve, wait))
+    }
+    return { ok: true, plan: planEchoingTargets(body) }
+  })
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  const api = overlay.options.inject().api
+  api.openDialog([
+    { kind: 'workspace', id: 'ws-a', title: 'A', path: '/tmp/a' },
+    { kind: 'workspace', id: 'ws-b', title: 'B', path: '/tmp/b' },
+  ])
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review' && api.dialogStore.getSnapshot().refreshing !== true, 'initial review')
+  api.setDialogSelection('workspace:ws-b', false)
+  await waitFor(() => api.dialogStore.getSnapshot().refreshing !== true && api.dialogStore.getSnapshot().plan.targets.length === 1, 'narrowed review')
+  delayMs = 300
+  api.setDialogSelection('workspace:ws-b', true)
+  await sleep(60)
+  assert.equal(api.dialogStore.getSnapshot().refreshing, true)
+  await waitFor(() => api.dialogStore.getSnapshot().refreshing !== true && api.dialogStore.getSnapshot().plan.targets.length === 2, 'settled review')
+  const text = collectText(renderDeep(overlay.component({ api, t: api.t })))
+  assert.doesNotMatch(text, /重新规划中/, 'the pending copy is gone once the plan lands')
+  assert.doesNotMatch(text, /正在重新计算复核结果/, 'the stale-totals notice is gone once the plan lands')
+  assert.match(text, /合计/, 'the real totals are back')
+  api.disposeDialog()
+})
+
+test('workspace clear: a batch that still leaks an excluded target after dropping descendants fails closed', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  const rows = [{ id: 'session-kid', cwd: '/tmp/kid', deletable: true }]
+  for (let index = 0; index < 63; index += 1) rows.push({ id: 'session-' + index, cwd: '/tmp/p' + index, deletable: true })
+  rows.push({ id: 'session-dad', cwd: '/tmp/dad', deletable: true })
+  world.setCandidatesResponse(() => ({ ok: true, candidates: rows, total: rows.length, truncated: false, totals: { count: rows.length, bytes: 0 } }))
+  // The Host keeps the un-checked kid in the plan even without descendant expansion: fail closed.
+  let lastPlan = null
+  world.setPlanResponse((body) => {
+    const targets = body.targets.map((target) => ({ kind: target.kind, id: target.id, title: target.id, path: null }))
+    const items = body.targets.map((target) => ({ kind: 'session', id: target.id, workspaceId: null, title: null, path: '/tmp/' + target.id, bytes: 1, files: 1, dirs: 0, parentSessionId: null, isDescendant: false }))
+    if (body.targets.some((target) => target.id === 'session-dad')) {
+      items.push({ kind: 'session', id: 'session-kid', workspaceId: null, title: null, path: '/tmp/kid', bytes: 1, files: 1, dirs: 0, parentSessionId: 'session-dad', isDescendant: body.includeDescendants === true })
+    }
+    lastPlan = Object.assign(cleanPlan(body.mode), {
+      targets,
+      items,
+      totals: { workspaces: 0, sessions: items.length, files: items.length, dirs: 0, bytes: items.length },
+    })
+    return { ok: true, plan: lastPlan }
+  })
+  world.setDeleteResponse(() => ({
+    ok: true,
+    result: {
+      items: lastPlan.items.map((item) => ({ kind: item.kind, id: item.id, status: 'trashed', error: null, movedTo: '/tmp/trash/' + item.id, bytes: item.bytes })),
+      totals: { trashed: lastPlan.items.length, deleted: 0, failed: 0, bytes: lastPlan.items.length },
+    },
+  }))
+  clearMenuAction(world).run()
+  const api = slotApi(world, 'shell.overlay')
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  api.setDialogSelection('session:session-kid', false)
+  await waitFor(() => api.dialogStore.getSnapshot().refreshing !== true && api.dialogStore.getSnapshot().plan.targets.length === 63, 'excluded batch review')
+  api.confirmDelete()
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'failed', 'failed phase', 8000)
+  const settled = api.dialogStore.getSnapshot()
+  assert.equal(settled.failureStage, 'plan')
+  assert.equal(settled.error.code, 'UNCHECKED_TARGET_LEAK')
+  assert.equal(world.calls.filter((call) => call.url.endsWith('cleanup.delete')).length, 1, 'only the reviewed batch was executed')
+  assert.equal(settled.clear.done.count, 63, 'the leaked batch is never deleted')
+  api.disposeDialog()
+})
+
+test('review dialog: a preserved clean delete result keeps its summary and resets for the next dialog', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setPlanResponse((body) => ({ ok: true, plan: planEchoingTargets(body) }))
+  world.setDeleteResponse(() => ({ ok: true, result: { items: [], totals: { trashed: 1, deleted: 0, failed: 0, bytes: 1 } } }))
+  const api = slotApi(world, 'shell.overlay')
+  const timer = spyDoneTimer()
+  try {
+    api.openDialog([{ kind: 'session', id: 'session-a', title: 'A' }])
+    await waitFor(() => api.dialogStore.getSnapshot().phase === 'review' && api.dialogStore.getSnapshot().refreshing !== true, 'review phase')
+    // This is what the settings copy's unmount effect does while a request is in flight.
+    api.dialogStore.setState({ keepSummary: true })
+    api.confirmDelete()
+    await waitFor(() => api.dialogStore.getSnapshot().phase === 'done', 'done phase', 5000)
+    assert.equal(timer.armed().length, 0, 'a preserved clean result waits for the user')
+    api.closeDialog()
+    assert.equal(api.dialogStore.getSnapshot().keepSummary, false, 'closing resets the preserved-summary flag')
+
+    world.setPlanResponse((body) => ({ ok: true, plan: planEchoingTargets(body) }))
+    api.openDialog([{ kind: 'session', id: 'session-a', title: 'A' }])
+    await waitFor(() => api.dialogStore.getSnapshot().phase === 'review' && api.dialogStore.getSnapshot().refreshing !== true, 'second review')
+    api.confirmDelete()
+    await waitFor(() => api.dialogStore.getSnapshot().phase === 'done', 'second done phase', 5000)
+    assert.equal(timer.armed().length, 1, 'an ordinary clean delete arms the dwell timer again')
+    api.disposeDialog()
+  } finally {
+    timer.restore()
+  }
 })

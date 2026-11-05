@@ -7,6 +7,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+_No changes yet._
+
+## [0.5.0] - 2026-11-05
+
 ### Added
 
 - The Sessions tab has a workspace filter ahead of the sort control (`全部工作区` / `未分组` / one entry
@@ -33,12 +37,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Clear workspace sessions…** in the workspace context menu: deletes every Session log of one
   workspace in one confirmed flow while keeping the folder and its registration. It pre-flights the
-  workspace, skips logs that are open or running in this app run (and says how many), reviews the
-  first plan-sized batch with the same per-Session checkboxes, then continues batch by batch with
-  folded totals, per-batch progress, and a result that reports where the walk stopped. An un-checked
-  Session is remembered and never swept up by a later batch. Empty and failed pre-flights answer in a
-  toast instead of an empty dialog; `安排删除` is withheld because it would queue one batch, not the
-  workspace.
+  workspace, skips logs that are open or running in this app run (counted once per Session and
+  reported in the review), reviews the first plan-sized batch with the same per-Session checkboxes,
+  then continues batch by batch with folded totals, per-batch progress, and a result that reports
+  where the walk stopped. An un-checked Session is remembered and never swept up by a later batch.
+  An empty or failed pre-flight renders inside the dialog — `没有可清理的会话`, or the ordinary
+  `failed` state with `重试` — and only a malformed menu target answers with a toast. When no batch
+  can run because every matched log merely waits for a restart (`clear.deletable === 0`), the rows
+  open in the review with their blockers and `安排删除`, and the deferred view says how many
+  Sessions are not yet included.
+
+### Changed
+
+- SPEC §1 now lists all three deletions, §7 documents the in-dialog pre-flight answer (only a
+  malformed menu target notifies), §5.7 documents the optional `origin`/`parentSessionId` trash
+  metadata, and §9/§10 document the final selection, re-plan, workspace-clear, Sessions-selection
+  and Trash-id behavior.
+- `locale/ui/en.json` and `locale/ui/zh.json` are regenerated as mirrors of the inline dictionaries
+  (`npm run sync-locale`) and are covered by `npm run check`.
+- Version 0.5.0.
 
 ### Fixed
 
@@ -58,10 +75,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Un-checking a subagent row no longer lets its parent's descendant expansion delete it anyway: when a
   plan would contain an un-checked reviewed row, the dialog re-plans with `includeDescendants: false`
   so the checkbox wins.
-- A workspace clear that stops early reports what is left: a refilled page with matches but nothing
-  deletable ends as `blocked` with the remaining count (and still counts in-use rows as skipped),
-  retrying resumes the walk instead of closing the summary, and closing the settings sheet no longer
-  tears down an overlay review opened while that sheet happened to be open.
+- A workspace clear that stops early reports what is left: a refilled page that brings new
+  undeletable rows ends as `blocked` with the remaining count, while a page that only repeats
+  already-counted in-use Sessions drains normally; retrying resumes the walk instead of closing the
+  summary, and closing the settings sheet no longer tears down an overlay review opened while that
+  sheet happened to be open.
 
 - The “select by rules” preview listed every candidate by its raw Session id. It now renders the
   same label the sidebar shows (title → `cwd` basename → short id), keeping the full id in the
@@ -72,6 +90,46 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dismissing the review returns to the same tab instead of dropping the user back to the app; Escape
   closes only the dialog, and closing the sheet closes the review. Context-menu deletions keep the
   `shell.overlay` path.
+
+- A workspace clear no longer dead-ends when a queued target has already vanished: every executed
+  batch prunes the queued ids it reports as `trashed`/`deleted` (including logs an earlier batch
+  removed as subagent descendants), and a batch plan that still answers `UNKNOWN_SESSION` re-reads
+  the workspace and rebuilds the queue while keeping un-checked rows and folded totals; a failing
+  batch rebuilds at most twice in a row (the budget resets after a successful batch or an explicit
+  retry), and a rebuild that yields no targets ends normally.
+- Workspace-clear skipped counts are de-duplicated per `kind:id`, so a refilled candidates page
+  cannot report the same in-use Session twice or turn an already-counted page into `blocked`.
+- A later clear batch whose plan brings back a Session the user un-checked re-plans without
+  descendant expansion, and refuses with the client-only `UNCHECKED_TARGET_LEAK` code if the target
+  still leaks; the un-checked log stays on disk, and that fallback may leave the batch's other
+  subagent logs for a later clear.
+- A partially completed clear no longer auto-closes: the result stays until the user closes it unless
+  the walk ended with no stop reason, no failures, no skipped rows and no excluded rows.
+- A permanent review whose selection grows past one workspace folder switches back to trash mode and
+  explains why, instead of sending a plan the Host would reject with
+  `PERMANENT_MULTIPLE_DIRECTORIES`.
+- While a re-plan is in flight, a checked row that is not in the new plan yet shows `重新规划中…`
+  instead of `已取消选择，不会删除`, and the totals area shows `正在重新计算复核结果…` instead of
+  the previous plan's numbers.
+- Un-checking a subagent row turns the descendant switch off with the reason shown next to it; if a
+  re-plan still contains any un-checked target (for example one swept in by a workspace folder), the
+  dialog fails closed with the client-only `UNCHECKED_TARGET_LEAK` code and sends no delete request.
+- `安排删除` is built from the reviewed plan: when that plan carries no targets the dialog fails as a
+  malformed Host response instead of falling back to rows the user un-checked.
+- Switching the Sessions tab workspace or archive filter clears the current batch selection, so rows
+  that are filtered out cannot be deleted by a batch the user cannot see.
+- The Trash tab's `父会话` short id carries the full Session id in its `title`.
+- `trash.list` reports `null` for an empty-string `origin`/`parentSessionId` written by a hand-edited
+  or legacy `meta.json` instead of leaking `""` to API consumers.
+- A review that is still deleting or queueing when the settings sheet unmounts is no longer aborted:
+  the request finishes and its progress/result is shown when Settings → Storage cleanup is reopened,
+  and a clean result produced during that window no longer disappears with the dwell timer; a review
+  that is not in flight still closes with the sheet.
+- The review dialog's and Sessions tab's group expand buttons expose `aria-controls` pointing at the
+  list they expand.
+- A "Clear workspace sessions…" action that receives a malformed menu target now reports
+  `无法识别该工作区的菜单目标，请刷新后重试。` instead of a misleading "could not read the session
+  list" toast.
 
 ## [0.4.0] - 2026-11-05
 
