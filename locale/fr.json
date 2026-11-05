@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Nettoyage du stockage",
-    "description": "Supprimez les dossiers d’espace de travail et les journaux de session, après vérification et avec une corbeille récupérable par défaut.",
+    "description": "Supprimez des dossiers d’espace de travail, des journaux de session isolés ou tous ceux d’un espace de travail : après vérification, sélection ligne par ligne et corbeille récupérable par défaut.",
     "detail": "docs/DETAIL.md"
   }
 }

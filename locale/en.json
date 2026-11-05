@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Storage cleanup",
-    "description": "Delete workspace folders and session logs behind a review step, with a recoverable trash by default.",
+    "description": "Delete workspace folders, single session logs, or every log of one workspace — reviewed and selectable row by row, with a recoverable trash by default.",
     "detail": "docs/DETAIL.en.md"
   }
 }

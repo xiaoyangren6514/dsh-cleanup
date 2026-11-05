@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Limpeza de armazenamento",
-    "description": "Exclui pastas de área de trabalho e registros de sessão após uma revisão, com uma lixeira recuperável por padrão.",
+    "description": "Exclui pastas de área de trabalho, registros de sessão isolados ou todos os de uma área de trabalho: com revisão, seleção linha a linha e lixeira recuperável por padrão.",
     "detail": "docs/DETAIL.md"
   }
 }

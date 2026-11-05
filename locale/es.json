@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Limpieza de almacenamiento",
-    "description": "Elimina carpetas de espacio de trabajo y registros de sesión tras una revisión, con una papelera recuperable por defecto.",
+    "description": "Elimina carpetas de espacio de trabajo, registros de sesión sueltos o todos los de un espacio de trabajo: con revisión, selección fila por fila y papelera recuperable por defecto.",
     "detail": "docs/DETAIL.md"
   }
 }
