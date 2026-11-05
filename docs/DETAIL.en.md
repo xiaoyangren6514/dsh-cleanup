@@ -85,8 +85,8 @@ For Sessions opened in the current Host, the review dialog offers **Schedule del
 # From npm (after publication)
 dsh plugin --profile web add dsh-cleanup@0.5.0
 
-# From GitHub, pinned to a commit
-dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#<sha>
+# From GitHub, pinned to the v0.5.0 tag (a fixed commit; swap in `git rev-parse v0.5.0` for the raw sha)
+dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.5.0
 
 # From a local checkout
 git clone https://github.com/xiaoyangren6514/dsh-cleanup.git

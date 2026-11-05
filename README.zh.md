@@ -65,8 +65,8 @@ DSH 本身对工作区只做「移除注册」（目录、文件与会话历史�
 # 从 npm 安装（包发布之后）
 dsh plugin --profile web add dsh-cleanup@0.5.0
 
-# 从 GitHub 安装并固定到一个提交
-dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#<sha>
+# 从 GitHub 安装（v0.5.0 是 tag，指向固定提交；需要严格 pin 时用 `git rev-parse v0.5.0` 换成完整 sha）
+dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.5.0
 
 # 从本地 checkout 安装
 git clone https://github.com/xiaoyangren6514/dsh-cleanup.git

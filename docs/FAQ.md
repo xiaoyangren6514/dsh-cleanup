@@ -12,8 +12,8 @@
 # npm（包发布之后）
 dsh plugin --profile web add dsh-cleanup@0.5.0
 
-# GitHub，固定到提交
-dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#<sha>
+# GitHub，固定到 v0.5.0 tag（指向固定提交；需要严格 pin 时用 `git rev-parse v0.5.0` 换成完整 sha）
+dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.5.0
 
 # 本地 checkout
 git clone https://github.com/xiaoyangren6514/dsh-cleanup.git

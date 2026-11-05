@@ -85,8 +85,8 @@ DSH 会让 Agent 及其会话写句柄存活到进程结束，并且没有公开
 # 从 npm 安装（包发布之后）
 dsh plugin --profile web add dsh-cleanup@0.5.0
 
-# 从 GitHub 安装并固定到提交
-dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#<sha>
+# 从 GitHub 安装（v0.5.0 是 tag，指向固定提交；需要严格 pin 时用 `git rev-parse v0.5.0` 换成完整 sha）
+dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.5.0
 
 # 从本地 checkout 安装
 git clone https://github.com/xiaoyangren6514/dsh-cleanup.git
