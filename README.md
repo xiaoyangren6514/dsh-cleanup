@@ -1,5 +1,5 @@
 ---
-description: "Delete registered workspace folders, Session logs, and a workspace's whole Session history behind an explicit review step, with a recoverable trash, a deferral queue for live Sessions, and a read-only storage overview page."
+description: "Workspace folder and Session log deletion with a recoverable trash, an explicit review step, token-usage insight, a selectable Session family tree, projection-cache cleanup, and a storage overview page"
 kind: "package-bundle"
 ---
 
@@ -11,10 +11,12 @@ A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) bund
 
 DSH itself only unregisters a workspace (the folder and its Sessions stay on disk) and only archives Sessions. `dsh-cleanup` fills that gap without exposing `rm -rf`: you can only delete things DSH already knows about, by id, after seeing exactly what will disappear.
 
+Since 0.6.0 it also shows what it deletes: an opt-in **usage** view (per-Session total tokens and cache-hit rate, with own/family totals and a sort-by-usage option), the Session family rendered as a **tree** with one checkbox per node, an **Open folder** control on Workspaces, Sessions and Trash rows plus the review summary, and no projection-cache residue — a deleted Session also leaves the sidebar without a page refresh.
+
 | | |
 |---|---|
 | Package | `dsh-cleanup` (imports no `@deepseek-ai/*` package, zero runtime dependencies) |
-| Version | 0.5.1 |
+| Version | 0.6.0 |
 | Repository | <https://github.com/xiaoyangren6514/dsh-cleanup> |
 | Author | fly |
 | License | [MIT](LICENSE) |
@@ -29,9 +31,14 @@ DSH itself only unregisters a workspace (the folder and its Sessions stay on dis
 | Delete a **Session** (with its subagent Session logs) | Sidebar Session right-click → **Delete session…** |
 | Clear **every Session log** of a workspace in automatic batches after one review (the folder and its registration stay) | Sidebar workspace right-click → **Clear workspace sessions…** |
 | Choose exactly what a review deletes — one checkbox per reviewed target, **Select all** / **Invert**, and a permanent mode that drops back to trash when the selection spans several folders | Review dialog |
+| Pick the Session family **per node** — subagent descendants render as a tree, one checkbox per log, tri-state parent states, explicit selection | Review dialog |
 | Filter the Sessions list by workspace; subagent logs fold under the Session they belong to | Settings → Storage cleanup → Sessions |
+| Opt-in **Tokens** and **Cache hit** columns per Session (own and family totals, sort by usage) | Settings → Storage cleanup → Sessions → **Usage** toggle |
 | See which trash entries were subagent logs and which Session they belong to | Settings → Storage cleanup → Trash (`Subagent` badge, `Parent` line) |
 | See how much every workspace and Session uses, delete in bulk | Settings → **Storage cleanup** |
+| **Open in the file manager**: a workspace folder, a Session folder, a trash entry, or the projection-cache directory | Workspaces / Sessions / Trash rows, review dialog summary, Trash header |
+| A deleted Session leaves the sidebar immediately, without a page refresh | Any Session deletion |
+| A deleted Session's `session_projcache` record goes with its files (skipped when the Host exposes no storage-domain service) | Automatic, after a Session deletion |
 | Recover a mistake (deletions go to the trash by default) | Settings → Storage cleanup → **Trash** |
 | Queue a Session that is open in the current Host for deletion at the next start | Review dialog → **Schedule deletion (runs automatically after this app exits)**; inspect/cancel it in Settings |
 | Tune cleanup policy (trash location/retention/capacity, audit log, scan budget, permanent deletion) | Settings → Storage cleanup → **Cleanup settings** |
@@ -48,7 +55,7 @@ DSH itself only unregisters a workspace (the folder and its Sessions stay on dis
 Four gates stand between a click and a deleted byte:
 
 1. **Plan before execute.** A delete request first produces a *plan*: the exact targets, file/directory counts, bytes, warnings, and blockers. The plan is one-time and expires after 5 minutes; executing re-validates the world and refuses with `STATE_CHANGED` if anything moved.
-2. **Trash by default.** Targets are moved to `<DSH_HOME>/trash/dsh-cleanup/<time>-<name>/` and can be restored or permanently purged later. Permanent deletion is an explicit second mode, and deleting a workspace folder permanently additionally requires typing the folder name.
+2. **Trash by default.** Targets are moved to `<DSH_HOME>/trash/dsh-cleanup/<time>-<name>/` and can be restored or permanently purged later. Permanent deletion is an explicit second mode; the review dialog states plainly that it cannot be undone, while the default trash keeps the log on disk until you purge it. Deleting a workspace folder permanently additionally requires typing the folder name.
 3. **Only registered, canonical targets.** A workspace folder must be a workspace DSH has registered; before execution its path is re-resolved (`lstat` + `realpath`) and must still be the recorded canonical path. Symlinks are refused. The filesystem root, the home directory, `~/.dsh`, the Host process working directory **and its ancestors**, the trash itself, and shallow paths are protected.
 4. **Never touch a live Session.** Immediate and deferred deletions probe the Session persistence write handle, including Sessions held by **another Host process**, and refuse running or open Sessions (`SESSION_RUNNING` / `SESSION_LIVE`). Opening a Session's log while the Session writes to it corrupts the log, so refusing is the only safe answer.
 
@@ -57,16 +64,31 @@ Two more guards apply to the bookkeeping:
 - **Trash ownership.** Trash entries carry an ownership marker, a configured `trashRoot` may only point at a directory dedicated to this plugin, and foreign directories are never listed or deleted.
 - **Self-owned state.** The plugin's queue, settings, and audit files live under `<DSH_HOME>/cleanup/` and are user-writable state, not a security boundary (see [Security note](#security-note)).
 
+## Known limits
+
+These are properties of DSH or of this release, not bugs to report:
+
+- **Open (live) Sessions cannot be deleted now.** DSH keeps a Session's Agent — and its log write handle — alive for the whole Host process and exposes no API to release it, so deleting the log would corrupt it. The review dialog offers **Schedule deletion**, applied at the next DSH start before any Session is restored; a Session opened by another Host process sharing the same `$DSH_HOME` is refused the same way.
+- **Usage needs the Host's query seam.** The `Usage` view only appears when the Host exposes `sessionQuery.readSession(id)`; without it the columns are hidden (and `inventory.capabilities.usage` is `false`). Usage is folded from replay-validated logs, so a fork's inherited history is excluded from its own counts and a repeated request is counted once.
+- **Projection-cache cleanup needs the Host's storage-domain service.** A deleted Session's `session_projcache` record is dropped with its files only when the Host exposes that service; otherwise the drop is silently skipped (`inventory.capabilities.projectionCache` is `false`, `cacheDropped: false` on the result). The record is a disposable fold cache, never user data, and it is rebuilt on demand.
+- **The trash never auto-cleans.** Retention days and capacity are warnings only, and the user purges. Trashed payloads keep occupying disk until purged — a trashed Session's log is still on disk, which is exactly what makes restore possible.
+- **Permanent deletion cannot be undone.** Trash mode is the default and keeps the log on disk until you purge it; permanent mode removes it immediately. Permanent deletion of a workspace folder also requires typing the folder name.
+- **Attachments are never cleaned, and the search index is the Host's.** The deletion set is the Session's stored log (plus its subagent logs). Attachment blobs a Session produced are outside that set and stay in place, and DSH reconciles its own search index.
+- **Plugin state is not a security boundary.** The queue, settings overrides, audit log, and trash metadata are user-writable files under `<DSH_HOME>/cleanup/` (and the trash under `<DSH_HOME>/trash/dsh-cleanup/`). A process running as the same user could edit them or delete files directly; "deletion is a user action" is a rule of this plugin's own surfaces, not a sandbox.
+- **Opening a folder is best-effort.** The controls exist only when the Host platform has an opener (macOS, Windows, Linux). The Host resolves the directory itself and asks the OS to open it; a file manager that does not end up focused is not reported as an error.
+- **Windows semantics are implemented but not machine-tested.** Drive/UNC roots, case-insensitive comparison, depth below the root, and junction refusal are covered by unit tests, but this release was validated on macOS; no Windows machine ran the destructive path.
+- **The test suite is unit-level.** Host and browser logic are covered by `node --test` with fake services and real temporary directories; there is no automated end-to-end run inside a real DSH GUI, so browser wiring and Host-version compatibility are verified by hand.
+
 ## Install
 
 Install the bundle into a DSH profile, then refresh the Web page once. The Host half hot-applies, but the browser half is a client module that the page only picks up after a reload.
 
 ```sh
 # From npm (after the package is published)
-dsh plugin --profile web add dsh-cleanup@0.5.1
+dsh plugin --profile web add dsh-cleanup@0.6.0
 
-# From GitHub, pinned to the v0.5.1 tag (a fixed commit; swap in `git rev-parse v0.5.1` for the raw sha)
-dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.5.1
+# From GitHub, pinned to the v0.6.0 tag (a fixed commit; swap in `git rev-parse v0.6.0` for the raw sha)
+dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.0
 
 # From a local checkout
 git clone https://github.com/xiaoyangren6514/dsh-cleanup.git
@@ -93,7 +115,7 @@ Once `dsh-cleanup` is published and listed in one of those indexes, add that ind
 - **DSH 0.2.2-rc.1** (tested). `package.json` declares `engines.dsh: ^0.2.2-alpha.3`; the plugin manager checks it before install/enable and refuses incompatible runtimes instead of running on a half-broken API.
 - **Node.js ≥ 20** for the Host half.
 - **Web GUI.** The browser half is a web client module, registered through `window.__ModuleLoader__` and the `shell.overlay` / `settings.section` / `contextMenu.*` slots.
-- **macOS (`darwin`), Linux, and Windows (`win32`).** The bundle declares `dsh.bundle.platforms: ["darwin", "linux", "win32"]`. On Windows the plugin works with drive roots and backslash paths: drive roots, the system directories (`C:\Windows`, `Program Files`, `ProgramData`), and the home directory's parent are protected, path comparison is case-insensitive, and depth is counted below the drive root, so `C:\proj` is refused as a top-level path just like `/proj`. Junctions are refused like symlinks.
+- **macOS (`darwin`), Linux, and Windows (`win32`).** The bundle declares `dsh.bundle.platforms: ["darwin", "linux", "win32"]`. On Windows the plugin works with drive roots and backslash paths: drive roots, the system directories (`C:\Windows`, `Program Files`, `ProgramData`), and the home directory's parent are protected, path comparison is case-insensitive, and depth is counted below the drive root, so `C:\proj` is refused as a top-level path just like `/proj`. Junctions are refused like symlinks. These Windows semantics are implemented and unit-tested, but this release was validated on macOS only — see [Known limits](#known-limits).
 - **Local filesystem.** The plugin acts on paths the Host process can see; remote or non-local filesystem providers are not understood.
 
 ## UI language
@@ -104,7 +126,7 @@ The plugin-manager display metadata (`locale/*.json`) ships **eight languages**,
 
 ## Docs
 
-- [FAQ](docs/FAQ.md) — deletion, recovery, live Sessions, the queue, the trash, settings, audit, Git checks, languages, troubleshooting
+- [FAQ](docs/FAQ.md) — deletion, recovery, live Sessions, the queue, the trash, settings, audit, Git checks, usage, opening directories, languages, troubleshooting
 - [Detail document](docs/DETAIL.md) — long-form capability and safety description, Chinese by default, also the market detail page ([English edition](docs/DETAIL.en.md))
 - [Specification](SPEC.md) — the frozen Host ↔ browser contract
 - [Changelog](CHANGELOG.md) — release notes

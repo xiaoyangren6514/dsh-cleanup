@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Nettoyage du stockage",
-    "description": "Supprimez des dossiers d’espace de travail, des journaux de session isolés ou tous ceux d’un espace de travail : après vérification, sélection ligne par ligne et corbeille récupérable par défaut.",
+    "description": "Supprimez des dossiers d’espace de travail, des journaux de session isolés ou tous ceux d’un espace de travail : après vérification, sélection ligne par ligne et corbeille récupérable par défaut. Affiche la consommation de jetons et le taux de cache par session, permet de choisir l’arbre de la famille de conversation et nettoie le cache de projection à la suppression.",
     "detail": "docs/DETAIL.md"
   }
 }

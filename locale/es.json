@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Limpieza de almacenamiento",
-    "description": "Elimina carpetas de espacio de trabajo, registros de sesión sueltos o todos los de un espacio de trabajo: con revisión, selección fila por fila y papelera recuperable por defecto.",
+    "description": "Elimina carpetas de espacio de trabajo, registros de sesión sueltos o todos los de un espacio de trabajo: con revisión, selección fila por fila y papelera recuperable por defecto. Muestra el consumo de tokens y la tasa de acierto de caché por sesión, permite elegir el árbol de la familia de conversación y limpia la caché de proyección al eliminar.",
     "detail": "docs/DETAIL.md"
   }
 }

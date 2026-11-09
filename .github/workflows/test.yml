@@ -1,0 +1,41 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22']
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Syntax-check every JavaScript file
+        run: |
+          for file in index.js client.js lib/*.js scripts/*.mjs test/*.mjs; do
+            node --check "$file"
+          done
+
+      - name: Unit tests
+        # A quoted glob is only expanded by newer Node test runners, so let bash's globstar turn it
+        # into explicit paths; the same test files then run on both matrix versions.
+        run: |
+          shopt -s globstar
+          node --test test/**/*.test.mjs
+
+      - name: Contract check
+        run: node scripts/check-contract.mjs

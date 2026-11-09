@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Speicher bereinigen",
-    "description": "Arbeitsbereichsordner, einzelne Sitzungsprotokolle oder alle Protokolle eines Arbeitsbereichs löschen – geprüft, zeilenweise auswählbar und standardmäßig im wiederherstellbaren Papierkorb.",
+    "description": "Arbeitsbereichsordner, einzelne Sitzungsprotokolle oder alle Protokolle eines Arbeitsbereichs löschen – geprüft, zeilenweise auswählbar und standardmäßig im wiederherstellbaren Papierkorb. Zeigt Token-Verbrauch und Cache-Trefferquote pro Sitzung, erlaubt die Auswahl des Gesprächsfamilien-Baums und bereinigt den Projektions-Cache beim Löschen.",
     "detail": "docs/DETAIL.md"
   }
 }

@@ -43,6 +43,9 @@ window.__ModuleLoader__.load({
       settingsGet: '/api/cleanup.settings.get'.slice(1),
       settingsSet: '/api/cleanup.settings.set'.slice(1),
       candidates: '/api/cleanup.candidates'.slice(1),
+      // 0.6.0 surfaces (SPEC §4.10/§4.11).
+      usage: '/api/cleanup.usage'.slice(1),
+      open: '/api/cleanup.open'.slice(1),
     }
 
     /** How long a successful result stays on screen before the dialog closes itself. */
@@ -91,6 +94,17 @@ window.__ModuleLoader__.load({
     const AUDIT_NOTICE_WINDOW_MS = 24 * 60 * 60 * 1000
     /** localStorage key holding the acknowledged startup timestamp (guarded everywhere). */
     const AUDIT_NOTICE_STORAGE_KEY = 'dsh-cleanup.auditStartupAck'
+    /**
+     * Session-usage opt-in (SPEC §10 "Usage (0.6.0)"). The key is plugin-owned; every access is
+     * wrapped so a browser that blocks localStorage cannot break the page (default: off).
+     */
+    const USAGE_PREF_STORAGE_KEY = 'dsh-cleanup.usageEnabled'
+    /** Host limit for one `POST api/cleanup.usage` request (SPEC §4.10). */
+    const USAGE_CHUNK_MAX = 200
+    /** Cache-hit rates are shown rounded to whole percent. */
+    const USAGE_PERCENT_FORMAT = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 })
+    /** Tokens below this are printed verbatim; above it the compact k/M form is used. */
+    const USAGE_COMPACT_STEP = 1000
     /** One mebibyte; byte-valued settings are edited in MB. */
     const BYTES_PER_MB = 1024 * 1024
     /**
@@ -549,6 +563,37 @@ window.__ModuleLoader__.load({
       'error.DEFERRED_BUSY': '另一个进程正在更新或执行待删除队列，请稍后重试。',
       'error.DEFERRED_TARGETS_CHANGED': '待删除的复核结果已变化（会出现当时未复核的项目），请重新复核后再安排。',
       'error.DEFERRED_ENTRY_UNKNOWN': '该待删除安排已不存在，请刷新后重试。',
+      // 0.6.0: session usage (SPEC §10 "Usage (0.6.0)").
+      'sessions.usage.toggle': '用量',
+      'sessions.usage.toggleHint': '启用后按需读取本机会话日志并折叠用量；只在本页显示，不会上传。',
+      'sessions.usage.unavailable': '此 DSH Host 未提供会话用量统计，用量列已隐藏。',
+      'sessions.usage.total': '令牌',
+      'sessions.usage.cacheHit': '缓存命中',
+      'sessions.usage.unknown': '—',
+      'sessions.usage.totalTitle': '总令牌数：{count}',
+      'sessions.usage.cacheHitTitle': '缓存命中率：{rate}%（缓存读取 {read} / 未命中 {miss}）',
+      'sessions.usage.familyTitle': '本会话：{own}；含子代理合计：{family}',
+      'sessions.usage.loading': '正在加载用量…',
+      'sessions.usage.failed': '用量加载失败',
+      'sessions.usage.retry': '重试用量',
+      'sessions.sort.usage': '按用量排序',
+      // 0.6.0: review-dialog family tree (SPEC §9 "The family tree (0.6.0)").
+      'dialog.tree.label': '会话树：{count} 条子代理日志',
+      'dialog.tree.badge.child': '子代理',
+      'dialog.tree.badge.derived': '派生',
+      'dialog.tree.selected_one': '已选 {checked}/{total} 条日志',
+      'dialog.tree.selected_other': '已选 {checked}/{total} 条日志',
+      // 0.6.0: permanent mode is irreversible; say so next to the mode selector.
+      'dialog.mode.permIrreversible': '彻底删除会立即销毁数据，无法撤销，也不会进入回收站。',
+      // 0.6.0: folder/cache opener (SPEC §4.11).
+      'open.folder': '打开文件夹',
+      'open.cache': '打开缓存目录',
+      'open.folderNamed': '打开「{title}」所在文件夹',
+      'open.cacheNamed': '打开会话投影缓存目录',
+      'open.errorTitle': '无法打开文件夹',
+      'open.retry': '重试打开',
+      'error.OPEN_FAILED': '系统无法启动文件管理器来打开该目录。',
+      'error.OPEN_UNAVAILABLE': '当前平台没有可用的文件管理器打开方式。',
     }
 
     const en = {
@@ -988,6 +1033,37 @@ window.__ModuleLoader__.load({
       'error.DEFERRED_BUSY': 'Another process is updating or applying the deferred queue. Try again in a moment.',
       'error.DEFERRED_TARGETS_CHANGED': 'The reviewed deletion set changed since it was queued. Review it anew and schedule it again.',
       'error.DEFERRED_ENTRY_UNKNOWN': 'That scheduled deletion no longer exists. Refresh and try again.',
+      // 0.6.0: session usage (SPEC §10 "Usage (0.6.0)").
+      'sessions.usage.toggle': 'Usage',
+      'sessions.usage.toggleHint': 'Reads and folds this machine’s session logs on demand; shown only on this page and never uploaded.',
+      'sessions.usage.unavailable': 'This DSH host does not provide session usage, so the usage columns are hidden.',
+      'sessions.usage.total': 'Tokens',
+      'sessions.usage.cacheHit': 'Cache hit',
+      'sessions.usage.unknown': '—',
+      'sessions.usage.totalTitle': 'Total tokens: {count}',
+      'sessions.usage.cacheHitTitle': 'Cache hit rate: {rate}% (cache read {read} / miss {miss})',
+      'sessions.usage.familyTitle': 'This session: {own}; family total including subagents: {family}',
+      'sessions.usage.loading': 'Loading usage…',
+      'sessions.usage.failed': 'Could not load usage',
+      'sessions.usage.retry': 'Retry usage',
+      'sessions.sort.usage': 'Largest usage',
+      // 0.6.0: review-dialog family tree (SPEC §9 "The family tree (0.6.0)").
+      'dialog.tree.label': 'Session tree with {count} subagent logs',
+      'dialog.tree.badge.child': 'Subagent',
+      'dialog.tree.badge.derived': 'Derived',
+      'dialog.tree.selected_one': '{checked}/{total} log selected',
+      'dialog.tree.selected_other': '{checked}/{total} logs selected',
+      // 0.6.0: permanent mode is irreversible; say so next to the mode selector.
+      'dialog.mode.permIrreversible': 'Permanent deletion destroys the data immediately, cannot be undone, and does not go to the trash.',
+      // 0.6.0: folder/cache opener (SPEC §4.11).
+      'open.folder': 'Open folder',
+      'open.cache': 'Open cache folder',
+      'open.folderNamed': 'Open the folder for “{title}”',
+      'open.cacheNamed': 'Open the session projection-cache folder',
+      'open.errorTitle': 'Could not open the folder',
+      'open.retry': 'Retry opening',
+      'error.OPEN_FAILED': 'The system could not start a file manager to open that folder.',
+      'error.OPEN_UNAVAILABLE': 'This platform has no file manager available to open folders.',
     }
 
     /**
@@ -1031,6 +1107,30 @@ window.__ModuleLoader__.load({
       return formatter.format(scaled) + ' ' + units[index]
     }
 
+    /**
+     * Compact token count for the usage column (`12.3k`, `1.2M`). Kept separate from
+     * `formatBytes` because tokens are counts, not storage sizes.
+     */
+    function formatCompactTokens(value) {
+      const tokens = typeof value === 'number' && isFinite(value) && value > 0 ? value : 0
+      if (tokens < USAGE_COMPACT_STEP) return numberFormat0.format(tokens)
+      const units = ['k', 'M', 'G', 'T']
+      let scaled = tokens / USAGE_COMPACT_STEP
+      let index = 0
+      while (scaled >= USAGE_COMPACT_STEP && index < units.length - 1) {
+        scaled = scaled / USAGE_COMPACT_STEP
+        index += 1
+      }
+      const formatter = scaled < 10 ? numberFormat1 : numberFormat0
+      return formatter.format(scaled) + units[index]
+    }
+
+    /** Whole-percent label for the cache-hit column (`87%`), or null when unknowable. */
+    function formatUsagePercent(rate) {
+      if (typeof rate !== 'number' || !isFinite(rate) || rate < 0 || rate > 1) return null
+      return USAGE_PERCENT_FORMAT.format(Math.round(rate * 100)) + '%'
+    }
+
     function formatTime(milliseconds) {
       if (typeof milliseconds !== 'number' || !isFinite(milliseconds) || milliseconds <= 0) return ''
       try {
@@ -1039,7 +1139,6 @@ window.__ModuleLoader__.load({
         return ''
       }
     }
-
     // ---------------------------------------------------------- locale plurals
 
     /**
@@ -1195,6 +1294,29 @@ window.__ModuleLoader__.load({
     function isAbortError(error) {
       if (!error) return false
       return error.name === 'AbortError' || error.code === 20 || error.code === 'ABORT_ERR'
+    }
+
+    /** Read a plugin-owned boolean preference; a blocked or broken localStorage keeps the default. */
+    function readBooleanPreference(key, fallback) {
+      try {
+        if (typeof localStorage === 'undefined' || localStorage === null) return fallback
+        const raw = localStorage.getItem(key)
+        if (raw === 'true') return true
+        if (raw === 'false') return false
+        return fallback
+      } catch (error) {
+        return fallback
+      }
+    }
+
+    /** Persist a plugin-owned boolean preference; never throws (private mode may refuse writes). */
+    function writeBooleanPreference(key, value) {
+      try {
+        if (typeof localStorage === 'undefined' || localStorage === null) return
+        localStorage.setItem(key, value === true ? 'true' : 'false')
+      } catch (error) {
+        /* a blocked storage is not an error the page can act on */
+      }
     }
 
     // --------------------------------------------------------- tiny utilities
@@ -1569,10 +1691,25 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * Host capabilities from `inventory.capabilities` (SPEC §3/§4.1). A capability the wire
+     * does not report is treated as absent: the surface stays hidden instead of offering a
+     * control the Host cannot serve.
+     */
+    function normalizeCapabilities(value) {
+      const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+      return {
+        usage: source.usage === true,
+        projectionCache: source.projectionCache === true,
+        openPath: source.openPath === true,
+      }
+    }
+
     function normalizeInventory(payload) {
       return {
         generatedAt: typeof payload.generatedAt === 'number' ? payload.generatedAt : null,
         dshHome: typeof payload.dshHome === 'string' ? payload.dshHome : null,
+        capabilities: normalizeCapabilities(payload.capabilities),
         trash: normalizeTrashSummary(payload.trash),
         workspaces: Array.isArray(payload.workspaces) ? payload.workspaces : [],
         sessions: Array.isArray(payload.sessions) ? payload.sessions : [],
@@ -1616,6 +1753,67 @@ window.__ModuleLoader__.load({
         overCapacity: value.overCapacity === true,
         suggestedEntryIds: suggested,
       }
+    }
+
+    /** One non-negative finite number from the wire, else null (unknown is not zero). */
+    function finiteNonNegative(value) {
+      return typeof value === 'number' && isFinite(value) && value >= 0 ? value : null
+    }
+
+    /**
+     * One `usage` entry from `POST api/cleanup.usage` (SPEC §4.10/§5.11). A row without a
+     * usable `totalTokens` is unknown, never a zero: the UI renders its muted dash instead.
+     */
+    function normalizeUsageRow(value) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+      const totalTokens = finiteNonNegative(value.totalTokens)
+      if (totalTokens === null) return null
+      const cacheRead = finiteNonNegative(value.cacheReadInputTokens)
+      const cacheMiss = finiteNonNegative(value.cacheMissInputTokens)
+      const promptTokens = cacheRead !== null && cacheMiss !== null ? cacheRead + cacheMiss : null
+      return {
+        totalTokens: totalTokens,
+        cacheReadInputTokens: cacheRead,
+        cacheMissInputTokens: cacheMiss,
+        cacheHitRate: promptTokens !== null && promptTokens > 0 ? cacheRead / promptTokens : null,
+        requestCount: finiteNonNegative(value.requestCount),
+        complete: value.complete !== false,
+      }
+    }
+
+    /**
+     * Normalize the whole usage answer. `available: false` means the Host cannot fold usage at
+     * all: the caller hides every usage surface instead of showing empty columns.
+     */
+    function normalizeUsageEnvelope(payload) {
+      const available = payload.available !== false
+      const usage = {}
+      const failed = {}
+      const rawUsage = payload.usage && typeof payload.usage === 'object' && !Array.isArray(payload.usage) ? payload.usage : {}
+      const ids = Object.keys(rawUsage)
+      for (let i = 0; i < ids.length; i += 1) {
+        const row = normalizeUsageRow(rawUsage[ids[i]])
+        if (row !== null) usage[ids[i]] = row
+      }
+      const rawFailed = payload.failed && typeof payload.failed === 'object' && !Array.isArray(payload.failed) ? payload.failed : {}
+      const failedIds = Object.keys(rawFailed)
+      for (let i = 0; i < failedIds.length; i += 1) {
+        const code = rawFailed[failedIds[i]]
+        failed[failedIds[i]] = typeof code === 'string' && code !== '' ? code : 'READ_FAILED'
+      }
+      return { available: available, usage: usage, failed: failed }
+    }
+
+    /**
+     * Cache key for one Session's usage fold (SPEC §5.11): the Host caches by
+     * `(eventCount, sizeBytes)`, so a change here invalidates the client's cached row too.
+     */
+    function usageSignatureOf(session) {
+      if (!session || typeof session !== 'object') return null
+      const eventCount = finiteNonNegative(session.eventCount)
+      const sizeBytes = finiteNonNegative(session.sizeBytes)
+      if (eventCount === null && sizeBytes === null) return null
+      return String(eventCount === null ? '' : eventCount) + ':' + String(sizeBytes === null ? '' : sizeBytes)
     }
 
     /** One audit record from `inventory.audit.recent` (SPEC §4.1/§5.9). */
@@ -2185,6 +2383,19 @@ window.__ModuleLoader__.load({
       '.dsh-cleanup-target-more{align-self:flex-start;background:none;border:none;padding:0;color:var(--dsw-alias-label-secondary);font:inherit;font-size:11.5px;cursor:pointer;text-decoration:underline}',
       '.dsh-cleanup-target-more:disabled{opacity:.6;cursor:default;text-decoration:none}',
       '.dsh-cleanup-target-child-list{display:flex;flex-direction:column;gap:6px}',
+      '.dsh-cleanup-tree{display:flex;flex-direction:column;gap:2px;padding:2px 0}',
+      '.dsh-cleanup-tree-summary{font-size:11.5px;line-height:17px;color:var(--dsw-alias-label-secondary);padding:2px 0 4px}',
+      '.dsh-cleanup-tree-node{display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:6px;min-width:0;cursor:pointer}',
+      '.dsh-cleanup-tree-node:hover{background:var(--dsw-alias-bg-layer-2)}',
+      '.dsh-cleanup-tree-check{accent-color:var(--dsw-alias-brand-primary);flex:none;width:13px;height:13px;cursor:pointer}',
+      '.dsh-cleanup-tree-node .dsh-cleanup-item-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.dsh-cleanup-tree-meta{margin-left:auto;flex:none;font-size:11.5px;line-height:17px;color:var(--dsw-alias-label-secondary)}',
+      '.dsh-cleanup-usage{display:inline-flex;gap:10px;margin-left:8px;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary)}',
+      '.dsh-cleanup-usage-total{min-width:54px;text-align:right}',
+      '.dsh-cleanup-usage-hit{min-width:42px;text-align:right}',
+      '.dsh-cleanup-usage-unavailable{flex-basis:100%}',
+      '.dsh-cleanup-usage-error{display:inline-flex;align-items:center;gap:8px;font-size:11.5px;line-height:17px;color:var(--dsw-alias-state-error-primary)}',
+      '.dsh-cleanup-perm-warning{margin-top:6px}',
       '.dsh-cleanup-session-group{display:flex;flex-direction:column;gap:6px;min-width:0}',
       '.dsh-cleanup-field{display:flex;flex-direction:column;gap:5px}',
       '.dsh-cleanup-field-label{font-size:12px;line-height:18px;color:var(--dsw-alias-label-primary)}',
@@ -2373,7 +2584,9 @@ window.__ModuleLoader__.load({
     /**
      * Sessions-tab comparator. Newest/oldest use the same key the page has
      * always shown; largest sorts measured sizes first and leaves unmeasured rows
-     * last (they are not comparable), newest-first among themselves.
+     * last (they are not comparable), newest-first among themselves. The opt-in
+     * `usage` sort ranks by the Session's own total tokens and leaves rows whose
+     * usage is not known last (a dash is not a zero).
      */
     function compareSessionRows(catalog, state, sort, left, right) {
       if (sort === 'oldest' || sort === 'newest') {
@@ -2387,6 +2600,20 @@ window.__ModuleLoader__.load({
         }
         return String(left && left.id).localeCompare(String(right && right.id))
       }
+      if (sort === 'usage') {
+        const usage = state && state.usage && typeof state.usage === 'object' ? state.usage : {}
+        const usageOf = function (session) {
+          const row = usage[session && session.id]
+          return row && typeof row.totalTokens === 'number' && isFinite(row.totalTokens) ? row.totalTokens : null
+        }
+        const leftTokens = usageOf(left)
+        const rightTokens = usageOf(right)
+        const leftKnown = leftTokens !== null
+        const rightKnown = rightTokens !== null
+        if (leftKnown !== rightKnown) return leftKnown ? -1 : 1
+        if (leftKnown && leftTokens !== rightTokens) return rightTokens - leftTokens
+        return compareSessionRows(catalog, state, 'newest', left, right)
+      }
       const leftBytes = sessionMeasuredBytes(state, left)
       const rightBytes = sessionMeasuredBytes(state, right)
       const leftKnown = leftBytes !== null
@@ -2395,6 +2622,111 @@ window.__ModuleLoader__.load({
       if (leftKnown && leftBytes !== rightBytes) return rightBytes - leftBytes
       return compareSessionRows(catalog, state, 'newest', left, right)
     }
+
+    /** Sessions matching the tab's workspace + archive filters, in the active sort order. */
+    function filteredSessionRows(state, catalog) {
+      const inventory = state && state.inventory ? state.inventory : null
+      const allSessions = inventory && Array.isArray(inventory.sessions) ? inventory.sessions.slice() : []
+      const sort = state && (state.sessionSort === 'oldest' || state.sessionSort === 'largest' || state.sessionSort === 'usage')
+        ? state.sessionSort
+        : 'newest'
+      const filter = state && (state.sessionFilter === 'archived' || state.sessionFilter === 'active') ? state.sessionFilter : 'all'
+      const workspaceFilter = state && typeof state.sessionWorkspace === 'string' ? state.sessionWorkspace : SESSION_WORKSPACE_ANY
+      const byId = Object.create(null)
+      for (let i = 0; i < allSessions.length; i += 1) byId[allSessions[i].id] = allSessions[i]
+      const filtered = allSessions
+        .filter(function (session) {
+          return workspaceMatchesFilter(sessionWorkspaceOf(session, byId), workspaceFilter)
+        })
+        .filter(function (session) { return sessionMatchesFilter(session, filter) })
+      filtered.sort(function (left, right) { return compareSessionRows(catalog, state, sort, left, right) })
+      return filtered
+    }
+
+    /** Rows the Sessions tab renders now (`sessionLimit`), the same set the usage fetch covers. */
+    function visibleSessionRows(state, catalog) {
+      const limit = state && typeof state.sessionLimit === 'number' && state.sessionLimit > 0
+        ? state.sessionLimit
+        : SESSION_PAGE_SIZE
+      return filteredSessionRows(state, catalog).slice(0, limit)
+    }
+
+    /**
+     * Descendant id → true for every known tree node below `nodeId` (SPEC §9 tree:
+     * checking a node checks its subtree). Cycle-safe; the node itself is not included.
+     */
+    function nodeDescendantIds(nodes, nodeId) {
+      const descendants = []
+      if (!nodes || typeof nodes !== 'object' || typeof nodeId !== 'string' || nodeId === '') return descendants
+      const childrenOf = Object.create(null)
+      const ids = Object.keys(nodes)
+      for (let i = 0; i < ids.length; i += 1) {
+        const parentId = nodes[ids[i]] && typeof nodes[ids[i]].parentSessionId === 'string'
+          ? nodes[ids[i]].parentSessionId
+          : ''
+        if (parentId === '') continue
+        if (childrenOf[parentId] === undefined) childrenOf[parentId] = []
+        childrenOf[parentId].push(ids[i])
+      }
+      const queue = (childrenOf[nodeId] || []).slice()
+      const seen = Object.create(null)
+      seen[nodeId] = true
+      while (queue.length > 0) {
+        const id = queue.shift()
+        if (seen[id] === true) continue
+        seen[id] = true
+        descendants.push(id)
+        const children = childrenOf[id] || []
+        for (let i = 0; i < children.length; i += 1) queue.push(children[i])
+      }
+      return descendants
+    }
+
+    /** The node plus its whole subtree, cycle-safe. */
+    function nodeSubtreeIds(nodes, nodeId) {
+      if (typeof nodeId !== 'string' || nodeId === '') return []
+      return [nodeId].concat(nodeDescendantIds(nodes, nodeId))
+    }
+
+    /**
+     * Depth-first flattening of one reviewed Session's tree. Nodes are those collected from the
+     * plans for the same root target; a node whose parent is outside the known set starts at
+     * depth 1, and nodes left over by a corrupt parent cycle are appended instead of vanishing.
+     */
+    function flattenNodeTree(nodes, rootId) {
+      const rows = []
+      if (!nodes || typeof nodes !== 'object') return rows
+      const ids = Object.keys(nodes).filter(function (id) {
+        return nodes[id] && nodes[id].rootId === rootId
+      })
+      if (ids.length === 0) return rows
+      const known = Object.create(null)
+      for (let i = 0; i < ids.length; i += 1) known[ids[i]] = true
+      const childrenOf = Object.create(null)
+      const roots = []
+      for (let i = 0; i < ids.length; i += 1) {
+        const id = ids[i]
+        const parentId = typeof nodes[id].parentSessionId === 'string' ? nodes[id].parentSessionId : ''
+        if (parentId === '' || parentId === rootId || parentId === id || known[parentId] !== true) {
+          roots.push(id)
+          continue
+        }
+        if (childrenOf[parentId] === undefined) childrenOf[parentId] = []
+        childrenOf[parentId].push(id)
+      }
+      const visited = Object.create(null)
+      function walk(id, depth) {
+        if (visited[id] === true) return
+        visited[id] = true
+        rows.push({ item: nodes[id], depth: depth })
+        const children = childrenOf[id] || []
+        for (let i = 0; i < children.length; i += 1) walk(children[i], depth + 1)
+      }
+      for (let i = 0; i < roots.length; i += 1) walk(roots[i], 1)
+      for (let i = 0; i < ids.length; i += 1) walk(ids[i], 1)
+      return rows
+    }
+
 
     /**
      * Can this blocked plan be queued for the next DSH start? Only when it has at
@@ -2680,11 +3012,88 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** Collapsible list of the items that ride along with one reviewed row (SPEC §9). */
+    /**
+     * One node of the review family tree (SPEC §9 "The family tree (0.6.0)"): a checkbox, a
+     * `子代理`/`派生` badge, the title and the item size, indented one step per level. `aria-checked`
+     * carries the tri-state (a partially selected subtree renders `mixed`).
+     */
+    function renderTreeRow(context) {
+      const t = context.t
+      const item = context.item
+      const title = planItemTitle(t, item, context.catalog)
+      const bytes = typeof item.bytes === 'number' && isFinite(item.bytes) ? item.bytes : 0
+      const sizeText = (item.truncated === true ? '≥ ' : '') + formatBytes(bytes)
+      const checked = context.checked === true
+      const mixed = context.mixed === true
+      const badge = context.depth <= 1 ? t('dialog.tree.badge.child') : t('dialog.tree.badge.derived')
+      return h('label', {
+        className: 'dsh-cleanup-tree-node',
+        key: 'node:' + String(item.id),
+        'data-depth': context.depth,
+        style: { paddingLeft: ((Math.max(1, context.depth) - 1) * 14) + 'px' },
+      },
+        h('input', {
+          type: 'checkbox',
+          className: 'dsh-cleanup-tree-check',
+          checked: checked,
+          'aria-checked': mixed ? 'mixed' : (checked ? 'true' : 'false'),
+          // Native checkboxes cannot express the third state through `checked`; the DOM property
+          // makes the visual state match `aria-checked="mixed"` (SPEC §9 tree).
+          ref: function (node) { if (node) { try { node.indeterminate = mixed } catch (error) { /* best effort */ } } },
+          disabled: context.disabled,
+          'aria-label': t('dialog.tree.label', { count: formatNumber(context.familySize) }) + ': ' + title,
+          onChange: function (event) { context.onToggleNode(item.id, event.target.checked) },
+        }),
+        h(Badge, { tone: 'idle' }, badge),
+        h('span', { className: 'dsh-cleanup-item-title', title: title }, title),
+        h('span', { className: 'dsh-cleanup-tree-meta' }, sizeText),
+      )
+    }
+
+    /**
+     * Collapsible list of the items that ride along with one reviewed row (SPEC §9). A Session
+     * with known subagent logs expands into the depth-first family tree; a workspace folder sweep
+     * keeps the flat list (its Sessions are swept by predicate, so they are not tree nodes).
+     */
     function renderTargetChildren(context) {
       const t = context.t
       const items = context.items
-      if (items.length === 0) return null
+      const treeRows = Array.isArray(context.treeRows) ? context.treeRows : []
+      if (items.length === 0 && treeRows.length === 0) return null
+      const count = treeRows.length > 0 ? treeRows.length : items.length
+      let expandedContent = null
+      if (context.expanded) {
+        if (treeRows.length > 0) {
+          const summary = context.treeSummary || { checked: 0, total: treeRows.length }
+          expandedContent = h('div', {
+            className: 'dsh-cleanup-tree',
+            role: 'group',
+            'aria-label': t('dialog.tree.label', { count: formatNumber(treeRows.length) }),
+          },
+            h('div', { className: 'dsh-cleanup-tree-summary' },
+              plural(t, 'dialog.tree.selected', summary.total, {
+                checked: formatNumber(summary.checked),
+                total: formatNumber(summary.total),
+              })),
+            treeRows.map(function (row) {
+              const nodeId = row.item && typeof row.item.id === 'string' ? row.item.id : ''
+              return renderTreeRow({
+                t: t,
+                catalog: context.catalog,
+                item: row.item,
+                depth: row.depth,
+                familySize: treeRows.length,
+                checked: context.nodeChecked(nodeId) === true,
+                mixed: context.nodeMixed(nodeId) === true,
+                disabled: context.disabled,
+                onToggleNode: context.onToggleNode,
+              })
+            }),
+          )
+        } else {
+          expandedContent = items.map(function (item) { return renderPlanItem(t, item, context.catalog) })
+        }
+      }
       return h('div', { className: 'dsh-cleanup-target-children' },
         h('button', {
           type: 'button',
@@ -2694,12 +3103,13 @@ window.__ModuleLoader__.load({
           disabled: context.disabled,
           onClick: context.onToggleExpanded,
         },
-          (context.expanded ? t('dialog.groups.hide') : t('dialog.groups.show')) + ' · ' + plural(t, context.summaryKey, items.length),
+          (context.expanded ? t('dialog.groups.hide') : t('dialog.groups.show'))
+            + ' · '
+            + (context.treeRows
+              ? plural(t, 'dialog.groups.descendants', count)
+              : plural(t, context.summaryKey, count)),
         ),
-        h('div', { id: context.listId, className: 'dsh-cleanup-target-child-list' },
-          context.expanded
-            ? items.map(function (item) { return renderPlanItem(t, item, context.catalog) })
-            : null),
+        h('div', { id: context.listId, className: 'dsh-cleanup-target-child-list' }, expandedContent),
       )
     }
 
@@ -2759,6 +3169,29 @@ window.__ModuleLoader__.load({
       const selection = Object.create(null)
       for (let i = 0; i < state.selection.length; i += 1) selection[state.selection[i]] = true
       const grouped = groupPlanItems(items, state.targets)
+      // 0.6.0 family tree: every Session item that is not a reviewed row is a known node,
+      // ordered depth-first per reviewed target. The switch and the tree are two views of one
+      // set: switch on ⇒ every node selected; switch off ⇒ only the explicitly checked nodes
+      // are planned (SPEC §9).
+      const knownNodes = state.knownNodes && typeof state.knownNodes === 'object' ? state.knownNodes : {}
+      const nodeSelection = Object.create(null)
+      const rawNodeSelection = Array.isArray(state.nodeSelection) ? state.nodeSelection : []
+      for (let i = 0; i < rawNodeSelection.length; i += 1) nodeSelection[rawNodeSelection[i]] = true
+      const allNodesSelected = state.includeDescendants === true
+      function nodeIsChecked(nodeId) {
+        if (allNodesSelected) return true
+        return nodeSelection[nodeId] === true
+      }
+      function nodeSelectionState(nodeId) {
+        const family = nodeSubtreeIds(knownNodes, nodeId)
+        let checkedCount = 0
+        for (let i = 0; i < family.length; i += 1) {
+          if (nodeIsChecked(family[i]) === true) checkedCount += 1
+        }
+        if (checkedCount === family.length && family.length > 0) return { checked: true, mixed: false }
+        if (checkedCount === 0) return { checked: false, mixed: false }
+        return { checked: false, mixed: true }
+      }
       // Every reviewed row is checkable — a single target too, because un-checking it is how the user
       // backs out before confirming. A workspace clear narrows its current batch the same way and
       // remembers the exclusions for the batches that follow.
@@ -2766,6 +3199,11 @@ window.__ModuleLoader__.load({
       let checkedRows = 0
       for (let i = 0; i < state.targets.length; i += 1) {
         if (selection[targetKey(state.targets[i])] === true) checkedRows += 1
+      }
+      let checkedNodes = 0
+      const knownNodeIds = Object.keys(knownNodes)
+      for (let i = 0; i < knownNodeIds.length; i += 1) {
+        if (nodeIsChecked(knownNodeIds[i]) === true) checkedNodes += 1
       }
       // SPEC §4.3/§9: one typed folder name must never authorize several folders.
       // The Host refuses such a plan outright; the UI disables the option first.
@@ -2788,7 +3226,7 @@ window.__ModuleLoader__.load({
               h('button', {
                 type: 'button',
                 className: 'dsh-cleanup-inline-action',
-                disabled: disabled || checkedRows === state.targets.length,
+                disabled: disabled || (checkedRows === state.targets.length && checkedNodes === knownNodeIds.length),
                 onClick: context.onSelectAll,
               }, t('dialog.select.all')),
               h('button', {
@@ -2800,7 +3238,7 @@ window.__ModuleLoader__.load({
             )
             : null,
         ),
-        selectable && state.targets.length > 1
+        selectable && (state.targets.length > 1 || knownNodeIds.length > 0)
           ? h('div', { className: 'dsh-cleanup-muted' }, plural(t, 'dialog.select.count', checkedRows, { total: formatNumber(state.targets.length) }))
           : null,
         selectable && checkedRows === 0
@@ -2809,11 +3247,19 @@ window.__ModuleLoader__.load({
         h('div', { className: 'dsh-cleanup-target-list' }, grouped.groups.map(function (group) {
           const groupKey = targetKey(group.target)
           const isWorkspace = group.target.kind === 'workspace'
-          // Swept folder Sessions follow `includeSessions`; subagent logs follow
-          // `includeDescendants`. Both are collapsed under the row they belong to.
+          // A workspace folder sweep has no tree: its Sessions are swept by the folder predicate,
+          // so their control stays the `includeSessions` switch plus the row checkbox. A Session
+          // target expands its known subagent logs as the family tree (SPEC §9).
+          const treeRows = isWorkspace ? [] : flattenNodeTree(knownNodes, group.target.id)
+          let familyChecked = 0
+          let familyTotal = treeRows.length + (group.main === null ? 0 : 1)
+          if (group.main !== null && selection[groupKey] === true) familyChecked += 1
+          for (let i = 0; i < treeRows.length; i += 1) {
+            if (nodeIsChecked(treeRows[i].item.id) === true) familyChecked += 1
+          }
           const rideAlong = isWorkspace
             ? (state.includeSessions === true ? group.swept : [])
-            : (state.includeDescendants === true ? group.children : [])
+            : []
           return h('div', { className: 'dsh-cleanup-target-block', key: 'block:' + groupKey },
             renderTargetRow({
               t: t,
@@ -2831,10 +3277,15 @@ window.__ModuleLoader__.load({
               t: t,
               catalog: catalog,
               items: rideAlong,
+              treeRows: treeRows.length > 0 ? treeRows : null,
+              treeSummary: { checked: familyChecked, total: familyTotal },
               listId: 'dsh-cleanup-target-kids-' + domIdSafe(groupKey),
               summaryKey: isWorkspace ? 'dialog.groups.swept' : 'dialog.groups.descendants',
               expanded: context.expandedGroups[groupKey] === true,
               disabled: disabled,
+              nodeChecked: function (nodeId) { return nodeSelectionState(nodeId).checked },
+              nodeMixed: function (nodeId) { return nodeSelectionState(nodeId).mixed },
+              onToggleNode: context.onToggleNodeSelection,
               onToggleExpanded: function () { context.onToggleGroup(groupKey) },
             }),
           )
@@ -2854,7 +3305,7 @@ window.__ModuleLoader__.load({
             h('span', null, t('dialog.includeDescendants')),
           )
           : null,
-        state.descendantsAutoOff === true && state.clear === null
+        state.descendantsAutoOff === true
           ? h('div', { className: 'dsh-cleanup-muted', key: 'descendants-auto-off' }, t('dialog.descendants.autoOff'))
           : null,
         state.refreshing === true
@@ -2944,6 +3395,14 @@ window.__ModuleLoader__.load({
           }),
         ),
         h('div', { className: 'dsh-cleanup-muted' }, t(state.mode === 'permanent' ? 'dialog.mode.permHint' : 'dialog.mode.trashHint')),
+        // 0.6.0: permanent mode is destructive on a different level than the trash; state the
+        // irreversibility next to the selector, not only in the hint (trash stays the default).
+        state.mode === 'permanent'
+          ? h('div', { className: 'dsh-cleanup-perm-warning dsh-cleanup-notice dsh-cleanup-notice-error', key: 'perm-warning', role: 'alert' },
+            h('span', { className: 'dsh-cleanup-notice-mark', 'aria-hidden': 'true' }, '!'),
+            h('span', null, t('dialog.mode.permIrreversible')),
+          )
+          : null,
         state.modeNotice === true
           ? h('div', { className: 'dsh-cleanup-notice', key: 'mode-notice' },
             h('span', { className: 'dsh-cleanup-notice-mark', 'aria-hidden': 'true' }, 'i'),
@@ -3254,11 +3713,19 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** Targets the current review actually covers: the planned subset once a plan exists. */
+    /**
+     * Targets the current review actually covers: the planned subset once a plan exists, mapped
+     * back to the reviewed rows (an explicit family-tree plan also names node ids as targets, which
+     * are not reviewed rows and must not inflate the title/count).
+     */
     function dialogTargetList(state) {
+      const reviewed = Array.isArray(state.targets) ? state.targets : []
       const plan = state.plan
-      if (plan && Array.isArray(plan.targets) && plan.targets.length > 0) return plan.targets
-      return Array.isArray(state.targets) ? state.targets : []
+      if (!plan || !Array.isArray(plan.targets) || plan.targets.length === 0) return reviewed
+      const plannedKeys = Object.create(null)
+      for (let i = 0; i < plan.targets.length; i += 1) plannedKeys[targetKey(plan.targets[i])] = true
+      const narrowed = reviewed.filter(function (target) { return plannedKeys[targetKey(target)] === true })
+      return narrowed.length > 0 ? narrowed : reviewed
     }
 
     function dialogTitleText(t, targets, state) {
@@ -3353,17 +3820,9 @@ window.__ModuleLoader__.load({
       // the phase settles (success, failure, dismiss or unmount).
       const [deleteElapsedSeconds, setDeleteElapsedSeconds] = useState(0)
       // Which reviewed rows have their ride-along list (subagent logs / swept folder Sessions) open.
-      // Presentation-only state, keyed by `kind:id`, so it survives a re-plan.
-      const [expandedGroups, setExpandedGroups] = useState({})
-
-      function toggleGroup(key) {
-        setExpandedGroups(function (previous) {
-          const next = Object.assign({}, previous)
-          if (next[key] === true) delete next[key]
-          else next[key] = true
-          return next
-        })
-      }
+      // Presentation-only state, keyed by `kind:id`, so it survives a re-plan; it lives in the
+      // dialog store so both mounted copies agree and tests can drive it.
+      const expandedGroups = state.expandedGroups && typeof state.expandedGroups === 'object' ? state.expandedGroups : {}
 
       useEffect(function () {
         if (phase !== 'deleting') return undefined
@@ -3640,8 +4099,9 @@ window.__ModuleLoader__.load({
             modeLabelId: modeLabelId,
             modeGroupName: modeGroupName,
             expandedGroups: expandedGroups,
-            onToggleGroup: toggleGroup,
+            onToggleGroup: api.toggleDialogGroup,
             onToggleSelection: api.setDialogSelection,
+            onToggleNodeSelection: api.setDialogNodeSelection,
             onSelectAll: api.selectAllDialogTargets,
             onInvert: api.invertDialogTargetSelection,
             onIncludeDescendants: api.setIncludeDescendants,
@@ -3689,7 +4149,25 @@ window.__ModuleLoader__.load({
           h('div', { className: 'dsh-cleanup-dialog-head' },
             h('h2', { className: 'dsh-cleanup-dialog-title', id: titleId }, dialogTitleText(t, dialogTargetList(state), state)),
             h('div', { className: 'dsh-cleanup-dialog-sub', title: dialogSubText(t, dialogTargetList(state), state, catalog) },
-              dialogSubText(t, dialogTargetList(state), state, catalog)),
+              h('span', { className: 'dsh-cleanup-dialog-sub-text' }, dialogSubText(t, dialogTargetList(state), state, catalog)),
+              // 0.6.0 "Open": the review summary carries an open-folder control for the one target
+              // it reviews. The Host resolves the directory from the id; the client never sends a path.
+              phase === 'review'
+                && state.capabilities
+                && state.capabilities.openPath === true
+                && dialogTargetList(state).length === 1
+                ? (function () {
+                  const target = dialogTargetList(state)[0]
+                  const label = dialogSubText(t, [target], state, catalog)
+                  return h('button', {
+                    type: 'button',
+                    className: 'dsh-cleanup-open dsh-cleanup-btn dsh-cleanup-btn-ghost dsh-cleanup-btn-sm',
+                    'aria-label': t('open.folderNamed', { title: label }),
+                    onClick: function () { api.openTarget(target.kind, target.id, label) },
+                  }, t('open.folder'))
+                })()
+                : null,
+            ),
           ),
           h('div', { className: 'dsh-cleanup-dialog-body' }, bodyChildren),
           h('div', { className: 'dsh-cleanup-dialog-footer' }, footer),
@@ -3718,6 +4196,9 @@ window.__ModuleLoader__.load({
       if (workspaces.length === 0) {
         return h('div', { className: 'dsh-cleanup-empty' }, t('page.empty.workspaces'))
       }
+      // 0.6.0 "Open": only offered when the Host has a platform folder opener. The payload is the
+      // workspace id; the Host resolves the canonical directory itself (SPEC §4.11).
+      const openPath = !!(inventory.capabilities && inventory.capabilities.openPath === true)
 
       const batch = state.selected.length > 0
         ? h('div', { className: 'dsh-cleanup-batchbar' },
@@ -3776,6 +4257,14 @@ window.__ModuleLoader__.load({
             ),
           ),
           h('div', { className: 'dsh-cleanup-item-actions' },
+            openPath
+              ? h('button', {
+                type: 'button',
+                className: 'dsh-cleanup-open dsh-cleanup-btn dsh-cleanup-btn-ghost dsh-cleanup-btn-sm',
+                'aria-label': t('open.folderNamed', { title: title }),
+                onClick: function () { store.openPath('workspace', row.id) },
+              }, t('open.folder'))
+              : null,
             measured && typeof measured.bytes === 'number'
               ? null
               : h('button', {
@@ -4145,25 +4634,90 @@ window.__ModuleLoader__.load({
       const allSessions = Array.isArray(inventory.sessions) ? inventory.sessions.slice() : []
       // Sort and archive filter live in the page store so they survive tab
       // switches and pagination (the "show more" limit lives there too).
-      const sort = state.sessionSort === 'oldest' || state.sessionSort === 'largest' ? state.sessionSort : 'newest'
+      const sort = state.sessionSort === 'oldest' || state.sessionSort === 'largest' || state.sessionSort === 'usage'
+        ? state.sessionSort
+        : 'newest'
       const filter = state.sessionFilter === 'archived' || state.sessionFilter === 'active' ? state.sessionFilter : 'all'
       const workspaceFilter = typeof state.sessionWorkspace === 'string' ? state.sessionWorkspace : SESSION_WORKSPACE_ANY
-      const sessionByIdForWorkspace = Object.create(null)
-      for (let i = 0; i < allSessions.length; i += 1) sessionByIdForWorkspace[allSessions[i].id] = allSessions[i]
-      const filtered = allSessions
-        .filter(function (session) {
-          return workspaceMatchesFilter(sessionWorkspaceOf(session, sessionByIdForWorkspace), workspaceFilter)
-        })
-        .filter(function (session) { return sessionMatchesFilter(session, filter) })
-      filtered.sort(function (left, right) { return compareSessionRows(catalog, state, sort, left, right) })
-
-      const limit = typeof state.sessionLimit === 'number' && state.sessionLimit > 0 ? state.sessionLimit : SESSION_PAGE_SIZE
-      const visible = filtered.slice(0, limit)
+      const filtered = filteredSessionRows(state, catalog)
+      const visible = visibleSessionRows(state, catalog)
       const remaining = filtered.length - visible.length
       const selectedSessions = Array.isArray(state.selectedSessions) ? state.selectedSessions : []
       const selectedSet = {}
       for (let i = 0; i < selectedSessions.length; i += 1) selectedSet[selectedSessions[i]] = true
 
+      // 0.6.0 usage surfaces (SPEC §10 "Usage (0.6.0)"): opt-in, capability-gated, and hidden
+      // again when the Host answers `available: false`. A missing fold renders a muted dash,
+      // never a zero; an unknown hit rate is simply absent.
+      const usageCapable = !!(inventory.capabilities && inventory.capabilities.usage === true)
+      const usageOn = usageCapable && state.usageEnabled === true && state.usageAvailable !== false
+      const usageById = usageOn && state.usage && typeof state.usage === 'object' ? state.usage : {}
+      // "open folder" for a Session row (SPEC §4.11); the Host resolves the directory itself.
+      const openPath = !!(inventory.capabilities && inventory.capabilities.openPath === true)
+      // The page fetches usage only for the rows it shows (chunked inside the store).
+      useEffect(function () {
+        if (!usageOn) return
+        store.ensureUsageFor(visible.map(function (session) { return session.id }))
+      }, [usageOn, visible.map(function (session) { return session.id }).join(','), store])
+      // Rows with descendants on the page show `own/family` (a parent counts only its own requests).
+      const usageVisibleIds = Object.create(null)
+      for (let i = 0; i < visible.length; i += 1) usageVisibleIds[visible[i].id] = true
+      const childrenByParentForUsage = Object.create(null)
+      for (let i = 0; i < visible.length; i += 1) {
+        const parentId = typeof visible[i].parentSessionId === 'string' ? visible[i].parentSessionId : ''
+        if (parentId === '' || usageVisibleIds[parentId] !== true || parentId === visible[i].id) continue
+        if (childrenByParentForUsage[parentId] === undefined) childrenByParentForUsage[parentId] = []
+        childrenByParentForUsage[parentId].push(visible[i].id)
+      }
+      function familyTokens(sessionId, seen) {
+        const own = usageById[sessionId]
+        let total = own && typeof own.totalTokens === 'number' ? own.totalTokens : null
+        const visited = seen || Object.create(null)
+        if (visited[sessionId] === true) return total
+        visited[sessionId] = true
+        const children = childrenByParentForUsage[sessionId] || []
+        for (let i = 0; i < children.length; i += 1) {
+          const childTotal = familyTokens(children[i], visited)
+          if (childTotal === null) continue
+          total = (total === null ? 0 : total) + childTotal
+        }
+        return total
+      }
+      function usageCell(session) {
+        const row = usageById[session.id]
+        const ownTokens = row && typeof row.totalTokens === 'number' ? row.totalTokens : null
+        const hasChildren = childrenByParentForUsage[session.id] !== undefined
+        const family = hasChildren ? familyTokens(session.id) : null
+        let totalText
+        if (ownTokens === null) totalText = t('sessions.usage.unknown')
+        else if (family !== null && family !== ownTokens) totalText = formatCompactTokens(ownTokens) + '/' + formatCompactTokens(family)
+        else totalText = formatCompactTokens(ownTokens)
+        const hitText = row && row.cacheHitRate !== null && row.cacheHitRate !== undefined
+          ? formatUsagePercent(row.cacheHitRate)
+          : null
+        return h('span', {
+          className: 'dsh-cleanup-usage',
+          title: ownTokens === null
+            ? t('sessions.usage.unknown')
+            : t('sessions.usage.totalTitle', { count: formatNumber(ownTokens) })
+              + (family !== null && family !== ownTokens ? ' · ' + t('sessions.usage.familyTitle', {
+                own: formatCompactTokens(ownTokens),
+                family: formatCompactTokens(family),
+              }) : ''),
+        },
+          h('span', { className: 'dsh-cleanup-usage-total' }, totalText),
+          h('span', {
+            className: 'dsh-cleanup-usage-hit',
+            title: hitText !== null
+              ? t('sessions.usage.cacheHitTitle', {
+                rate: USAGE_PERCENT_FORMAT.format(Math.round(row.cacheHitRate * 100)),
+                read: formatNumber(row.cacheReadInputTokens || 0),
+                miss: formatNumber(row.cacheMissInputTokens || 0),
+              })
+              : t('sessions.usage.cacheHit'),
+          }, hitText !== null ? hitText : t('sessions.usage.unknown')),
+        )
+      }
       const sortId = ids + '-sort'
       const filterId = ids + '-filter'
       const workspaceId = ids + '-workspace'
@@ -4197,6 +4751,7 @@ window.__ModuleLoader__.load({
             h('option', { value: 'newest' }, t('sessions.sort.newest')),
             h('option', { value: 'oldest' }, t('sessions.sort.oldest')),
             h('option', { value: 'largest' }, t('sessions.sort.largest')),
+            usageOn ? h('option', { value: 'usage' }, t('sessions.sort.usage')) : null,
           ),
         ),
         h('label', { className: 'dsh-cleanup-toolbar-field', htmlFor: filterId },
@@ -4213,6 +4768,32 @@ window.__ModuleLoader__.load({
           ),
         ),
         sort === 'largest' ? h('span', { className: 'dsh-cleanup-muted' }, t('sessions.sort.largestHint')) : null,
+        // Usage opt-in (SPEC §10 "Usage (0.6.0)"): default off; hidden with an explanation when the
+        // Host cannot fold usage. A failed chunk never blocks the list — it shows a retry.
+        usageCapable && state.usageAvailable !== false
+          ? h('label', { className: 'dsh-cleanup-usage-toggle dsh-cleanup-toolbar-field', title: t('sessions.usage.toggleHint') },
+            h('input', {
+              type: 'checkbox',
+              className: 'dsh-cleanup-check',
+              checked: state.usageEnabled === true,
+              onChange: function (event) { store.setUsageEnabled(event.target.checked) },
+            }),
+            h('span', null, t('sessions.usage.toggle')),
+          )
+          : h('span', { className: 'dsh-cleanup-usage-unavailable dsh-cleanup-muted' }, t('sessions.usage.unavailable')),
+        usageOn && state.usageLoading
+          ? h('span', { className: 'dsh-cleanup-muted dsh-cleanup-usage-loading' }, t('sessions.usage.loading'))
+          : null,
+        usageOn && state.usageError
+          ? h('span', { className: 'dsh-cleanup-usage-error', role: 'alert' },
+            h('span', null, t('sessions.usage.failed') + ' · ' + apiErrorText(t, state.usageError)),
+            h('button', {
+              type: 'button',
+              className: 'dsh-cleanup-btn dsh-cleanup-btn-ghost dsh-cleanup-btn-sm',
+              onClick: function () { store.retryUsage() },
+            }, t('sessions.usage.retry')),
+          )
+          : null,
         h('button', {
           ref: wizardToggleRef,
           type: 'button',
@@ -4316,9 +4897,18 @@ window.__ModuleLoader__.load({
               sizeKnown === null
                 ? h('span', null, t('measure.unmeasured'))
                 : h('span', { className: 'dsh-cleanup-size' }, formatBytes(sizeKnown)),
+              usageOn ? usageCell(session) : null,
             ),
           ),
           h('div', { className: 'dsh-cleanup-item-actions' },
+            openPath
+              ? h('button', {
+                type: 'button',
+                className: 'dsh-cleanup-open dsh-cleanup-btn dsh-cleanup-btn-ghost dsh-cleanup-btn-sm',
+                'aria-label': t('open.folderNamed', { title: title }),
+                onClick: function () { store.openPath('session', session.id) },
+              }, t('open.folder'))
+              : null,
             sizeKnown === null
               ? h('button', {
                 type: 'button',
@@ -4500,12 +5090,23 @@ window.__ModuleLoader__.load({
         if (String(entries[i].id) === confirmPurge) { armedTitle = entryTitle(entries[i]); break }
       }
 
+      const inventoryOpenPath = !!(state.inventory && state.inventory.capabilities && state.inventory.capabilities.openPath === true)
       const head = h('div', { className: 'dsh-cleanup-panel-head' },
         h('span', null, plural(t, 'trash.summary', typeof totals.entries === 'number' ? totals.entries : entries.length, {
           size: formatBytes(typeof totals.bytes === 'number' ? totals.bytes : 0),
         })),
-        entries.length > 0 || confirmAll
+        inventoryOpenPath || entries.length > 0 || confirmAll
           ? h('div', { className: 'dsh-cleanup-item-actions' },
+            // 0.6.0 "Open": the Trash tab header opens the Host's projection-cache directory
+            // (`kind: "cache"`, no id — the Host resolves it, never a path).
+            inventoryOpenPath
+              ? h('button', {
+                type: 'button',
+                className: 'dsh-cleanup-open dsh-cleanup-btn dsh-cleanup-btn-ghost dsh-cleanup-btn-sm',
+                'aria-label': t('open.cacheNamed'),
+                onClick: function () { store.openPath('cache', '') },
+              }, t('open.cache'))
+              : null,
             confirmAll
               ? h('button', {
                 type: 'button',
@@ -4514,13 +5115,15 @@ window.__ModuleLoader__.load({
                 onClick: function () { store.setConfirmPurge(null) },
               }, t('action.cancel'))
               : null,
-            h('button', {
-              type: 'button',
-              className: 'dsh-cleanup-btn dsh-cleanup-btn-danger dsh-cleanup-btn-sm',
-              disabled: busy,
-              'data-dsh-cleanup-confirm': confirmAll ? 'all' : undefined,
-              onClick: function () { store.requestPurgeAll() },
-            }, confirmAll ? t('action.emptyTrashConfirm') : t('action.emptyTrash')),
+            entries.length > 0 || confirmAll
+              ? h('button', {
+                type: 'button',
+                className: 'dsh-cleanup-btn dsh-cleanup-btn-danger dsh-cleanup-btn-sm',
+                disabled: busy,
+                'data-dsh-cleanup-confirm': confirmAll ? 'all' : undefined,
+                onClick: function () { store.requestPurgeAll() },
+              }, confirmAll ? t('action.emptyTrashConfirm') : t('action.emptyTrash'))
+              : null,
           )
           : null,
       )
@@ -4657,6 +5260,14 @@ window.__ModuleLoader__.load({
             ),
           ),
           h('div', { className: 'dsh-cleanup-item-actions' },
+            inventoryOpenPath
+              ? h('button', {
+                type: 'button',
+                className: 'dsh-cleanup-open dsh-cleanup-btn dsh-cleanup-btn-ghost dsh-cleanup-btn-sm',
+                'aria-label': t('open.folderNamed', { title: title }),
+                onClick: function () { store.openPath('trash', id) },
+              }, t('open.folder'))
+              : null,
             confirmAll ? null : (confirming
               ? h('button', {
                 type: 'button',
@@ -5640,6 +6251,18 @@ window.__ModuleLoader__.load({
           }, t('action.retry')),
         ))
       }
+      // 0.6.0 "Open": a failed open is an inline page-level error (SPEC §10), never a toast here.
+      if (state.openError) {
+        banners.push(h('div', { key: 'open-error', className: 'dsh-cleanup-banner dsh-cleanup-banner-error', role: 'alert' },
+          h('span', { className: 'dsh-cleanup-banner-text' },
+            t('open.errorTitle') + ' · ' + apiErrorText(t, state.openError)),
+          h('button', {
+            type: 'button',
+            className: 'dsh-cleanup-btn dsh-cleanup-btn-sm',
+            onClick: function () { store.retryOpen() },
+          }, t('open.retry')),
+        ))
+      }
 
       // F4: the armed/cancelled announcements live at page level so they survive the
       // banner (and its status region) being removed after the last entry is cancelled.
@@ -5960,13 +6583,26 @@ window.__ModuleLoader__.load({
      */
     function createDialogController(deps) {
       const ctx = deps.ctx
+      const t = deps.t
       const mutations = deps.mutations
       const notifyMutation = deps.notifyMutation
+      const notifyContextMenu = deps.notifyContextMenu
       const dialogStore = createStore(initialDialogState())
       let dialogAbort = null
       let dialogToken = 0
       let doneTimer = null
       let returnFocus = null
+      // 0.6.0 "Open in file manager": the Host resolves the directory from the id itself, so the
+      // client only ever sends `{ kind, id }`. The request owns its own abort handle; failures are
+      // reported through the context-menu toast because a review result must never be replaced by
+      // an open error.
+      let openAbort = null
+      function abortOpenFetch() {
+        if (openAbort !== null) {
+          try { openAbort.abort() } catch (error) { /* ignore */ }
+          openAbort = null
+        }
+      }
 
       function clearDoneTimer() {
         if (doneTimer !== null) {
@@ -6004,22 +6640,153 @@ window.__ModuleLoader__.load({
         return state.targets.filter(function (target) { return selected[targetKey(target)] === true })
       }
 
+      /** Every known tree-node id of this review (SPEC §9 family tree). */
+      function knownNodeIds(state) {
+        const nodes = state && state.knownNodes && typeof state.knownNodes === 'object' ? state.knownNodes : {}
+        return Object.keys(nodes)
+      }
+
+      /** Is one known node selected? The `includeDescendants` switch means "all nodes selected". */
+      function nodeIsSelected(state, nodeId) {
+        if (state.includeDescendants === true) return true
+        if (!Array.isArray(state.nodeSelection)) return false
+        return state.nodeSelection.indexOf(nodeId) !== -1
+      }
+
       /**
-       * True when the plan brings back a reviewed row the user un-checked. The Host expands every
-       * checked Session into its subagent closure, and a workspace target sweeps the Sessions
-       * inside its folder, so either can smuggle an explicitly removed row back in. The checkbox is
-       * authoritative: the first fallback drops descendant expansion, and a plan that still leaks
-       * is refused instead of deleting an un-checked target (SPEC §9).
+       * Explicit node ids for a plan body (SPEC §9): when the descendant switch is off, the checked
+       * nodes are named targets, so the Host plans exactly the selected logs.
+       */
+      function explicitNodeTargets(state) {
+        if (state.includeDescendants === true) return []
+        const nodes = state.knownNodes && typeof state.knownNodes === 'object' ? state.knownNodes : {}
+        const ids = Array.isArray(state.nodeSelection) ? state.nodeSelection : []
+        const targets = []
+        const seen = Object.create(null)
+        for (let i = 0; i < ids.length; i += 1) {
+          const id = ids[i]
+          if (typeof id !== 'string' || id === '' || seen[id] === true) continue
+          if (nodes[id] === undefined) continue
+          seen[id] = true
+          targets.push({ kind: 'session', id: id })
+        }
+        return targets
+      }
+
+      /** Node ids that belong to one workspace-clear batch (their parent chain reaches a batch row). */
+      function explicitNodeTargetsForBatch(state) {
+        if (state.includeDescendants === true) return []
+        const nodes = state.knownNodes && typeof state.knownNodes === 'object' ? state.knownNodes : {}
+        if (Object.keys(nodes).length === 0) return []
+        const batchRoots = Object.create(null)
+        for (let i = 0; i < state.targets.length; i += 1) {
+          const target = state.targets[i]
+          if (target && typeof target.id === 'string') batchRoots[target.id] = true
+        }
+        const excluded = state.clear && state.clear.excluded && typeof state.clear.excluded === 'object'
+          ? state.clear.excluded
+          : null
+        const targets = []
+        const ids = Array.isArray(state.nodeSelection) ? state.nodeSelection : []
+        for (let i = 0; i < ids.length; i += 1) {
+          const nodeId = ids[i]
+          if (typeof nodeId !== 'string' || nodes[nodeId] === undefined) continue
+          if (excluded !== null && excluded['session:' + nodeId] === true) continue
+          let cursor = nodes[nodeId]
+          let reachable = false
+          const seen = Object.create(null)
+          while (cursor && typeof cursor === 'object') {
+            const parentId = typeof cursor.parentSessionId === 'string' ? cursor.parentSessionId : ''
+            if (parentId === '') break
+            if (batchRoots[parentId] === true) { reachable = true; break }
+            if (seen[parentId] === true) break
+            seen[parentId] = true
+            cursor = nodes[parentId]
+          }
+          if (reachable) targets.push({ kind: 'session', id: nodeId })
+        }
+        return targets
+      }
+
+      /**
+       * Merge the plan's Session items into the dialog's known-node set (SPEC §9): a node keeps
+       * the nearest reviewed Session as its `rootId`, so the tree can still render a node after the
+       * user un-checks it and the Host stops planning it.
+       */
+      function mergeKnownNodes(previous, plan, targets) {
+        const next = {}
+        if (previous && typeof previous === 'object') {
+          const previousIds = Object.keys(previous)
+          for (let i = 0; i < previousIds.length; i += 1) next[previousIds[i]] = previous[previousIds[i]]
+        }
+        if (!plan || !Array.isArray(plan.items)) return next
+        const reviewed = Object.create(null)
+        for (let i = 0; i < targets.length; i += 1) {
+          if (targets[i] && targets[i].kind === 'session' && typeof targets[i].id === 'string') reviewed[targets[i].id] = true
+        }
+        const items = plan.items.filter(function (item) { return item && item.kind === 'session' && typeof item.id === 'string' })
+        const itemById = Object.create(null)
+        for (let i = 0; i < items.length; i += 1) itemById[items[i].id] = items[i]
+        for (let i = 0; i < items.length; i += 1) {
+          const item = items[i]
+          if (reviewed[item.id] === true) continue
+          let rootId = null
+          let cursor = item
+          const seen = Object.create(null)
+          while (cursor) {
+            const parentId = typeof cursor.parentSessionId === 'string' ? cursor.parentSessionId : ''
+            if (parentId === '') break
+            if (reviewed[parentId] === true) { rootId = parentId; break }
+            const priorParent = next[parentId]
+            if (priorParent && typeof priorParent.rootId === 'string') { rootId = priorParent.rootId; break }
+            const parentItem = itemById[parentId]
+            if (!parentItem || seen[parentId] === true) break
+            seen[parentId] = true
+            cursor = parentItem
+          }
+          const prior = next[item.id]
+          if (rootId === null && prior && typeof prior.rootId === 'string') rootId = prior.rootId
+          if (rootId === null) continue
+          next[item.id] = {
+            id: item.id,
+            rootId: rootId,
+            parentSessionId: typeof item.parentSessionId === 'string' && item.parentSessionId !== ''
+              ? item.parentSessionId
+              : (prior && typeof prior.parentSessionId === 'string' ? prior.parentSessionId : ''),
+            isDescendant: item.isDescendant === true || (prior && prior.isDescendant === true),
+            title: typeof item.title === 'string' && item.title !== '' ? item.title : (prior ? prior.title : null),
+            bytes: typeof item.bytes === 'number' && isFinite(item.bytes) ? item.bytes : (prior ? prior.bytes : 0),
+            files: typeof item.files === 'number' && isFinite(item.files) ? item.files : (prior ? prior.files : 0),
+            dirs: typeof item.dirs === 'number' && isFinite(item.dirs) ? item.dirs : (prior ? prior.dirs : 0),
+            truncated: item.truncated === true || (prior && prior.truncated === true),
+            path: typeof item.path === 'string' ? item.path : (prior && prior.path ? prior.path : ''),
+          }
+        }
+        return next
+      }
+
+      /**
+       * True when the plan brings back a reviewed row or a known tree node the user un-checked.
+       * The Host expands every checked Session into its subagent closure, and a workspace target
+       * sweeps the Sessions inside its folder, so either can smuggle an explicitly removed target
+       * back in. The checkbox is authoritative: the first fallback drops descendant expansion, and
+       * a plan that still leaks is refused instead of deleting an un-checked target (SPEC §9).
        */
       function planLeaksUncheckedTargets(plan, state) {
         const checked = {}
         for (let i = 0; i < state.selection.length; i += 1) checked[state.selection[i]] = true
+        const nodes = state.knownNodes && typeof state.knownNodes === 'object' ? state.knownNodes : {}
         const items = plan && Array.isArray(plan.items) ? plan.items : []
         for (let i = 0; i < items.length; i += 1) {
           const item = items[i]
           if (!item || item.kind !== 'session' || typeof item.id !== 'string') continue
           const key = 'session:' + item.id
           if (checked[key] === true) continue
+          // A named node is only allowed when the tree selection says it is checked.
+          if (nodes[item.id] !== undefined) {
+            if (nodeIsSelected(state, item.id) === true) continue
+            return true
+          }
           for (let j = 0; j < state.targets.length; j += 1) {
             if (targetKey(state.targets[j]) === key) return true
           }
@@ -6062,8 +6829,14 @@ window.__ModuleLoader__.load({
           error: null,
           failureStage: null,
         })
+        // SPEC §9: with the descendant switch off the checked nodes are named explicitly, so the
+        // Host plans exactly the selected logs; with it on the family is planned through
+        // `includeDescendants: true` and only the reviewed rows are targets.
+        const planTargets = planned.map(function (target) { return { kind: target.kind, id: target.id } })
+        const explicit = explicitNodeTargets(state)
+        for (let i = 0; i < explicit.length; i += 1) planTargets.push(explicit[i])
         const body = {
-          targets: planned.map(function (target) { return { kind: target.kind, id: target.id } }),
+          targets: planTargets,
           mode: state.mode,
           includeSessions: state.includeSessions === true,
           includeDescendants: state.includeDescendants === true,
@@ -6109,6 +6882,7 @@ window.__ModuleLoader__.load({
             plan: plan,
             mode: plan.mode === 'permanent' ? 'permanent' : 'trash',
             typed: '',
+            knownNodes: mergeKnownNodes(state.knownNodes, plan, state.targets),
           })
         }).catch(function (error) {
           if (isAbortError(error)) return
@@ -6137,6 +6911,9 @@ window.__ModuleLoader__.load({
           targets: targets,
           surface: surface,
           selection: targets.map(targetKey),
+          capabilities: {
+            openPath: !!(deps.capabilities && deps.capabilities.openPath === true),
+          },
         }))
         startPlan()
       }
@@ -6430,6 +7207,7 @@ window.__ModuleLoader__.load({
       function closeDialog() {
         clearDoneTimer()
         abortDialogFetch()
+        abortOpenFetch()
         dialogStore.setState(initialDialogState())
         restoreFocus()
       }
@@ -6443,8 +7221,40 @@ window.__ModuleLoader__.load({
       function disposeDialog() {
         clearDoneTimer()
         abortDialogFetch()
+        abortOpenFetch()
         dialogStore.setState(initialDialogState())
         returnFocus = null
+      }
+
+      /**
+       * 0.6.0 "Open in file manager" (SPEC §4.11/§10): ask the Host to open the folder it resolves
+       * from the id. The client never sends a path. A failure is reported through the context-menu
+       * toast, because replacing the review with an open error would drop the user's place.
+       */
+      function openTarget(kind, id, title) {
+        if (!deps.capabilities || deps.capabilities.openPath !== true) return Promise.resolve()
+        if (kind !== 'workspace' && kind !== 'session' && kind !== 'trash' && kind !== 'cache') return Promise.resolve()
+        const payload = { kind: kind }
+        if (kind !== 'cache') {
+          if (typeof id !== 'string' || id === '') return Promise.resolve()
+          payload.id = id
+        }
+        abortOpenFetch()
+        const controller = new AbortController()
+        openAbort = controller
+        return request(ROUTE.open, payload, controller.signal).then(function (envelope) {
+          if (openAbort === controller) openAbort = null
+          if (envelope && envelope.transport === undefined && envelope.ok === true) return
+          const error = toApiError(envelope)
+          const label = typeof title === 'string' && title !== '' ? title : ''
+          notifyContextMenu(label !== ''
+            ? t('open.errorTitle') + ' · ' + apiErrorText(t, error)
+            : apiErrorText(t, error))
+        }).catch(function (error) {
+          if (openAbort === controller) openAbort = null
+          if (isAbortError(error)) return
+          notifyContextMenu(t('open.errorTitle') + ' · ' + apiErrorText(t, { transport: 'network' }))
+        })
       }
 
       function retryDialog() {
@@ -6541,6 +7351,22 @@ window.__ModuleLoader__.load({
         return Object.assign({}, clear, { excluded: excluded })
       }
 
+      /**
+       * A tree node un-checked inside a workspace clear must be recorded like an un-checked row,
+       * so a refilled candidates page can never bring it back (SPEC §9).
+       */
+      function clearNodeExclusionPatch(clear, nodes, checkedNodeSet) {
+        if (clear === null) return null
+        const excluded = Object.assign({}, clear.excluded)
+        const ids = Object.keys(nodes)
+        for (let i = 0; i < ids.length; i += 1) {
+          const key = 'session:' + ids[i]
+          if (checkedNodeSet[ids[i]] === true) delete excluded[key]
+          else excluded[key] = true
+        }
+        return Object.assign({}, clear, { excluded: excluded })
+      }
+
       /** Store patch for a new selection: it also resets the typed confirmation and exclusions. */
       function selectionPatch(state, selection) {
         return {
@@ -6569,7 +7395,67 @@ window.__ModuleLoader__.load({
         startPlan()
       }
 
-      /** Invert every reviewed row ("反选"), which may leave nothing checked. */
+      /** Current node-checked set, materialized (`includeDescendants: true` means every node). */
+      function checkedNodeSet(state) {
+        const checked = Object.create(null)
+        const ids = knownNodeIds(state)
+        for (let i = 0; i < ids.length; i += 1) {
+          if (nodeIsSelected(state, ids[i]) === true) checked[ids[i]] = true
+        }
+        return checked
+      }
+
+      /**
+       * One family-tree checkbox (SPEC §9). Checking a node checks its subtree, un-checking it
+       * un-checks its subtree; either action turns the `同时删除子代理会话` switch off (with the
+       * existing auto-off explanation) and plans an explicit target set. The switch and the tree
+       * stay two views of one set, so the same node set is also what the plan body names.
+       */
+      function setDialogNodeSelection(nodeId, checked) {
+        const state = dialogStore.getSnapshot()
+        if (state.phase !== 'review' || state.refreshing === true) return
+        if (typeof nodeId !== 'string' || nodeId === '') return
+        const nodes = state.knownNodes && typeof state.knownNodes === 'object' ? state.knownNodes : {}
+        if (nodes[nodeId] === undefined) return
+        const selected = checkedNodeSet(state)
+        const subtree = nodeSubtreeIds(nodes, nodeId)
+        let changed = false
+        for (let i = 0; i < subtree.length; i += 1) {
+          const id = subtree[i]
+          const shouldCheck = checked === true
+          const wasChecked = selected[id] === true
+          if (wasChecked === shouldCheck) continue
+          changed = true
+          if (shouldCheck) selected[id] = true
+          else delete selected[id]
+        }
+        if (changed === false) return
+        const nextSelection = []
+        const ids = Object.keys(nodes)
+        for (let i = 0; i < ids.length; i += 1) {
+          if (selected[ids[i]] === true) nextSelection.push(ids[i])
+        }
+        const patch = selectionPatch(state, state.selection)
+        patch.nodeSelection = nextSelection
+        patch.includeDescendants = false
+        patch.descendantsAutoOff = true
+        if (state.clear !== null) patch.clear = clearNodeExclusionPatch(patch.clear || state.clear, nodes, selected)
+        dialogStore.setState(patch)
+        startPlan()
+      }
+
+      /** Expand/collapse one reviewed row's ride-along list; presentation only, never re-plans. */
+      function toggleDialogGroup(key) {
+        if (typeof key !== 'string' || key === '') return
+        dialogStore.setState(function (current) {
+          const expanded = Object.assign({}, current.expandedGroups)
+          if (expanded[key] === true) delete expanded[key]
+          else expanded[key] = true
+          return Object.assign({}, current, { expandedGroups: expanded })
+        })
+      }
+
+      /** Invert every reviewed row and tree node ("反选"), which may leave nothing checked. */
       function invertDialogTargetSelection() {
         const state = dialogStore.getSnapshot()
         if (state.phase !== 'review' || state.refreshing === true) return
@@ -6580,7 +7466,24 @@ window.__ModuleLoader__.load({
           const key = targetKey(state.targets[i])
           if (selected[key] !== true) next.push(key)
         }
-        dialogStore.setState(selectionPatch(state, next))
+        const patch = selectionPatch(state, next)
+        const nodeIds = knownNodeIds(state)
+        if (nodeIds.length > 0) {
+          const checkedNodes = checkedNodeSet(state)
+          const nextNodes = []
+          for (let i = 0; i < nodeIds.length; i += 1) {
+            if (checkedNodes[nodeIds[i]] !== true) nextNodes.push(nodeIds[i])
+          }
+          patch.nodeSelection = nextNodes
+          patch.includeDescendants = false
+          patch.descendantsAutoOff = true
+          if (state.clear !== null) {
+            const checkedSet = Object.create(null)
+            for (let i = 0; i < nextNodes.length; i += 1) checkedSet[nextNodes[i]] = true
+            patch.clear = clearNodeExclusionPatch(patch.clear || state.clear, state.knownNodes, checkedSet)
+          }
+        }
+        dialogStore.setState(patch)
         startPlan()
       }
 
@@ -6590,16 +7493,37 @@ window.__ModuleLoader__.load({
         if (state.phase !== 'review' || state.refreshing === true) return
         if (state.clear !== null) return
         if (state.includeDescendants === (value === true)) return
-        dialogStore.setState({ includeDescendants: value === true, typed: '', descendantsAutoOff: false })
+        // Switch on ⇒ every node is selected again. Switch off ⇒ no node is selected: the family
+        // stays on disk unless the user checks single nodes in the tree afterwards (SPEC §9).
+        dialogStore.setState({
+          includeDescendants: value === true,
+          nodeSelection: [],
+          typed: '',
+          descendantsAutoOff: false,
+        })
         startPlan()
       }
 
-      /** Re-check every reviewed row after the user narrowed the selection. */
+      /** Re-check every reviewed row and every tree node after the user narrowed the selection. */
       function selectAllDialogTargets() {
         const state = dialogStore.getSnapshot()
         if (state.phase !== 'review' || state.refreshing === true) return
-        if (state.selection.length === state.targets.length) return
-        dialogStore.setState(selectionPatch(state, state.targets.map(targetKey)))
+        const nodeIds = knownNodeIds(state)
+        const allRows = state.selection.length === state.targets.length
+        const allNodes = checkedNodeSet(state)
+        let everyNode = true
+        for (let i = 0; i < nodeIds.length; i += 1) {
+          if (allNodes[nodeIds[i]] !== true) { everyNode = false; break }
+        }
+        if (allRows && (nodeIds.length === 0 || everyNode)) return
+        const patch = selectionPatch(state, state.targets.map(targetKey))
+        if (nodeIds.length > 0 && state.includeDescendants !== true) {
+          patch.nodeSelection = nodeIds
+          const checkedSet = Object.create(null)
+          for (let i = 0; i < nodeIds.length; i += 1) checkedSet[nodeIds[i]] = true
+          if (state.clear !== null) patch.clear = clearNodeExclusionPatch(patch.clear || state.clear, state.knownNodes, checkedSet)
+        }
+        dialogStore.setState(patch)
         startPlan()
       }
 
@@ -6861,8 +7785,16 @@ window.__ModuleLoader__.load({
         const state = dialogStore.getSnapshot()
         if (state.clear === null || state.targets.length === 0) return
         const handle = beginDialogFetch()
+        // A batch normally asks for the descendant closure; when an un-checked node forced the
+        // expansion off, the checked nodes of this batch are named explicitly so a refilled page
+        // cannot re-add the excluded ones (SPEC §9).
+        const planTargets = state.targets.map(function (target) { return { kind: target.kind, id: target.id } })
+        if (includeDescendants !== true) {
+          const explicit = explicitNodeTargetsForBatch(state)
+          for (let i = 0; i < explicit.length; i += 1) planTargets.push(explicit[i])
+        }
         const body = {
-          targets: state.targets.map(function (target) { return { kind: target.kind, id: target.id } }),
+          targets: planTargets,
           mode: state.mode,
           includeSessions: false,
           includeDescendants: includeDescendants === true,
@@ -6895,12 +7827,17 @@ window.__ModuleLoader__.load({
           }
           if (Array.isArray(plan.blockers) && plan.blockers.length > 0) {
             // A target became undeletable between batches: keep the plan for context and stop.
-            dialogStore.setState({ plan: plan, refreshing: false })
+            dialogStore.setState({ plan: plan, refreshing: false, knownNodes: mergeKnownNodes(state.knownNodes, plan, state.targets) })
             settleClear('blocked')
             return
           }
           const typed = isTypedConfirmation(plan.confirmation) ? String(plan.confirmation.expected) : ''
-          dialogStore.setState({ plan: plan, mode: plan.mode === 'permanent' ? 'permanent' : 'trash', refreshing: false })
+          dialogStore.setState({
+            plan: plan,
+            mode: plan.mode === 'permanent' ? 'permanent' : 'trash',
+            refreshing: false,
+            knownNodes: mergeKnownNodes(state.knownNodes, plan, state.targets),
+          })
           const execHandle = beginDialogFetch()
           executePlan(plan, typed, execHandle.controller.signal).then(function (outcome) {
             if (!settleDialogFetch(execHandle)) return
@@ -7025,11 +7962,14 @@ window.__ModuleLoader__.load({
         confirmDelete: confirmDelete,
         setDialogMode: setDialogMode,
         setDialogSelection: setDialogSelection,
+        setDialogNodeSelection: setDialogNodeSelection,
+        toggleDialogGroup: toggleDialogGroup,
         invertDialogTargetSelection: invertDialogTargetSelection,
         setIncludeDescendants: setIncludeDescendants,
         selectAllDialogTargets: selectAllDialogTargets,
         setIncludeSessions: setIncludeSessions,
         setTypedText: setTypedText,
+        openTarget: openTarget,
       }
     }
 
@@ -7087,6 +8027,12 @@ window.__ModuleLoader__.load({
     function createPageStore(deps) {
       const t = deps.t
       const notifyMutation = deps.notifyMutation
+      // Shared, page-independent capability facts: the review dialog (which can open from a
+      // context menu without this page) reads the same snapshot when it opens.
+      const capabilities = deps.capabilities && typeof deps.capabilities === 'object'
+        ? deps.capabilities
+        : { usage: false, projectionCache: false, openPath: false }
+      const catalogApi = deps.catalog && typeof deps.catalog.getSnapshot === 'function' ? deps.catalog : null
       const pageStore = createStore(initialPageState())
       // One tracker for every request family (inventory/trash/deferred/settings/...):
       // it owns the AbortController per family and drops superseded responses by token.
@@ -7103,6 +8049,16 @@ window.__ModuleLoader__.load({
       // so `retryAction` re-runs through `runAction` (busy flag, abort handle,
       // one in-flight request, reload on success) instead of a bare fetch.
       let lastAction = null
+      // Session usage (SPEC §10 "Usage (0.6.0)"): ids waiting for a chunk, one in-flight request
+      // at a time, plus the ids of the last failed chunk so the retry re-asks exactly those.
+      let usageQueue = []
+      let usageQueued = Object.create(null)
+      let usageRequesting = false
+      let usageFailedIds = []
+      // Bumped whenever an in-flight usage walk is abandoned, so the aborted request can never
+      // clear the flags of the request that replaced it (one in-flight request at a time).
+      let usageGeneration = 0
+      let lastOpenTarget = null
 
       /** Drop a measurement only when its target is gone from the inventory. */
       function pruneMeasured(previous, alive) {
@@ -7116,7 +8072,24 @@ window.__ModuleLoader__.load({
         return next
       }
 
+      /**
+       * Abandon the usage walk (SPEC §10: abortable on unmount/refresh). The rows stay cached; the
+       * reload that follows re-enqueues whatever the visible page still needs.
+       */
+      function abortUsageWalk() {
+        usageGeneration += 1
+        const handle = requests.begin('usage')
+        requests.end(handle)
+        usageQueue = []
+        usageQueued = Object.create(null)
+        usageRequesting = false
+        if (pageStore.getSnapshot().usageLoading === true) pageStore.setState({ usageLoading: false })
+      }
+
       function loadInventory() {
+        // A refresh starts a new world: an in-flight usage fold may predate a changed log, so the
+        // walk is abandoned and rebuilt against the fresh signatures after the inventory lands.
+        abortUsageWalk()
         const handle = requests.begin('inventory')
         const controller = handle.controller
         pageStore.setState({ inventoryLoading: true, inventoryError: null })
@@ -7128,6 +8101,11 @@ window.__ModuleLoader__.load({
             return
           }
           const inventory = normalizeInventory(envelope)
+          // The review dialog reads the shared capability snapshot when it opens; refresh it here
+          // so a settings-page review knows whether the Host can open folders (SPEC §3).
+          capabilities.usage = inventory.capabilities.usage
+          capabilities.projectionCache = inventory.capabilities.projectionCache
+          capabilities.openPath = inventory.capabilities.openPath
           if (trashNeedsSettings(trashOf(inventory))) ensureSettingsLoaded()
           pageStore.setState(function (current) {
             const workspaceIds = {}
@@ -7144,6 +8122,27 @@ window.__ModuleLoader__.load({
             // A suggested-purge arm only makes sense while the capacity warning exists.
             const capacityWarning = !!(inventory.trash && inventory.trash.overCapacity)
             const confirmPurge = current.confirmPurge === 'suggest' && !capacityWarning ? null : current.confirmPurge
+            // SPEC §10 "Usage": a cached fold is discarded for a Session whose `eventCount`/
+            // `sizeBytes` changed (the Host re-folds on the same key, §5.11); a vanished Session
+            // drops its row entirely.
+            const usage = {}
+            const usageSignatures = {}
+            const usageFailed = {}
+            const rawUsage = current.usage && typeof current.usage === 'object' ? current.usage : {}
+            const rawSignatures = current.usageSignatures && typeof current.usageSignatures === 'object' ? current.usageSignatures : {}
+            const rawFailedUsage = current.usageFailed && typeof current.usageFailed === 'object' ? current.usageFailed : {}
+            for (let i = 0; i < inventory.sessions.length; i += 1) {
+              const session = inventory.sessions[i]
+              if (!session || typeof session.id !== 'string') continue
+              const signature = usageSignatureOf(session) || 'unknown'
+              usageSignatures[session.id] = signature
+              if (rawSignatures[session.id] === signature && rawUsage[session.id] !== undefined) {
+                usage[session.id] = rawUsage[session.id]
+              }
+              if (rawSignatures[session.id] === signature && rawFailedUsage[session.id] !== undefined) {
+                usageFailed[session.id] = rawFailedUsage[session.id]
+              }
+            }
             return Object.assign({}, current, {
               inventoryLoading: false,
               inventoryError: null,
@@ -7158,8 +8157,20 @@ window.__ModuleLoader__.load({
               selectedSessions: current.selectedSessions.filter(function (id) { return sessionIds[id] === true }),
               deferredConfirm: deferredConfirm,
               deferredConfirmAt: deferredConfirm === current.deferredConfirm ? current.deferredConfirmAt : 0,
+              usageAvailable: inventory.capabilities.usage ? current.usageAvailable : null,
+              usageError: inventory.capabilities.usage ? current.usageError : null,
+              usage: usage,
+              usageSignatures: usageSignatures,
+              usageFailed: usageFailed,
             })
           })
+          // While usage is on, keep the visible rows fresh against the new inventory; the fold
+          // cache above already dropped the rows whose signature changed.
+          const snapshot = pageStore.getSnapshot()
+          if (snapshot.usageEnabled === true && snapshot.inventory && snapshot.inventory.capabilities.usage === true) {
+            const visible = visibleSessionRows(snapshot, catalogApi ? catalogApi.getSnapshot() : null)
+            enqueueUsageFor(visible.map(function (session) { return session.id }))
+          }
         }).catch(function (error) {
           if (isAbortError(error) || requests.stale(handle)) return
           requests.end(handle)
@@ -7950,6 +8961,257 @@ window.__ModuleLoader__.load({
         return Promise.resolve()
       }
 
+      // ---- session usage (SPEC §4.10 / §10 "Usage (0.6.0)") --------------------
+
+      /** Sessions of the current inventory keyed by id (empty map before the first load). */
+      function sessionsById(inventory) {
+        const byId = Object.create(null)
+        const sessions = inventory && Array.isArray(inventory.sessions) ? inventory.sessions : []
+        for (let i = 0; i < sessions.length; i += 1) {
+          if (sessions[i] && typeof sessions[i].id === 'string') byId[sessions[i].id] = sessions[i]
+        }
+        return byId
+      }
+
+      /** Is this Session's usage cached against the current `(eventCount, sizeBytes)` key? */
+      function usageIsFresh(state, session) {
+        if (!session || typeof state.usage !== 'object' || state.usage[session.id] === undefined) return false
+        const signature = usageSignatureOf(session) || 'unknown'
+        return state.usageSignatures[session.id] === signature
+      }
+
+      /**
+       * Queue the usage fetch for these Session ids (≤ `USAGE_CHUNK_MAX` per request, one request
+       * in flight). Rows already folded at the current signature are answered from memory; the
+       * Host re-folds only changed logs (SPEC §5.11).
+       */
+      function enqueueUsageFor(ids) {
+        if (disposed) return
+        const state = pageStore.getSnapshot()
+        if (state.usageEnabled !== true) return
+        const inventory = state.inventory
+        if (!inventory || !inventory.capabilities || inventory.capabilities.usage !== true) return
+        const byId = sessionsById(inventory)
+        const list = Array.isArray(ids) ? ids : []
+        let queued = false
+        for (let i = 0; i < list.length; i += 1) {
+          const id = list[i]
+          if (typeof id !== 'string' || id === '') continue
+          const session = byId[id]
+          if (!session || usageQueued[id] === true) continue
+          if (usageIsFresh(state, session)) continue
+          usageQueued[id] = true
+          usageQueue.push(id)
+          queued = true
+        }
+        if (queued) pumpUsage()
+      }
+
+      /** Put a failed chunk back at the front of the queue; the retry re-asks exactly it. */
+      function requeueUsage(ids) {
+        usageFailedIds = ids.slice()
+        const restored = []
+        for (let i = 0; i < ids.length; i += 1) {
+          const id = ids[i]
+          if (typeof id !== 'string' || id === '') continue
+          if (usageQueued[id] === true) continue
+          usageQueued[id] = true
+          restored.push(id)
+        }
+        usageQueue = restored.concat(usageQueue)
+      }
+
+      /** Send the next chunk; exactly one usage request may be in flight at a time. */
+      function pumpUsage() {
+        if (disposed || usageRequesting) return
+        const state = pageStore.getSnapshot()
+        if (state.usageEnabled !== true) return
+        if (state.usageError !== null) return
+        if (usageQueue.length === 0) return
+        const chunk = usageQueue.splice(0, Math.min(USAGE_CHUNK_MAX, usageQueue.length))
+        for (let i = 0; i < chunk.length; i += 1) delete usageQueued[chunk[i]]
+        const handle = requests.begin('usage')
+        const generation = usageGeneration
+        usageRequesting = true
+        pageStore.setState({ usageLoading: true })
+        request(ROUTE.usage, { sessionIds: chunk }, handle.controller.signal).then(function (envelope) {
+          if (disposed || requests.stale(handle) || generation !== usageGeneration) return
+          requests.end(handle)
+          usageRequesting = false
+          if (envelope.transport) {
+            requeueUsage(chunk)
+            pageStore.setState({ usageLoading: false, usageError: { transport: envelope.transport } })
+            return
+          }
+          if (envelope.ok !== true) {
+            requeueUsage(chunk)
+            pageStore.setState({ usageLoading: false, usageError: toApiError(envelope) })
+            return
+          }
+          const normalized = normalizeUsageEnvelope(envelope)
+          if (normalized.available === false) {
+            // The Host cannot fold usage at all: hide every usage surface (SPEC §4.10/§10).
+            usageQueue = []
+            usageQueued = Object.create(null)
+            usageFailedIds = []
+            pageStore.setState({
+              usageLoading: false,
+              usageAvailable: false,
+              usage: {},
+              usageSignatures: {},
+              usageFailed: {},
+              usageError: null,
+            })
+            return
+          }
+          pageStore.setState(function (current) {
+            const byId = sessionsById(current.inventory)
+            const usage = Object.assign({}, current.usage)
+            const usageSignatures = Object.assign({}, current.usageSignatures)
+            const usageFailed = Object.assign({}, current.usageFailed)
+            for (let i = 0; i < chunk.length; i += 1) {
+              const id = chunk[i]
+              const row = normalized.usage[id]
+              if (row !== undefined) {
+                usage[id] = row
+                delete usageFailed[id]
+              } else {
+                // Unknown (never a zero): the row renders the muted dash.
+                delete usage[id]
+                if (typeof normalized.failed[id] === 'string') usageFailed[id] = normalized.failed[id]
+                else delete usageFailed[id]
+              }
+              const session = byId[id]
+              usageSignatures[id] = session ? (usageSignatureOf(session) || 'unknown') : 'unknown'
+            }
+            return Object.assign({}, current, {
+              usageLoading: false,
+              usageAvailable: true,
+              usageError: null,
+              usage: usage,
+              usageSignatures: usageSignatures,
+              usageFailed: usageFailed,
+            })
+          })
+          pumpUsage()
+        }).catch(function (error) {
+          if (disposed || isAbortError(error)) return
+          if (requests.stale(handle) || generation !== usageGeneration) return
+          requests.end(handle)
+          usageRequesting = false
+          requeueUsage(chunk)
+          pageStore.setState({ usageLoading: false, usageError: { transport: 'network' } })
+        })
+      }
+
+      /** Toggle the opt-in usage surfaces; the preference is plugin-owned and persisted (guarded). */
+      function setUsageEnabled(enabled) {
+        const value = enabled === true
+        const state = pageStore.getSnapshot()
+        if (state.usageEnabled === value) return Promise.resolve()
+        writeBooleanPreference(USAGE_PREF_STORAGE_KEY, value)
+        if (value !== true) {
+          // Stop the walk but keep the folded rows cached for a later re-enable.
+          usageGeneration += 1
+          const handle = requests.begin('usage')
+          requests.end(handle)
+          usageQueue = []
+          usageQueued = Object.create(null)
+          usageFailedIds = []
+          usageRequesting = false
+          pageStore.setState({
+            usageEnabled: false,
+            usageLoading: false,
+            usageError: null,
+            sessionSort: state.sessionSort === 'usage' ? 'newest' : state.sessionSort,
+          })
+          return Promise.resolve()
+        }
+        // Re-probe `available` on every opt-in: a Host that answered `available: false` may have
+        // gained the query seam in the meantime (and a fresh toggle is a user action, not a loop).
+        pageStore.setState({ usageEnabled: true, usageAvailable: null, usageError: null })
+        const visible = visibleSessionRows(pageStore.getSnapshot(), catalogApi ? catalogApi.getSnapshot() : null)
+        enqueueUsageFor(visible.map(function (session) { return session.id }))
+        return Promise.resolve()
+      }
+
+      /** Lazy hook for the mounted Sessions tab: fetch only the rows it is showing. */
+      function ensureUsageFor(ids) {
+        enqueueUsageFor(Array.isArray(ids) ? ids : [])
+        return Promise.resolve()
+      }
+
+      /** Retry the chunk that failed; the list itself never blocks on a usage error. */
+      function retryUsage() {
+        const state = pageStore.getSnapshot()
+        if (state.usageEnabled !== true) return Promise.resolve()
+        const ids = usageFailedIds.slice()
+        usageFailedIds = []
+        pageStore.setState(function (current) {
+          const usage = Object.assign({}, current.usage)
+          const usageSignatures = Object.assign({}, current.usageSignatures)
+          const usageFailed = Object.assign({}, current.usageFailed)
+          for (let i = 0; i < ids.length; i += 1) {
+            delete usage[ids[i]]
+            delete usageSignatures[ids[i]]
+            delete usageFailed[ids[i]]
+          }
+          return Object.assign({}, current, {
+            usageLoading: false,
+            usageError: null,
+            usage: usage,
+            usageSignatures: usageSignatures,
+            usageFailed: usageFailed,
+          })
+        })
+        // The failed chunk is still marked as queued: release it before re-asking.
+        for (let i = 0; i < ids.length; i += 1) delete usageQueued[ids[i]]
+        if (ids.length > 0) {
+          enqueueUsageFor(ids)
+        } else {
+          const visible = visibleSessionRows(pageStore.getSnapshot(), catalogApi ? catalogApi.getSnapshot() : null)
+          enqueueUsageFor(visible.map(function (session) { return session.id }))
+        }
+        pumpUsage()
+        return Promise.resolve()
+      }
+
+      // ---- folder/cache opener (SPEC §4.11 / §10 "Open (0.6.0)") ----------------
+
+      /**
+       * Ask the Host to open the directory it resolves from this id. The payload is a kind plus
+       * an id — never a path. Failures land in `openError` for the page-level inline banner.
+       */
+      function openPath(kind, id) {
+        if (disposed) return Promise.resolve()
+        if (kind !== 'workspace' && kind !== 'session' && kind !== 'trash' && kind !== 'cache') return Promise.resolve()
+        const payload = { kind: kind }
+        if (kind !== 'cache') {
+          if (typeof id !== 'string' || id === '') return Promise.resolve()
+          payload.id = id
+        }
+        lastOpenTarget = { kind: kind, id: kind === 'cache' ? '' : id }
+        const handle = requests.begin('open')
+        pageStore.setState({ openError: null })
+        return request(ROUTE.open, payload, handle.controller.signal).then(function (envelope) {
+          if (disposed || requests.stale(handle)) return
+          requests.end(handle)
+          if (envelope && envelope.transport === undefined && envelope.ok === true) return
+          pageStore.setState({ openError: toApiError(envelope) })
+        }).catch(function (error) {
+          if (disposed || isAbortError(error)) return
+          if (requests.stale(handle)) return
+          requests.end(handle)
+          pageStore.setState({ openError: { transport: 'network' } })
+        })
+      }
+
+      /** Re-issue the failed open through the same guarded path. */
+      function retryOpen() {
+        if (lastOpenTarget === null) return Promise.resolve()
+        return openPath(lastOpenTarget.kind, lastOpenTarget.id)
+      }
+
       function setTab(tab) {
         if (tab !== 'workspaces' && tab !== 'sessions' && tab !== 'trash' && tab !== 'settings') return
         const state = pageStore.getSnapshot()
@@ -8003,7 +9265,7 @@ window.__ModuleLoader__.load({
       }
 
       function setSessionSort(sort) {
-        if (sort !== 'newest' && sort !== 'oldest' && sort !== 'largest') return
+        if (sort !== 'newest' && sort !== 'oldest' && sort !== 'largest' && sort !== 'usage') return
         if (pageStore.getSnapshot().sessionSort === sort) return
         pageStore.setState({ sessionSort: sort })
       }
@@ -8174,9 +9436,15 @@ window.__ModuleLoader__.load({
         disposed = true
         clearWizardDebounce()
         requests.dispose()
+        usageGeneration += 1
+        usageQueue = []
+        usageQueued = Object.create(null)
+        usageFailedIds = []
+        usageRequesting = false
         lastAction = null
         lastDeferredAction = null
         lastRetainedAction = null
+        lastOpenTarget = null
       }
 
       return {
@@ -8194,6 +9462,11 @@ window.__ModuleLoader__.load({
         setSessionSort: setSessionSort,
         setSessionWorkspace: setSessionWorkspace,
         setSessionFilter: setSessionFilter,
+        setUsageEnabled: setUsageEnabled,
+        ensureUsageFor: ensureUsageFor,
+        retryUsage: retryUsage,
+        openPath: openPath,
+        retryOpen: retryOpen,
         showMoreSessions: showMoreSessions,
         setConfirmPurge: setConfirmPurge,
         loadDeferred: loadDeferred,
@@ -8382,9 +9655,25 @@ window.__ModuleLoader__.load({
       const mutations = createMutationEmitter()
       const notifyMutation = createMutationNotifier(ctx, mutations)
       const catalog = createSessionCatalogBridge(ctx)
-      const dialog = createDialogController({ ctx: ctx, mutations: mutations, notifyMutation: notifyMutation })
+      // One shared capability snapshot: the settings page refreshes it on every inventory load,
+      // and a review dialog snapshots it when it opens (a context-menu review may never mount
+      // the page, in which case the surface stays hidden rather than guessing).
+      const capabilities = { usage: false, projectionCache: false, openPath: false }
+      const notifyContextMenu = function (text) {
+        const menus = ctx.contextMenus
+        if (!menus || typeof menus.notify !== 'function') return
+        try { menus.notify(text, false) } catch (error) { /* feedback is best effort */ }
+      }
+      const dialog = createDialogController({
+        ctx: ctx,
+        t: t,
+        mutations: mutations,
+        notifyMutation: notifyMutation,
+        capabilities: capabilities,
+        notifyContextMenu: notifyContextMenu,
+      })
       const createPageStoreForMount = function () {
-        return createPageStore({ t: t, notifyMutation: notifyMutation })
+        return createPageStore({ t: t, notifyMutation: notifyMutation, capabilities: capabilities, catalog: catalog })
       }
       const api = {
         t: t,
@@ -8402,10 +9691,13 @@ window.__ModuleLoader__.load({
         setDialogMode: dialog.setDialogMode,
         setIncludeSessions: dialog.setIncludeSessions,
         setDialogSelection: dialog.setDialogSelection,
+        setDialogNodeSelection: dialog.setDialogNodeSelection,
+        toggleDialogGroup: dialog.toggleDialogGroup,
         invertDialogTargetSelection: dialog.invertDialogTargetSelection,
         setIncludeDescendants: dialog.setIncludeDescendants,
         selectAllDialogTargets: dialog.selectAllDialogTargets,
         setTypedText: dialog.setTypedText,
+        openTarget: dialog.openTarget,
       }
 
       ctx.effect(function () {
@@ -8439,13 +9731,6 @@ window.__ModuleLoader__.load({
         })
       }
 
-      /** Best-effort toast through the context-menu service; a host without it just skips it. */
-      function notifyContextMenu(text) {
-        const menus = ctx.contextMenus
-        if (!menus || typeof menus.notify !== 'function') return
-        try { menus.notify(text, false) } catch (error) { /* feedback is best effort */ }
-      }
-
       registerSlotEntries(ctx, api, t)
       registerMenuContributions(ctx, {
         t: t,
@@ -8476,6 +9761,16 @@ window.__ModuleLoader__.load({
         failureStage: null,
         result: null,
         deferred: null,
+        // 0.6.0 family tree: every Session item the plans returned that is not a reviewed row,
+        // keyed by id, plus the explicitly checked node ids. `includeDescendants: true` means
+        // "every node selected"; the two representations are kept in step by the controller.
+        knownNodes: {},
+        nodeSelection: [],
+        // Presentation-only: which reviewed rows have their ride-along group expanded (`kind:id`).
+        expandedGroups: {},
+        // Capability snapshot taken when the review opened (the Host cannot open folders on all
+        // platforms); the summary's open control is hidden when `openPath` is false.
+        capabilities: { openPath: false },
         // A permanent review whose planned selection grew again falls back to trash; this notice
         // explains the mode change instead of sending a plan the Host would refuse (SPEC §9).
         modeNotice: false,
@@ -8503,6 +9798,16 @@ window.__ModuleLoader__.load({
         sessionWorkspace: SESSION_WORKSPACE_ANY,
         sessionFilter: 'all',
         sessionLimit: SESSION_PAGE_SIZE,
+        // 0.6.0 usage opt-in (SPEC §10 "Usage (0.6.0)"): off by default, plugin-owned key.
+        usageEnabled: readBooleanPreference(USAGE_PREF_STORAGE_KEY, false),
+        usageAvailable: null,
+        usage: {},
+        usageSignatures: {},
+        usageFailed: {},
+        usageLoading: false,
+        usageError: null,
+        // 0.6.0 "Open" failure, shown as a page-level inline banner (SPEC §10 "Open (0.6.0)").
+        openError: null,
         wizardOpen: false,
         wizardFilters: defaultWizardFilters(),
         wizardSort: 'oldest',

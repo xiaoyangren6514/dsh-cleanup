@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Storage cleanup",
-    "description": "Delete workspace folders, single session logs, or every log of one workspace — reviewed and selectable row by row, with a recoverable trash by default.",
+    "description": "Delete workspace folders, single session logs, or every log of one workspace — reviewed and selectable row by row, with a recoverable trash by default, per-session token usage and cache-hit rate, a selectable conversation-family tree, and projection-cache cleanup.",
     "detail": "docs/DETAIL.en.md"
   }
 }

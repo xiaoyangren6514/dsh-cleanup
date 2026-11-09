@@ -287,6 +287,11 @@ async function makeWorld(spec = {}) {
       if (sessions !== null) deps.sessions = sessions
       if (agents !== null) deps.agents = agents
       if (options.fsOps !== undefined) deps.fsOps = options.fsOps
+      // 0.6.0 optional seams (SPEC §3, §4.10, §4.11, §5.5): each is absent by default so the
+      // capability flags start false and no test can launch a real file manager.
+      for (const name of ['sessionQuery', 'projectionCache', 'emitSessionRemoved', 'platform', 'openDirectory']) {
+        if (options[name] !== undefined) deps[name] = options[name]
+      }
       return createEngine(deps)
     },
   }
@@ -346,6 +351,7 @@ describe('inventory', () => {
     assertPureJson(response)
     assert.deepEqual(Object.keys(response).sort(), [
       'audit',
+      'capabilities',
       'deferred',
       'dshHome',
       'generatedAt',
@@ -359,6 +365,13 @@ describe('inventory', () => {
     assert.equal(response.generatedAt, world.clock.now())
     assert.equal(typeof response.dshHome, 'string')
     assert.ok(path.isAbsolute(response.dshHome))
+    // SPEC §3/§4.1: the three capability flags are plain booleans; without the optional seams only
+    // the platform fact can be true.
+    assert.deepEqual(response.capabilities, {
+      usage: false,
+      projectionCache: false,
+      openPath: ['darwin', 'win32', 'linux'].includes(process.platform),
+    })
     assert.deepEqual(response.trash, {
       root: world.trashRoot,
       entries: 0,
@@ -632,6 +645,54 @@ describe('inventory', () => {
     })
     const response = await engine.inventory()
     assertFail(response, 'IO_ERROR')
+  })
+
+  test('reports the three capability flags from the optional seams (SPEC §3)', async () => {
+    const world = await makeWorld({})
+    // usage: the sessionQuery seam resolves and exposes readSession.
+    const withUsage = await world.engine({ sessionQuery: { readSession: async () => null } }).inventory()
+    assert.deepEqual(withUsage.capabilities, {
+      usage: true,
+      projectionCache: false,
+      openPath: ['darwin', 'win32', 'linux'].includes(process.platform),
+    })
+    const withoutReadSession = await world.engine({ sessionQuery: {} }).inventory()
+    assert.equal(withoutReadSession.capabilities.usage, false, 'a seam without readSession is not a usage capability')
+    const throwingUsage = await world.engine({
+      sessionQuery: {
+        get readSession() {
+          throw new Error('service wedged')
+        },
+      },
+    }).inventory()
+    assert.equal(throwingUsage.capabilities.usage, false, 'a throwing capability probe degrades, never fails inventory')
+
+    // projectionCache: the seam reports availability itself.
+    const withCache = await world.engine({ projectionCache: { available: () => true, drop: async () => true } }).inventory()
+    assert.equal(withCache.capabilities.projectionCache, true)
+    const withoutCache = await world.engine({ projectionCache: { available: () => false, drop: async () => true } }).inventory()
+    assert.equal(withoutCache.capabilities.projectionCache, false)
+    const throwingCache = await world.engine({
+      projectionCache: {
+        available() {
+          throw new Error('domain closed')
+        },
+        drop: async () => false,
+      },
+    }).inventory()
+    assert.equal(throwingCache.capabilities.projectionCache, false, 'a closed domain is a missing capability, not an error')
+
+    // openPath is a platform fact, so the seam is the injectable platform.
+    for (const platform of ['darwin', 'win32', 'linux']) {
+      assert.equal((await world.engine({ platform }).inventory()).capabilities.openPath, true, platform)
+    }
+    for (const platform of ['freebsd', 'aix', 'sunos']) {
+      assert.equal((await world.engine({ platform }).inventory()).capabilities.openPath, false, platform)
+    }
+    // The response is still pure JSON: plain booleans, no wrappers.
+    const capabilities = (await world.engine({ platform: 'freebsd' }).inventory()).capabilities
+    assert.deepEqual(Object.keys(capabilities).sort(), ['openPath', 'projectionCache', 'usage'])
+    for (const value of Object.values(capabilities)) assert.equal(typeof value, 'boolean')
   })
 })
 
@@ -1406,7 +1467,9 @@ describe('execute: trash mode', () => {
       ['sChild', 'trashed'],
     ])
     for (const item of result.items) {
-      assert.deepEqual(Object.keys(item).sort(), RESULT_ITEM_KEYS)
+      // SPEC §4.4 additive contract: a session item reports `cacheDropped`; a workspace item never does.
+      const expectedKeys = item.kind === 'session' ? [...RESULT_ITEM_KEYS, 'cacheDropped'].sort() : [...RESULT_ITEM_KEYS].sort()
+      assert.deepEqual(Object.keys(item).sort(), expectedKeys)
       assert.equal(item.error, null)
       assert.ok(path.isAbsolute(item.movedTo))
     }
@@ -1499,7 +1562,7 @@ describe('execute: trash mode', () => {
     const response = await engine.execute({ planId: plan.planId })
     assert.equal(response.ok, true)
     assert.deepEqual(response.result.items, [
-      { kind: 'session', id: 'unborn', status: 'deleted', error: null, movedTo: null, bytes: 0 },
+      { kind: 'session', id: 'unborn', status: 'deleted', error: null, movedTo: null, bytes: 0, cacheDropped: false },
     ])
     assert.deepEqual(await trashEntries(world), [])
     assert.deepEqual(world.registryCalls, [
@@ -2281,7 +2344,7 @@ describe('hardening regressions (0.4.0)', () => {
     assert.ok(plan.items[0].bytes > 0, 'the plan measured the log before it disappeared')
     const response = await engine.execute({ planId: plan.planId })
     assert.equal(response.ok, true)
-    assert.deepEqual(response.result.items, [{ kind: 'session', id: 's1', status: 'deleted', error: null, movedTo: null, bytes: 0 }])
+    assert.deepEqual(response.result.items, [{ kind: 'session', id: 's1', status: 'deleted', error: null, movedTo: null, bytes: 0, cacheDropped: false }])
     assert.deepEqual(response.result.totals, { trashed: 0, deleted: 1, failed: 0, bytes: 0 })
     assert.deepEqual(await trashEntries(world), [])
     await assertGone(world.dirOfSession('s1'))
@@ -4724,7 +4787,7 @@ describe('release hardening: probe error classification (SPEC §5.2)', () => {
     const response = await engine.execute({ planId: plan.planId })
     assert.equal(response.ok, true)
     assert.deepEqual(response.result.items, [
-      { kind: 'session', id: 's1', status: 'deleted', error: null, movedTo: null, bytes: 0 },
+      { kind: 'session', id: 's1', status: 'deleted', error: null, movedTo: null, bytes: 0, cacheDropped: false },
     ])
     assert.deepEqual(await trashEntries(world), [])
   })
@@ -4817,6 +4880,574 @@ describe('release hardening: trash operations are serialized with deletions', ()
     assert.deepEqual(purged, { ok: true, purged: 1, bytes: 1 })
     assert.deepEqual(await fsp.readdir(world.trashRoot).catch(() => []), [], 'no orphan payload remains')
     await assertGone(world.dirOf('ws1'))
+  })
+})
+
+// #endregion
+
+// #region usage route (SPEC §4.10/§5.11) -------------------------------------------------------
+
+/** A SessionQuery-shaped fake: `readSession(id)` resolves a stored log or throws. */
+function makeSessionQuery(sessions = new Map()) {
+  /** @type {string[]} */
+  const calls = []
+  return {
+    calls,
+    /** @type {Map<string, object | Error>} */
+    sessions,
+    query: {
+      async readSession(id) {
+        calls.push(id)
+        const value = sessions.get(id)
+        if (value === undefined) {
+          const error = new Error(`Session "${id}" was not found`)
+          error.name = 'SessionNotFoundError'
+          throw error
+        }
+        if (value instanceof Error) throw value
+        return value
+      },
+    },
+  }
+}
+
+/** One readable session log returned by `readSession` (SPEC §5.11). */
+function readableSession(id, events, inheritedEventCount = 0) {
+  return { session: { id }, inheritedEventCount, events }
+}
+
+/** One counted `assistant/message` event for the fold. */
+function usageEvent(messageId, inputTokens = 100, cacheReadTokens = 10, cacheWriteTokens = 1, outputTokens = 5) {
+  return {
+    type: 'assistant/message',
+    data: {
+      message: { id: messageId },
+      usage: { inputTokens, cacheReadTokens, cacheWriteTokens, outputTokens },
+    },
+  }
+}
+
+describe('usage (SPEC §4.10/§5.11)', () => {
+  test('answers available:false and an empty usage map without a sessionQuery seam', async () => {
+    const world = await makeWorld({ sessions: [{ id: 's1' }] })
+    const engine = world.engine()
+    const response = await engine.usage({ sessionIds: ['s1'] })
+    assertPureJson(response)
+    assert.deepEqual(response, { ok: true, available: false, usage: {} })
+    assert.equal('failed' in response, false, 'failed is omitted when the Host cannot fold usage')
+  })
+
+  test('validates the id list: empty, non-array, non-string, empty string, over 200, malformed body (BAD_REQUEST)', async () => {
+    const world = await makeWorld({ sessions: [{ id: 's1' }] })
+    const engine = world.engine()
+    const cases = [
+      undefined,
+      null,
+      {},
+      { sessionIds: [] },
+      { sessionIds: 's1' },
+      { sessionIds: [42] },
+      { sessionIds: ['s1', null] },
+      { sessionIds: [''] },
+      { sessionIds: [{}] },
+      { sessionIds: Array.from({ length: 201 }, (_, index) => `session-${index}`) },
+    ]
+    for (const body of cases) {
+      const response = await engine.usage(body)
+      assertFail(response, 'BAD_REQUEST', `usage(${JSON.stringify(body)?.slice(0, 80)})`)
+    }
+  })
+
+  test('accepts exactly 200 ids and de-duplicates repeated ones silently', async () => {
+    const world = await makeWorld({})
+    const sessionQuery = makeSessionQuery()
+    for (let index = 0; index < 200; index += 1) {
+      const id = `session-${index}`
+      sessionQuery.sessions.set(id, readableSession(id, [usageEvent(`m-${index}`, 1, 0, 0, 1)]))
+    }
+    const engine = world.engine({ sessionQuery: sessionQuery.query })
+    const ids = [...sessionQuery.sessions.keys()]
+    const response = await engine.usage({ sessionIds: ids })
+    assert.equal(response.ok, true)
+    assert.equal(response.available, true)
+    assert.equal(Object.keys(response.usage).length, 200)
+    const deduped = await engine.usage({ sessionIds: [ids[0], ids[0], ids[0], ids[1]] })
+    assert.equal(deduped.ok, true)
+    assert.deepEqual(Object.keys(deduped.usage).sort(), [ids[0], ids[1]].sort())
+    assert.equal(deduped.usage[ids[0]].requestCount, 1, 'a duplicate id is one row, not two requests')
+  })
+
+  test('folds through the seam and omits an empty failed map', async () => {
+    const world = await makeWorld({ sessions: [{ id: 's1', eventCount: 2, sizeBytes: 64 }] })
+    const sessionQuery = makeSessionQuery()
+    sessionQuery.sessions.set('s1', readableSession('s1', [
+      usageEvent('m1', 900, 50, 100, 20),
+      usageEvent('m2', 100, 0, 0, 5),
+    ]))
+    const engine = world.engine({ sessionQuery: sessionQuery.query })
+    const response = await engine.usage({ sessionIds: ['s1'] })
+    assertPureJson(response)
+    assert.deepEqual(Object.keys(response).sort(), ['available', 'ok', 'usage'])
+    assert.equal(response.available, true)
+    assert.deepEqual(response.usage.s1, {
+      cacheReadInputTokens: 50,
+      cacheMissInputTokens: 1000 + 100,
+      cacheWriteTokens: 100,
+      outputTokens: 25,
+      totalTokens: 1100 + 50 + 25,
+      requestCount: 2,
+      complete: true,
+      note: null,
+      inheritedEvents: 0,
+      duplicateRequests: 0,
+    })
+  })
+
+  test('reports per-id failures (UNKNOWN_SESSION / READ_FAILED) while every other id still folds', async () => {
+    const world = await makeWorld({})
+    const sessionQuery = makeSessionQuery()
+    sessionQuery.sessions.set('ok', readableSession('ok', [usageEvent('m1', 10, 1, 0, 2)]))
+    sessionQuery.sessions.set('broken', new Error('the log is corrupt'))
+    const engine = world.engine({ sessionQuery: sessionQuery.query })
+    const response = await engine.usage({ sessionIds: ['ok', 'ghost', 'broken'] })
+    assertPureJson(response)
+    assert.equal(response.ok, true)
+    assert.equal(response.available, true)
+    assert.deepEqual(Object.keys(response.usage), ['ok'])
+    assert.deepEqual(response.failed, { ghost: 'UNKNOWN_SESSION', broken: 'READ_FAILED' })
+    assert.equal(response.usage.ok.totalTokens, 10 + 0 + 1 + 2)
+  })
+
+  test('reuses the folded value across calls while the snapshot key is unchanged', async () => {
+    const world = await makeWorld({ sessions: [{ id: 's1', eventCount: 1, sizeBytes: 9 }] })
+    const sessionQuery = makeSessionQuery()
+    sessionQuery.sessions.set('s1', readableSession('s1', [usageEvent('m1')]))
+    const engine = world.engine({ sessionQuery: sessionQuery.query })
+    await engine.usage({ sessionIds: ['s1'] })
+    await engine.usage({ sessionIds: ['s1'] })
+    assert.deepEqual(sessionQuery.calls, ['s1'], 'one read per unchanged Session')
+  })
+})
+
+// #endregion
+
+// #region open route (SPEC §4.11) -------------------------------------------------------------
+
+/** An injectable opener seam that records the directory it was asked to open. */
+function makeOpener() {
+  /** @type {{ dirPath: string, options: object }[]} */
+  const calls = []
+  return {
+    calls,
+    async openDirectory(dirPath, options = {}) {
+      calls.push({ dirPath, options })
+      return undefined
+    },
+  }
+}
+
+describe('open (SPEC §4.11)', () => {
+  test('resolves a stored Session directory exactly like §5.1 and opens it', async () => {
+    const world = await makeWorld({ sessions: [{ id: 's1' }] })
+    const opener = makeOpener()
+    const engine = world.engine({ openDirectory: opener.openDirectory })
+    const response = await engine.open({ kind: 'session', id: 's1' })
+    assertPureJson(response)
+    assert.deepEqual(response, { ok: true, path: world.dirOfSession('s1') })
+    assert.equal(opener.calls.length, 1)
+    assert.equal(opener.calls[0].dirPath, world.dirOfSession('s1'))
+  })
+
+  test('answers UNKNOWN_SESSION for an id the persistence seam does not know', async () => {
+    const world = await makeWorld({})
+    const opener = makeOpener()
+    const engine = world.engine({ openDirectory: opener.openDirectory })
+    assertFail(await engine.open({ kind: 'session', id: 'ghost' }), 'UNKNOWN_SESSION')
+    assert.deepEqual(opener.calls, [], 'nothing may be opened for an unknown id')
+  })
+
+  test('answers IO_ERROR with "the directory no longer exists" for a vanished session directory', async () => {
+    const world = await makeWorld({ sessions: [{ id: 's1' }] })
+    await fsp.rm(world.dirOfSession('s1'), { recursive: true })
+    const web = makeOpener()
+    const engine = world.engine({ openDirectory: web.openDirectory })
+    const error = assertFail(await engine.open({ kind: 'session', id: 's1' }), 'IO_ERROR')
+    assert.match(error.message, /no longer exists/i)
+    assert.deepEqual(web.calls, [])
+  })
+
+  test('refuses a Session layout it does not recognize instead of opening an arbitrary directory', async () => {
+    const world = await makeWorld({ sessions: [{ id: 's1', dir: null }] })
+    // A stored log whose project directory is not the JSONL layout (§5.1 => IO_ERROR).
+    world.snapshots.get('s1').location = { path: path.join(world.root, 'plain-project', 's1', 'log.jsonl') }
+    await fsp.mkdir(path.join(world.root, 'plain-project', 's1'), { recursive: true })
+    const opener = makeOpener()
+    const engine = world.engine({ openDirectory: opener.openDirectory })
+    assertFail(await engine.open({ kind: 'session', id: 's1' }), 'IO_ERROR')
+    assert.deepEqual(opener.calls, [])
+  })
+
+  test('answers IO_ERROR when the session cannot be inspected', async () => {
+    const world = await makeWorld({})
+    const engine = world.engine({
+      sessionPersistence: {
+        list: async () => [],
+        stat: async () => {
+          throw new Error('persistence wedged')
+        },
+      },
+      openDirectory: makeOpener().openDirectory,
+    })
+    assertFail(await engine.open({ kind: 'session', id: 's1' }), 'IO_ERROR')
+  })
+
+  test('refuses a session directory replaced by a symlink', async () => {
+    const world = await makeWorld({ sessions: [{ id: 's1' }] })
+    const elsewhere = path.join(world.root, 'elsewhere')
+    await fsp.mkdir(elsewhere, { recursive: true })
+    await fsp.rm(world.dirOfSession('s1'), { recursive: true })
+    await fsp.symlink(elsewhere, world.dirOfSession('s1'))
+    const opener = makeOpener()
+    const engine = world.engine({ openDirectory: opener.openDirectory })
+    assertFail(await engine.open({ kind: 'session', id: 's1' }), 'IO_ERROR')
+    assert.deepEqual(opener.calls, [], 'a symlink must never be followed and opened')
+  })
+
+  test('resolves a registered Workspace directory through the registry, never a caller path', async () => {
+    const world = await makeWorld({ workspaces: [{ id: 'ws1' }] })
+    const opener = makeOpener()
+    const engine = world.engine({ openDirectory: opener.openDirectory })
+    const response = await engine.open({ kind: 'workspace', id: 'ws1' })
+    assert.deepEqual(response, { ok: true, path: world.dirOf('ws1') })
+    assert.equal(opener.calls[0].dirPath, world.dirOf('ws1'))
+    // A caller cannot smuggle a path in: SPEC §4.11 calls a path-shaped id malformed (BAD_REQUEST).
+    assertFail(await engine.open({ kind: 'workspace', id: world.dirOf('ws1') }), 'BAD_REQUEST')
+    assert.equal(opener.calls.length, 1)
+  })
+
+  test('workspace answers UNKNOWN_WORKSPACE, PATH_NOT_ABSOLUTE, IO_ERROR for missing/symlinked/file paths', async () => {
+    const world = await makeWorld({
+      workspaces: [
+        { id: 'ws1' },
+        { id: 'missing', create: false },
+        { id: 'link' },
+        { id: 'file' },
+      ],
+    })
+    // ws1 keeps its real directory; the other three exercise one refusal each.
+    await fsp.rm(world.dirOf('link'), { recursive: true })
+    await fsp.symlink(world.dirOf('ws1'), world.dirOf('link'))
+    world.entities.set('relative', { id: 'relative', path: 'relative/path', title: 'relative', sessionIds: [] })
+    await fsp.rm(world.dirOf('file'), { recursive: true })
+    await fsp.writeFile(world.dirOf('file'), 'not a directory')
+    const opener = makeOpener()
+    const engine = world.engine({ openDirectory: opener.openDirectory })
+
+    assertFail(await engine.open({ kind: 'workspace', id: 'ghost' }), 'UNKNOWN_WORKSPACE')
+    assertFail(await engine.open({ kind: 'workspace', id: 'relative' }), 'PATH_NOT_ABSOLUTE')
+    assertFail(await engine.open({ kind: 'workspace', id: 'missing' }), 'IO_ERROR')
+    assertFail(await engine.open({ kind: 'workspace', id: 'link' }), 'IO_ERROR')
+    assertFail(await engine.open({ kind: 'workspace', id: 'file' }), 'IO_ERROR')
+    assert.equal(opener.calls.length, 0, 'no refused target may be opened')
+  })
+
+  test('opens a workspace read-only even when §5.3 protection would block deleting it', async () => {
+    const world = await makeWorld({
+      workspaces: [{ id: 'ws1' }],
+      sessions: [{ id: 'live-inside', cwd: undefined }],
+      live: ['live-inside'],
+    })
+    world.snapshot('live-inside').header.cwd = world.dirOf('ws1')
+    const opener = makeOpener()
+    const engine = world.engine({ openDirectory: opener.openDirectory })
+    // Deletion would be refused: a live session is using the folder.
+    const plan = planOf(await engine.plan({ targets: [{ kind: 'workspace', id: 'ws1' }], mode: 'trash', includeSessions: false }))
+    assert.ok(plan.blockers.some((entry) => entry.code === 'WORKSPACE_HAS_LIVE_SESSIONS'))
+    // Opening is read-only and must still work.
+    const response = await engine.open({ kind: 'workspace', id: 'ws1' })
+    assert.deepEqual(response, { ok: true, path: world.dirOf('ws1') })
+    assert.equal(opener.calls.length, 1)
+  })
+
+  test('resolves one owned trash entry directory; unknown ids answer TRASH_ENTRY_UNKNOWN', async () => {
+    const world = await makeWorld({})
+    const entryDir = await writeTrashEntry(world, 'entry-a')
+    const opener = makeOpener()
+    const engine = world.engine({ openDirectory: opener.openDirectory })
+    const response = await engine.open({ kind: 'trash', id: 'entry-a' })
+    assert.deepEqual(response, { ok: true, path: entryDir })
+    assert.equal(opener.calls[0].dirPath, entryDir)
+    assertFail(await engine.open({ kind: 'trash', id: 'nope' }), 'TRASH_ENTRY_UNKNOWN')
+  })
+
+  test('does not let a hostile path-shaped entry id escape the trash root', async () => {
+    const world = await makeWorld({})
+    await writeTrashEntry(world, 'entry-a')
+    const opener = makeOpener()
+    const engine = world.engine({ openDirectory: opener.openDirectory })
+    for (const id of ['../escape', '..', '/etc', 'a/b', 'a\\b']) {
+      const response = await engine.open({ kind: 'trash', id })
+      assert.equal(response.ok, false, `path-shaped id ${JSON.stringify(id)} must not open anything`)
+      assert.ok(['BAD_REQUEST', 'TRASH_ENTRY_UNKNOWN'].includes(response.error.code), response.error.code)
+    }
+    assert.deepEqual(opener.calls, [], 'no path-shaped id reaches the opener')
+  })
+
+  test('resolves the projection-cache directory from the Host profile home', async () => {
+    const world = await makeWorld({})
+    const fakeHome = path.join(world.root, 'fake-dsh-home')
+    const cacheDir = path.join(fakeHome, 'storages', 'session_projcache')
+    await fsp.mkdir(cacheDir, { recursive: true })
+    const saved = process.env.DSH_HOME
+    const opener = makeOpener()
+    try {
+      process.env.DSH_HOME = fakeHome
+      const engine = world.engine({ openDirectory: opener.openDirectory })
+      const response = await engine.open({ kind: 'cache', id: 'ignored-for-cache' })
+      assert.deepEqual(response, { ok: true, path: cacheDir })
+      assert.equal(opener.calls[0].dirPath, cacheDir)
+      // A missing cache directory answers IO_ERROR (it is not created/guessed at).
+      await fsp.rm(cacheDir, { recursive: true })
+      assertFail(await engine.open({ kind: 'cache' }), 'IO_ERROR')
+    } finally {
+      if (saved === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = saved
+    }
+  })
+
+  test('validates kind and id: unknown kind, missing id, malformed id answer BAD_REQUEST', async () => {
+    const world = await makeWorld({ workspaces: [{ id: 'ws1' }], sessions: [{ id: 's1' }] })
+    const opener = makeOpener()
+    const engine = world.engine({ openDirectory: opener.openDirectory })
+    for (const body of [
+      undefined,
+      null,
+      {},
+      { kind: 'nope', id: 's1' },
+      { kind: 'session' },
+      { kind: 'session', id: 42 },
+      { kind: 'session', id: '' },
+      { kind: 'workspace', id: null },
+      { kind: 'trash' },
+      { kind: 'trash', id: {} },
+    ]) {
+      const response = await engine.open(body)
+      assertFail(response, 'BAD_REQUEST', JSON.stringify(body))
+    }
+    assert.deepEqual(opener.calls, [])
+  })
+
+  test('answers OPEN_UNAVAILABLE on a platform with no opener (capability false)', async () => {
+    const world = await makeWorld({ sessions: [{ id: 's1' }] })
+    // No injected opener: the real lib/open.js platform check refuses before spawning anything.
+    const engine = world.engine({ platform: 'freebsd' })
+    assertFail(await engine.open({ kind: 'session', id: 's1' }), 'OPEN_UNAVAILABLE')
+  })
+
+  test('answers OPEN_FAILED when the opener cannot be started; the resolved path is otherwise reported', async () => {
+    const world = await makeWorld({ sessions: [{ id: 's1' }] })
+    const failure = Object.assign(new Error('the launcher could not be started'), { code: 'OPEN_FAILED' })
+    const engine = world.engine({
+      openDirectory: async () => {
+        throw failure
+      },
+    })
+    const error = assertFail(await engine.open({ kind: 'session', id: 's1' }), 'OPEN_FAILED')
+    assert.match(error.message, /launcher|start/i)
+  })
+})
+
+// #endregion
+
+// #region projection-cache drop + session-removed emit (SPEC §4.4/§5.5) -----------------------
+
+/** A `projectionCache` engine seam fake per host-dev's interface. */
+function makeProjectionCache(options = {}) {
+  /** @type {string[]} */
+  const dropped = []
+  return {
+    dropped,
+    cache: {
+      available: () => options.available ?? true,
+      async drop(id) {
+        dropped.push(id)
+        if (options.throwOnDrop === true) throw new Error('the projection domain is closed')
+        if (options.drop !== undefined) return options.drop(id)
+        return options.dropResult ?? true
+      },
+    },
+  }
+}
+
+describe('execute: projection-cache drop and api-session/removed (SPEC §4.4/§5.5)', () => {
+  test('a trashed Session reports cacheDropped:true and emits api-session/removed', async () => {
+    const world = await makeWorld({ sessions: [{ id: 's1' }] })
+    const projection = makeProjectionCache()
+    /** @type {string[]} */
+    const emitted = []
+    const engine = world.engine({
+      projectionCache: projection.cache,
+      emitSessionRemoved: (id) => emitted.push(id),
+    })
+    const plan = planOf(await engine.plan({ targets: [{ kind: 'session', id: 's1' }], mode: 'trash' }))
+    const response = await engine.execute({ planId: plan.planId })
+    assert.equal(response.ok, true)
+    const [item] = response.result.items
+    assert.deepEqual(Object.keys(item).sort(), [...RESULT_ITEM_KEYS, 'cacheDropped'].sort())
+    assert.equal(item.status, 'trashed')
+    assert.equal(item.cacheDropped, true)
+    assert.deepEqual(projection.dropped, ['s1'])
+    assert.deepEqual(emitted, ['s1'])
+    await assertGone(world.dirOfSession('s1'))
+  })
+
+  test('without the projection-cache seam the item succeeds with cacheDropped:false and still emits', async () => {
+    const world = await makeWorld({ sessions: [{ id: 's1' }] })
+    /** @type {string[]} */
+    const emitted = []
+    const engine = world.engine({ emitSessionRemoved: (id) => emitted.push(id) })
+    const plan = planOf(await engine.plan({ targets: [{ kind: 'session', id: 's1' }], mode: 'trash' }))
+    const [item] = (await engine.execute({ planId: plan.planId })).result.items
+    assert.equal(item.status, 'trashed')
+    assert.equal(item.cacheDropped, false)
+    assert.deepEqual(emitted, ['s1'])
+  })
+
+  test('a throwing cache drop never fails the item and reports cacheDropped:false', async () => {
+    const world = await makeWorld({ sessions: [{ id: 's1' }] })
+    const projection = makeProjectionCache({ throwOnDrop: true })
+    const engine = world.engine({ projectionCache: projection.cache, emitSessionRemoved: () => {} })
+    const plan = planOf(await engine.plan({ targets: [{ kind: 'session', id: 's1' }], mode: 'trash' }))
+    const response = await engine.execute({ planId: plan.planId })
+    assert.equal(response.ok, true)
+    const [item] = response.result.items
+    assert.equal(item.status, 'trashed')
+    assert.equal(item.cacheDropped, false)
+    assert.deepEqual(projection.dropped, ['s1'])
+    await assertGone(world.dirOfSession('s1'))
+  })
+
+  test('a cache drop that resolves falsy reports cacheDropped:false', async () => {
+    const world = await makeWorld({ sessions: [{ id: 's1' }] })
+    const engine = world.engine({
+      projectionCache: makeProjectionCache({ dropResult: false }).cache,
+      emitSessionRemoved: () => {},
+    })
+    const plan = planOf(await engine.plan({ targets: [{ kind: 'session', id: 's1' }], mode: 'trash' }))
+    const [item] = (await engine.execute({ planId: plan.planId })).result.items
+    assert.equal(item.status, 'trashed')
+    assert.equal(item.cacheDropped, false)
+  })
+
+  test('a throwing or rejecting emitter never changes the result (best-effort, SPEC §3)', async () => {
+    for (const emit of [
+      () => {
+        throw new Error('no connection')
+      },
+      () => Promise.reject(new Error('the event bus is gone')),
+    ]) {
+      const world = await makeWorld({ sessions: [{ id: 's1' }] })
+      const engine = world.engine({ emitSessionRemoved: emit })
+      const plan = planOf(await engine.plan({ targets: [{ kind: 'session', id: 's1' }], mode: 'trash' }))
+      const response = await engine.execute({ planId: plan.planId })
+      assert.equal(response.ok, true)
+      assert.equal(response.result.items[0].status, 'trashed')
+      await assertGone(world.dirOfSession('s1'))
+    }
+  })
+
+  test('a workspace deletion sweeps Sessions that each report cacheDropped and emit', async () => {
+    const world = await makeWorld({
+      workspaces: [{ id: 'ws1' }],
+      sessions: [
+        { id: 'inside', cwd: undefined },
+        { id: 'child', cwd: '/x', origin: 'subagent', parentSession: 'inside' },
+      ],
+    })
+    world.snapshot('inside').header.cwd = world.dirOf('ws1')
+    const projection = makeProjectionCache()
+    /** @type {string[]} */
+    const emitted = []
+    const engine = world.engine({
+      projectionCache: projection.cache,
+      emitSessionRemoved: (id) => emitted.push(id),
+    })
+    const plan = planOf(await engine.plan({ targets: [{ kind: 'workspace', id: 'ws1' }], mode: 'trash' }))
+    const items = (await engine.execute({ planId: plan.planId })).result.items
+    const byKind = new Map(items.map((item) => [item.kind, item]))
+    assert.equal(byKind.get('workspace-dir').cacheDropped, undefined, 'a workspace item never carries cacheDropped')
+    for (const id of ['inside', 'child']) {
+      const item = items.find((entry) => entry.id === id)
+      assert.equal(item.status, 'trashed')
+      assert.equal(item.cacheDropped, true)
+    }
+    // Sweep order inside one plan is an implementation detail; one drop/emit per Session is the contract.
+    assert.deepEqual([...projection.dropped].sort(), ['child', 'inside'], 'one cache drop per swept Session')
+    assert.deepEqual([...emitted].sort(), ['child', 'inside'], 'one api-session/removed per swept Session')
+  })
+
+  test('workspace items never report cacheDropped and never emit', async () => {
+    const world = await makeWorld({ workspaces: [{ id: 'ws1' }] })
+    const projection = makeProjectionCache()
+    /** @type {string[]} */
+    const emitted = []
+    const engine = world.engine({
+      projectionCache: projection.cache,
+      emitSessionRemoved: (id) => emitted.push(id),
+    })
+    const plan = planOf(await engine.plan({ targets: [{ kind: 'workspace', id: 'ws1' }], mode: 'trash', includeSessions: false }))
+    const [item] = (await engine.execute({ planId: plan.planId })).result.items
+    assert.equal(item.kind, 'workspace-dir')
+    assert.equal(item.status, 'trashed')
+    assert.deepEqual(Object.keys(item).sort(), [...RESULT_ITEM_KEYS].sort())
+    assert.deepEqual(projection.dropped, [])
+    assert.deepEqual(emitted, [])
+  })
+
+  test('failed Session items never report cacheDropped and never emit', async () => {
+    const world = await makeWorld({ sessions: [{ id: 's1' }] })
+    world.registry.unpinSession = async () => {
+      throw new Error('storage boom')
+    }
+    const projection = makeProjectionCache()
+    /** @type {string[]} */
+    const emitted = []
+    const engine = world.engine({
+      projectionCache: projection.cache,
+      emitSessionRemoved: (id) => emitted.push(id),
+    })
+    const plan = planOf(await engine.plan({ targets: [{ kind: 'session', id: 's1' }], mode: 'trash' }))
+    const [item] = (await engine.execute({ planId: plan.planId })).result.items
+    assert.equal(item.status, 'failed')
+    assert.equal('cacheDropped' in item, false, 'a failed item that touched no filesystem has no cacheDropped')
+    assert.deepEqual(projection.dropped, [])
+    assert.deepEqual(emitted, [])
+    await assertExists(world.dirOfSession('s1'), 'the log is left untouched')
+  })
+
+  test('permanent Session deletion also drops the cache record and emits; only successes are emitted', async () => {
+    const world = await makeWorld({ sessions: [{ id: 's1', createdAt: 1 }, { id: 's2', createdAt: 2 }] })
+    // The second item is refused at its per-item cross-process probe, so only s1 completes.
+    world.registry.unarchiveSession = async (id) => {
+      if (id === 's2') throw new Error('storage boom')
+    }
+    const projection = makeProjectionCache()
+    /** @type {string[]} */
+    const emitted = []
+    const engine = world.engine({
+      projectionCache: projection.cache,
+      emitSessionRemoved: (id) => emitted.push(id),
+    })
+    const plan = planOf(await engine.plan({ targets: [{ kind: 'session', id: 's1' }, { kind: 'session', id: 's2' }], mode: 'permanent' }))
+    const response = await engine.execute({ planId: plan.planId })
+    assert.equal(response.ok, true)
+    const byId = new Map(response.result.items.map((item) => [item.id, item]))
+    assert.equal(byId.get('s1').status, 'deleted')
+    assert.equal(byId.get('s1').cacheDropped, true)
+    assert.equal(byId.get('s2').status, 'failed')
+    assert.equal('cacheDropped' in byId.get('s2'), false)
+    assert.deepEqual(projection.dropped, ['s1'])
+    assert.deepEqual(emitted, ['s1'], 'a failed Session must not tell the sidebar to drop its row')
   })
 })
 

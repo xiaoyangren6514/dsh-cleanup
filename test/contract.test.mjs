@@ -48,7 +48,7 @@ async function sha256Of(file) {
 test('the contract script passes on this checkout and prints its summaries', async () => {
   const { stdout } = await runContractCheck(ROOT)
   assert.match(stdout, /✓ contract check passed/)
-  assert.match(stdout, /routes: 14 implemented, 14 documented/)
+  assert.match(stdout, /routes: 16 implemented, 16 documented/)
   assert.match(stdout, /error \+ \d+ warning emitted/)
   assert.match(stdout, /client locale: \d+ keys, \d+ plural bases/)
 })
@@ -78,6 +78,36 @@ test('the contract script fails with a named drift on a throw-away copy and neve
     )
     // The negative fixture lives in /tmp: the real checkout was never modified.
     assert.equal(await sha256Of(path.join(ROOT, 'client.js')), checkoutBefore, 'the checkout must stay untouched')
+  } finally {
+    await fsp.rm(tempRoot, { recursive: true, force: true })
+  }
+})
+
+test('the contract script fires on a new route that is documented but not implemented, and never touches the checkout', async () => {
+  // The two 0.6.0 routes (usage/open) are exactly the kind of additive surface this gate exists for:
+  // SPEC documentation and the route table must stay in lock-step, so removing one route from a
+  // throw-away copy must be named as drift while the real checkout stays byte-identical.
+  const indexBefore = await sha256Of(path.join(ROOT, 'index.js'))
+  const tempRoot = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-cleanup-contract-route-')))
+  try {
+    const copyRoot = path.join(tempRoot, 'plugin')
+    await copyPluginSurface(copyRoot)
+    const copyIndex = path.join(copyRoot, 'index.js')
+    const indexSource = await fsp.readFile(copyIndex, 'utf8')
+    const drifted = indexSource.replace(/^[ \t]*\['\/api\/cleanup\.usage',[^\n]*\n/gm, '')
+    assert.notEqual(drifted, indexSource, 'the route-drift fixture must actually remove the route line')
+    await fsp.writeFile(copyIndex, drifted)
+    await assert.rejects(
+      () => runContractCheck(copyRoot),
+      (error) => {
+        assert.notEqual(error.code, 0, 'drift must exit non-zero')
+        const output = `${error.stdout ?? ''}${error.stderr ?? ''}`
+        assert.match(output, /contract check failed/)
+        assert.match(output, /route \/api\/cleanup\.usage is documented in SPEC but not implemented/, 'the failure names the missing route')
+        return true
+      },
+    )
+    assert.equal(await sha256Of(path.join(ROOT, 'index.js')), indexBefore, 'the checkout must stay untouched')
   } finally {
     await fsp.rm(tempRoot, { recursive: true, force: true })
   }

@@ -9,6 +9,64 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 _No changes yet._
 
+## [0.6.0] - 2026-11-09
+
+### Added
+
+- **Usage insight.** The Sessions tab gains an opt-in `用量` toggle that adds total-tokens and
+  cache-hit-rate columns, an `按用量排序` option, and an own/family total for a row with
+  descendants. Usage is folded from each Session's own log through the Host's `sessionQuery` seam:
+  only `assistant/message` events count, the leading inherited fork prefix is excluded, and requests
+  are de-duplicated by model message id. Cache read, cache miss (input + cache write), cache write,
+  and output are reported, with total tokens = miss + read + output and hit rate = read / (read +
+  miss). The surface is hidden with an explanation when the Host has no query seam, and an unknown
+  row renders `—`, never 0.
+
+- **The Session family as a tree.** The review dialog renders subagent descendants as a tree with
+  one checkbox per node: depth-first by `parentSessionId`, indented, `子代理`/`派生` badges,
+  tri-state parents (`aria-checked="mixed"`), subtree check/uncheck, `全选`/`反选`, and an explicit
+  per-node target set (`includeDescendants: false`) once a node is un-checked. A workspace-clear
+  batch records un-checked nodes in its exclusion set, and the `UNCHECKED_TARGET_LEAK` guard covers
+  nodes. A workspace-folder sweep keeps its "also delete sessions in this folder" switch instead of
+  a tree, because its Sessions are selected by path, not by id.
+
+- **Projection-cache cleanup.** Deleting a Session now also drops its `session_projcache` record
+  when the Host exposes the storage-domain service; a deleted item reports `cacheDropped: true` and
+  a skipped or failed drop reports `false` without failing the deletion. `inventory` reports
+  `capabilities.projectionCache`, so the missing capability is explained once instead of warning on
+  every plan. The record is a disposable fold cache, never user data.
+
+- **Instant sidebar removal.** Every successful Session deletion emits the shipped
+  `api-session/removed` event, so connected Clients drop the sidebar row without a page refresh.
+  Emitting is best-effort and never changes a deletion result.
+
+- **Open in the file manager.** Workspaces rows, Sessions rows, Trash entries, the review dialog
+  summary, and a Trash-header `打开缓存目录` ("Open cache folder") control call the Host's new
+  `POST /api/cleanup.open` with a kind and an id — never a path. The Host resolves the directory
+  itself (`workspace`, `session`, `trash`, or `cache`), answers `OPEN_UNAVAILABLE` / `OPEN_FAILED` /
+  `IO_ERROR` / `TRASH_ENTRY_UNKNOWN` on failure, and the controls are hidden when the platform has no
+  opener.
+
+- **Permanent-delete prominence.** Choosing permanent mode states in the dialog that it cannot be
+  undone, and that the default trash keeps the log on disk until purged.
+
+### Changed
+
+- Contract: two new routes, `POST /api/cleanup.usage` and `POST /api/cleanup.open`;
+  `inventory.capabilities` gains `{ usage, projectionCache, openPath }`; session result items may
+  carry `cacheDropped`; deleting a Session emits `api-session/removed`. SPEC §1, §3-§5, §9-§11
+  document the additions.
+- The READMEs and detail documents describe the new capabilities and carry a "Known limits" section;
+  `docs/FAQ.md` gains usage, family-tree, cache-residue, live-deferral, and open-folder entries.
+- Version 0.6.0.
+
+### Fixed
+
+- Deleting a Session no longer leaves its sidebar row stale until the next page refresh: the Host
+  emits the shipped disposal event after the item succeeds.
+- A deleted Session no longer leaves its projection-cache record behind on Hosts that expose the
+  storage-domain service.
+
 ## [0.5.1] - 2026-11-09
 
 First public release. Version `0.5.0` was consumed by the registry's staged-publishing bootstrap and

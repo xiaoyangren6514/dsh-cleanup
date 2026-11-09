@@ -37,6 +37,8 @@ function createContext() {
   let deleteResponse = () => ({ ok: true, result: { items: [], totals: { trashed: 1, deleted: 0, failed: 0, bytes: 10 } } })
   let restoreResponse = () => ({ ok: true, restoredTo: '/tmp/x' })
   let candidatesResponse = () => ({ ok: true, candidates: [], total: 0, truncated: false, totals: { count: 0, bytes: 0 } })
+  let usageResponse = () => ({ ok: true, available: true, usage: {} })
+  let openResponse = () => ({ ok: true, path: '/tmp/opened' })
   const notices = []
   const inventory = {
     ok: true,
@@ -150,6 +152,8 @@ function createContext() {
     if (path.endsWith('cleanup.plan')) return respond(await planResponse(body))
     if (path.endsWith('cleanup.defer')) return respond({ ok: true, deferred: { count: 1, entryIds: ['entry-1'], replaced: false } })
     if (path.endsWith('cleanup.candidates')) return respond(candidatesResponse(body))
+    if (path.endsWith('cleanup.usage')) return respond(await usageResponse(body))
+    if (path.endsWith('cleanup.open')) return respond(await openResponse(body))
     if (path.endsWith('cleanup.delete')) return respond(deleteResponse(body))
     throw new Error('unrouted fetch ' + path)
   }
@@ -169,6 +173,11 @@ function createContext() {
     setCandidatesResponse(fn) { candidatesResponse = fn },
     setSessions(fn) { inventory.sessions = fn() },
     setTrashEntries(fn) { trash.entries = fn() },
+    setWorkspaces(fn) { inventory.workspaces = fn() },
+    /** 0.6.0 capability flags (SPEC §4.1 `inventory.capabilities`). */
+    setCapabilities(value) { inventory.capabilities = value },
+    setUsageResponse(fn) { usageResponse = fn },
+    setOpenResponse(fn) { openResponse = fn },
   }
 }
 
@@ -2215,4 +2224,639 @@ test('review dialog: a preserved clean delete result keeps its summary and reset
   } finally {
     timer.restore()
   }
+})
+
+// =============================================================================================
+// 0.6.0: session usage (SPEC §10 "Usage (0.6.0)")
+// =============================================================================================
+
+/** Minimal inventory session row for the usage/open cases. */
+function inventorySession(id, overrides) {
+  return Object.assign({
+    id: id,
+    workspaceId: null,
+    cwd: '/tmp/' + id,
+    createdAt: 1000,
+    eventCount: 1,
+    sizeBytes: 10,
+    origin: null,
+    parentSessionId: null,
+    live: false,
+    running: false,
+    archived: false,
+    pinned: false,
+    deletable: true,
+    blockerCodes: [],
+  }, overrides || {})
+}
+
+/** The usage rows the fake Host folds for the requested ids (id number encoded in tokens). */
+function usageRowsFor(ids) {
+  const usage = {}
+  for (const id of ids) {
+    const index = Number(String(id).split('-').pop())
+    if (!Number.isFinite(index) || index === 0) continue
+    usage[id] = {
+      totalTokens: (index + 1) * 1000,
+      cacheReadInputTokens: 800,
+      cacheMissInputTokens: 200,
+      cacheWriteTokens: 0,
+      outputTokens: 100,
+      requestCount: 1,
+      complete: true,
+      note: null,
+    }
+  }
+  return usage
+}
+
+const usageCallsOf = (world) => world.calls.filter((call) => call.url.endsWith('cleanup.usage'))
+
+test('usage: off by default, no fetch and no columns; the opt-in fetches in chunks', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  const rows = []
+  for (let index = 0; index < 205; index += 1) rows.push(inventorySession('session-' + index))
+  world.setSessions(() => rows)
+  world.setCapabilities({ usage: true, projectionCache: true, openPath: false })
+  world.setUsageResponse((body) => ({ ok: true, available: true, usage: usageRowsFor(body.sessionIds) }))
+
+  const api = slotApi(world, 'settings.section')
+  const store = api.createPageStore()
+  await store.loadInventory()
+  store.setTab('sessions')
+  api.createPageStore = () => store
+  const section = world.registrations.find((entry) => entry.options.name === 'settings.section')
+
+  let tree = renderDeep(section.component({ api, t: api.t }))
+  assert.equal(store.getSnapshot().usageEnabled, false, 'usage is opt-in and starts off')
+  assert.equal(elementsByClass(tree, 'dsh-cleanup-usage').length, 0, 'no usage column while off')
+  assert.equal(usageCallsOf(world).length, 0, 'nothing is fetched while usage is off')
+  const toggles = elementsByClass(tree, 'dsh-cleanup-usage-toggle')
+  assert.equal(toggles.length, 1, 'the opt-in toggle is offered when the Host supports usage')
+  const toggleInputs = findAll(toggles[0], (element) => element && element.type === 'input' && element.props)
+  assert.equal(toggleInputs[0].props.checked, false)
+
+  await store.setUsageEnabled(true)
+  await waitFor(() => usageCallsOf(world).length === 2, 'usage fetched in two chunks')
+  const chunks = usageCallsOf(world).map((call) => call.body.sessionIds)
+  assert.deepEqual(chunks.map((ids) => ids.length), [200, 5], 'at most 200 ids per request, sequential')
+  const state = store.getSnapshot()
+  assert.equal(state.usageAvailable, true)
+  assert.equal(state.usage['session-1'].totalTokens, 2000, 'the merged map keeps the folded rows')
+  assert.equal(state.usage['session-0'], undefined, 'an unknown fold stays unknown')
+  assert.equal(typeof state.usageSignatures['session-1'], 'string', 'the fold is cached against its signature')
+
+  tree = renderDeep(section.component({ api, t: api.t }))
+  assert.equal(elementsByClass(tree, 'dsh-cleanup-usage').length, 205, 'every visible row carries the columns')
+  const text = collectText(tree)
+  assert.match(text, /—/, 'an unknown usage renders the muted dash, never a zero')
+
+  // `按用量排序` ranks known totals first and leaves unknown rows last.
+  store.setSessionSort('usage')
+  assert.equal(store.getSnapshot().sessionSort, 'usage')
+  const sortedTree = renderDeep(section.component({ api, t: api.t }))
+  const sortedRows = elementsByClass(sortedTree, 'dsh-cleanup-item').map(collectText)
+  assert.match(sortedRows[0], /session-204/, 'the largest folded usage sorts first')
+  assert.match(sortedRows[sortedRows.length - 1], /session-0/, 'the row with unknown usage sorts last')
+
+  // A Session whose eventCount/sizeBytes changed has its cached fold dropped and re-fetched.
+  rows[1].eventCount = 99
+  world.setUsageResponse((body) => ({ ok: true, available: true, usage: usageRowsFor(body.sessionIds) }))
+  await store.loadInventory()
+  await waitFor(() => store.getSnapshot().usage['session-1'] !== undefined, 'the changed log is re-folded')
+  store.dispose()
+})
+
+test('usage: a Host without the capability hides the surface and explains why', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setSessions(() => [inventorySession('session-a')])
+  world.setCapabilities({ usage: false, projectionCache: false, openPath: false })
+  const api = slotApi(world, 'settings.section')
+  const store = api.createPageStore()
+  await store.loadInventory()
+  store.setTab('sessions')
+  api.createPageStore = () => store
+  const section = world.registrations.find((entry) => entry.options.name === 'settings.section')
+  const tree = renderDeep(section.component({ api, t: api.t }))
+  assert.equal(elementsByClass(tree, 'dsh-cleanup-usage-toggle').length, 0, 'the toggle is hidden without the capability')
+  assert.equal(elementsByClass(tree, 'dsh-cleanup-usage').length, 0)
+  assert.equal(elementsByClass(tree, 'dsh-cleanup-usage-unavailable').length, 1, 'the reason is stated once')
+  assert.match(collectText(tree), /未提供会话用量统计/)
+  assert.equal(usageCallsOf(world).length, 0)
+  store.dispose()
+})
+
+test('usage: available:false hides the columns and says why; a failed chunk keeps a retry', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setSessions(() => [inventorySession('session-a'), inventorySession('session-b')])
+  world.setCapabilities({ usage: true, projectionCache: true, openPath: false })
+  world.setUsageResponse(() => ({ ok: true, available: false, usage: {} }))
+  const api = slotApi(world, 'settings.section')
+  const store = api.createPageStore()
+  await store.loadInventory()
+  store.setTab('sessions')
+  api.createPageStore = () => store
+  const section = world.registrations.find((entry) => entry.options.name === 'settings.section')
+
+  await store.setUsageEnabled(true)
+  await waitFor(() => store.getSnapshot().usageAvailable === false, 'available:false recorded')
+  let tree = renderDeep(section.component({ api, t: api.t }))
+  assert.equal(elementsByClass(tree, 'dsh-cleanup-usage').length, 0, 'columns are hidden when the Host cannot fold usage')
+  assert.equal(elementsByClass(tree, 'dsh-cleanup-usage-unavailable').length, 1)
+  assert.match(collectText(tree), /未提供会话用量统计/)
+
+  // A failed chunk never blocks the list; the row keeps the dash and the toolbar offers a retry.
+  let fail = true
+  world.setUsageResponse((body) => {
+    if (fail) return { ok: false, error: { code: 'INTERNAL', message: 'boom' } }
+    const usage = {}
+    for (const id of body.sessionIds) usage[id] = { totalTokens: 1000, cacheReadInputTokens: 800, cacheMissInputTokens: 200, outputTokens: 0 }
+    return { ok: true, available: true, usage }
+  })
+  await store.setUsageEnabled(false)
+  await store.setUsageEnabled(true)
+  await waitFor(() => store.getSnapshot().usageError !== null, 'the failed chunk is recorded')
+  tree = renderDeep(section.component({ api, t: api.t }))
+  assert.equal(elementsByClass(tree, 'dsh-cleanup-item').length, 2, 'the list still renders')
+  assert.equal(elementsByClass(tree, 'dsh-cleanup-usage-error').length, 1, 'a retry affordance is shown')
+  assert.match(collectText(tree), /重试用量/)
+
+  fail = false
+  await store.retryUsage()
+  await waitFor(() => store.getSnapshot().usageError === null && store.getSnapshot().usage['session-a'] !== undefined, 'retry folds the chunk')
+  assert.equal(store.getSnapshot().usage['session-a'].totalTokens, 1000)
+  store.dispose()
+})
+
+test('usage: a parent row shows own/family tokens for the descendants on the page', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setSessions(() => [
+    inventorySession('session-a'),
+    inventorySession('session-b', { parentSessionId: 'session-a', origin: 'subagent' }),
+  ])
+  world.setCapabilities({ usage: true, projectionCache: true, openPath: false })
+  world.setUsageResponse((body) => {
+    const usage = {}
+    for (const id of body.sessionIds) {
+      usage[id] = id === 'session-a'
+        ? { totalTokens: 1000, cacheReadInputTokens: 500, cacheMissInputTokens: 500, outputTokens: 0 }
+        : { totalTokens: 500, cacheReadInputTokens: 0, cacheMissInputTokens: 500, outputTokens: 0 }
+    }
+    return { ok: true, available: true, usage }
+  })
+  const api = slotApi(world, 'settings.section')
+  const store = api.createPageStore()
+  await store.loadInventory()
+  store.setTab('sessions')
+  api.createPageStore = () => store
+  const section = world.registrations.find((entry) => entry.options.name === 'settings.section')
+  await store.setUsageEnabled(true)
+  await waitFor(() => store.getSnapshot().usage['session-b'] !== undefined, 'both rows folded')
+  const tree = renderDeep(section.component({ api, t: api.t }))
+  const text = collectText(tree)
+  assert.match(text, /1k\/1\.5k/, 'the parent reports its own and the family total')
+  assert.match(text, /50%/, 'the cache-hit column renders the folded rate')
+  store.dispose()
+})
+
+// =============================================================================================
+// 0.6.0: open in the file manager (SPEC §10 "Open (0.6.0)")
+// =============================================================================================
+
+const openCallsOf = (world) => world.calls.filter((call) => call.url.endsWith('cleanup.open'))
+
+function workspaceRow(id, title, path) {
+  return {
+    id: id,
+    path: path,
+    title: title,
+    state: 'ok',
+    stateCode: null,
+    sessionCount: 1,
+    sessionsInside: 0,
+    hasGit: false,
+    liveSessions: [],
+    deletable: true,
+    blockerCodes: [],
+  }
+}
+
+test('open: workspace, session, trash-entry and cache controls post kind+id, never a path', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setWorkspaces(() => [workspaceRow('ws-a', 'proj', '/tmp/proj')])
+  world.setSessions(() => [inventorySession('session-a', { workspaceId: 'ws-a' })])
+  world.setTrashEntries(() => [
+    { id: 'entry-1', kind: 'session', title: 'log', originalPath: '/tmp/log', movedAt: 1, bytes: 10, files: 1, dirs: 0, restorable: true, restorableCode: null },
+  ])
+  world.setCapabilities({ usage: false, projectionCache: true, openPath: true })
+  const api = slotApi(world, 'settings.section')
+  const store = api.createPageStore()
+  await store.loadInventory()
+  api.createPageStore = () => store
+  const section = world.registrations.find((entry) => entry.options.name === 'settings.section')
+
+  store.setTab('workspaces')
+  let tree = renderDeep(section.component({ api, t: api.t }))
+  const workspaceOpen = elementsByClass(tree, 'dsh-cleanup-open')
+  assert.equal(workspaceOpen.length, 1, 'one open control on the Workspaces row')
+  assert.match(String(workspaceOpen[0].props['aria-label']), /proj/, 'the accessible name names the target')
+  workspaceOpen[0].props.onClick()
+  await waitFor(() => openCallsOf(world).length === 1, 'workspace open posted')
+  assert.deepEqual(openCallsOf(world)[0].body, { kind: 'workspace', id: 'ws-a' }, 'workspace is opened by id, never a path')
+
+  store.setTab('sessions')
+  tree = renderDeep(section.component({ api, t: api.t }))
+  const sessionOpen = elementsByClass(tree, 'dsh-cleanup-open')
+  assert.equal(sessionOpen.length, 1)
+  sessionOpen[0].props.onClick()
+  await waitFor(() => openCallsOf(world).length === 2, 'session open posted')
+  assert.deepEqual(openCallsOf(world)[1].body, { kind: 'session', id: 'session-a' })
+
+  store.setTab('trash')
+  await store.loadTrash()
+  tree = renderDeep(section.component({ api, t: api.t }))
+  const cacheOpen = elementsByClass(tree, 'dsh-cleanup-open').filter((button) => /缓存目录/.test(String(button.props['aria-label'])))
+  assert.equal(cacheOpen.length, 1, 'the Trash tab header opens the cache directory')
+  cacheOpen[0].props.onClick()
+  await waitFor(() => openCallsOf(world).length === 3, 'cache open posted')
+  assert.deepEqual(openCallsOf(world)[2].body, { kind: 'cache' }, 'cache is opened without an id')
+
+  const trashOpen = elementsByClass(tree, 'dsh-cleanup-open').filter((button) => /「log」/.test(String(button.props['aria-label'])))
+  assert.equal(trashOpen.length, 1, 'a trash entry opens its moved payload directory')
+  trashOpen[0].props.onClick()
+  await waitFor(() => openCallsOf(world).length === 4, 'trash-entry open posted')
+  assert.deepEqual(openCallsOf(world)[3].body, { kind: 'trash', id: 'entry-1' })
+  store.dispose()
+})
+
+test('open: hidden without the openPath capability; a failure is an inline page error with retry', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setWorkspaces(() => [workspaceRow('ws-a', 'proj', '/tmp/proj')])
+  world.setCapabilities({ usage: false, projectionCache: true, openPath: false })
+  const api = slotApi(world, 'settings.section')
+  const store = api.createPageStore()
+  await store.loadInventory()
+  store.setTab('workspaces')
+  api.createPageStore = () => store
+  const section = world.registrations.find((entry) => entry.options.name === 'settings.section')
+  let tree = renderDeep(section.component({ api, t: api.t }))
+  assert.equal(elementsByClass(tree, 'dsh-cleanup-open').length, 0, 'no open control without the capability')
+  assert.equal(openCallsOf(world).length, 0)
+
+  const capable = createContext()
+  const second = await loadClient()
+  second.mod.apply(capable.ctx)
+  capable.setWorkspaces(() => [workspaceRow('ws-a', 'proj', '/tmp/proj')])
+  capable.setCapabilities({ usage: false, projectionCache: true, openPath: true })
+  capable.setOpenResponse(() => ({ ok: false, error: { code: 'OPEN_FAILED', message: 'no opener' } }))
+  const capableApi = slotApi(capable, 'settings.section')
+  const capableStore = capableApi.createPageStore()
+  await capableStore.loadInventory()
+  capableApi.createPageStore = () => capableStore
+  const capableSection = capable.registrations.find((entry) => entry.options.name === 'settings.section')
+  capableStore.setTab('workspaces')
+  await capableStore.openPath('workspace', 'ws-a')
+  await waitFor(() => capableStore.getSnapshot().openError !== null, 'open error recorded')
+  assert.equal(capableStore.getSnapshot().openError.code, 'OPEN_FAILED')
+  tree = renderDeep(capableSection.component({ api: capableApi, t: capableApi.t }))
+  const text = collectText(tree)
+  assert.match(text, /系统无法启动文件管理器来打开该目录/, 'the page-level inline error is the localized code')
+  assert.match(text, /重试打开/, 'the error offers a retry')
+  assert.equal(elementsByClass(tree, 'dsh-cleanup-item').length, 1, 'the list still renders under the error')
+
+  capable.setOpenResponse(() => ({ ok: true, path: '/tmp/proj' }))
+  await capableStore.retryOpen()
+  await waitFor(() => capableStore.getSnapshot().openError === null, 'retry clears the error')
+  capableStore.dispose()
+  store.dispose()
+})
+
+test('open: the review summary carries the control for its one target; failures go to the toast', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setPlanResponse((body) => ({ ok: true, plan: planEchoingTargets(body) }))
+  const api = slotApi(world, 'settings.section')
+  const store = api.createPageStore()
+  world.setCapabilities({ usage: false, projectionCache: true, openPath: true })
+  await store.loadInventory()
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  const dialogApi = overlay.options.inject().api
+  dialogApi.openDialog([{ kind: 'session', id: 'session-a', title: '会话 A' }])
+  await waitFor(() => dialogApi.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  let tree = renderDeep(overlay.component({ api: dialogApi, t: dialogApi.t }))
+  const open = elementsByClass(tree, 'dsh-cleanup-open')
+  assert.equal(open.length, 1, 'the summary offers an open control for a single target')
+  assert.match(String(open[0].props['aria-label']), /会话 A/)
+  open[0].props.onClick()
+  await waitFor(() => openCallsOf(world).length === 1, 'dialog open posted')
+  assert.deepEqual(openCallsOf(world)[0].body, { kind: 'session', id: 'session-a' })
+
+  world.setOpenResponse(() => ({ ok: false, error: { code: 'OPEN_UNAVAILABLE', message: 'no opener' } }))
+  open[0].props.onClick()
+  await waitFor(() => world.notices.length === 1, 'dialog open failure is reported through the toast')
+  assert.match(world.notices[0].text, /当前平台没有可用的文件管理器打开方式/)
+  assert.equal(dialogApi.dialogStore.getSnapshot().phase, 'review', 'an open failure never replaces the review')
+  dialogApi.disposeDialog()
+  store.dispose()
+})
+
+test('open: the review dialog hides the control when openPath is false', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setPlanResponse((body) => ({ ok: true, plan: planEchoingTargets(body) }))
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  const api = overlay.options.inject().api
+  api.openDialog([{ kind: 'session', id: 'session-a', title: 'A' }])
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  const tree = renderDeep(overlay.component({ api, t: api.t }))
+  assert.equal(elementsByClass(tree, 'dsh-cleanup-open').length, 0)
+  api.disposeDialog()
+})
+
+// =============================================================================================
+// 0.6.0: the review-dialog family tree (SPEC §9 "The family tree (0.6.0)")
+// =============================================================================================
+
+/** Parent chain of the fake family used by the tree cases. */
+const FAMILY_PARENT = { 'session-a': null, 'child-1': 'session-a', 'child-2': 'child-1' }
+
+/** A plan whose `session-a` target expands into child-1 → child-2 when descendants are asked for. */
+function familyPlanFor(body) {
+  const ids = body.targets.map((target) => target.id)
+  if (body.includeDescendants === true && ids.indexOf('session-a') !== -1) ids.push('child-1', 'child-2')
+  const items = ids.map((id) => ({
+    kind: 'session',
+    id: id,
+    workspaceId: null,
+    title: id === 'session-a' ? '会话 A' : (id === 'child-1' ? '子会话 1' : '子会话 2'),
+    path: '/tmp/' + id,
+    bytes: 100,
+    files: 1,
+    dirs: 0,
+    parentSessionId: FAMILY_PARENT[id] || null,
+    isDescendant: FAMILY_PARENT[id] !== null,
+  }))
+  return Object.assign(cleanPlan(body.mode), {
+    targets: body.targets.map((target) => ({ kind: target.kind, id: target.id, title: target.id, path: null })),
+    items: items,
+    totals: { workspaces: 0, sessions: items.length, files: items.length, dirs: 0, bytes: items.length * 100 },
+  })
+}
+
+test('tree: depth-first render, tri-state node checkboxes and the explicit re-plan', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setPlanResponse((body) => ({ ok: true, plan: familyPlanFor(body) }))
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  const api = overlay.options.inject().api
+  api.openDialog([{ kind: 'session', id: 'session-a', title: '会话 A' }])
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  assert.equal(api.dialogStore.getSnapshot().includeDescendants, true, 'the switch starts on with the family selected')
+
+  api.toggleDialogGroup('session:session-a')
+  let tree = renderDeep(overlay.component({ api, t: api.t }))
+  let nodes = elementsByClass(tree, 'dsh-cleanup-tree-node')
+  assert.equal(nodes.length, 2, 'one node per subagent log')
+  assert.deepEqual(nodes.map((node) => node.props['data-depth']), [1, 2], 'ordered depth-first, one indent step per level')
+  const text = collectText(tree)
+  assert.match(text, /子代理/, 'a direct child carries the subagent badge')
+  assert.match(text, /派生/, 'a deeper descendant carries the derived badge')
+  assert.match(text, /已选 3\/3 条日志/, 'the group header counts the family')
+  let checks = findAll(tree, (element) => element && element.type === 'input' && element.props && element.props.className === 'dsh-cleanup-tree-check')
+  assert.equal(checks.length, 2)
+  assert.equal(checks.every((input) => input.props.checked === true), true, 'switch on selects every node')
+
+  // Un-checking the leaf switches the switch off and plans an explicit target set.
+  api.setDialogNodeSelection('child-2', false)
+  await waitFor(() => {
+    const calls = world.calls.filter((call) => call.url.endsWith('cleanup.plan'))
+    return calls.length >= 2 && api.dialogStore.getSnapshot().refreshing !== true
+  }, 'explicit re-plan')
+  const lastPlan = world.calls.filter((call) => call.url.endsWith('cleanup.plan')).at(-1)
+  assert.equal(lastPlan.body.includeDescendants, false, 'an un-checked node wins over descendant expansion')
+  assert.deepEqual(lastPlan.body.targets, [
+    { kind: 'session', id: 'session-a' },
+    { kind: 'session', id: 'child-1' },
+  ], 'the plan names every checked row and checked node, and not the un-checked id')
+  const settled = api.dialogStore.getSnapshot()
+  assert.deepEqual(settled.nodeSelection, ['child-1'])
+  assert.equal(settled.descendantsAutoOff, true, 'the auto-off explanation is reused')
+  assert.equal(settled.plan.items.some((item) => item.id === 'child-2'), false, 'the un-checked log is not planned')
+
+  tree = renderDeep(overlay.component({ api, t: api.t }))
+  nodes = elementsByClass(tree, 'dsh-cleanup-tree-node')
+  assert.equal(nodes.length, 2, 'the un-checked node stays on screen so it can be re-checked')
+  checks = findAll(tree, (element) => element && element.type === 'input' && element.props && element.props.className === 'dsh-cleanup-tree-check')
+  const child1 = checks.find((input) => input.props['aria-label'].indexOf('子会话 1') !== -1)
+  const child2 = checks.find((input) => input.props['aria-label'].indexOf('子会话 2') !== -1)
+  assert.equal(child1.props['aria-checked'], 'mixed', 'a partially selected subtree renders mixed')
+  assert.equal(child2.props.checked, false)
+  assert.match(collectText(tree), /已选 2\/3 条日志/)
+
+  // Checking a node while the switch is off adds it and its subtree to the explicit set.
+  api.setDialogNodeSelection('child-1', true)
+  await waitFor(() => {
+    const calls = world.calls.filter((call) => call.url.endsWith('cleanup.plan'))
+    return calls.length >= 3 && api.dialogStore.getSnapshot().refreshing !== true && calls.at(-1).body.includeDescendants === false
+  }, 'explicit re-plan after re-checking')
+  assert.deepEqual(world.calls.filter((call) => call.url.endsWith('cleanup.plan')).at(-1).body.targets, [
+    { kind: 'session', id: 'session-a' },
+    { kind: 'session', id: 'child-1' },
+    { kind: 'session', id: 'child-2' },
+  ])
+
+  // Switching it back on re-checks every node and plans through includeDescendants.
+  api.setIncludeDescendants(true)
+  await waitFor(() => {
+    const calls = world.calls.filter((call) => call.url.endsWith('cleanup.plan'))
+    return calls.length >= 4 && api.dialogStore.getSnapshot().refreshing !== true && calls.at(-1).body.includeDescendants === true
+  }, 'switch re-check re-plan')
+  const switched = api.dialogStore.getSnapshot()
+  assert.deepEqual(switched.nodeSelection, [], 'the switch owns the set again')
+  assert.equal(switched.descendantsAutoOff, false)
+  tree = renderDeep(overlay.component({ api, t: api.t }))
+  checks = findAll(tree, (element) => element && element.type === 'input' && element.props && element.props.className === 'dsh-cleanup-tree-check')
+  assert.equal(checks.every((input) => input.props.checked === true), true, 'switching back on re-checks every node')
+  api.disposeDialog()
+})
+
+test('tree: checking the root re-plans the family but inverting covers rows and nodes', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setPlanResponse((body) => ({ ok: true, plan: familyPlanFor(body) }))
+  const api = slotApi(world, 'shell.overlay')
+  api.openDialog([{ kind: 'session', id: 'session-a', title: '会话 A' }])
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  api.invertDialogTargetSelection()
+  assert.deepEqual(api.dialogStore.getSnapshot().selection, [], 'invert drops the checked root row')
+  assert.deepEqual(api.dialogStore.getSnapshot().nodeSelection, [], 'invert drops every checked node too')
+  assert.equal(api.dialogStore.getSnapshot().includeDescendants, false)
+  await waitFor(() => api.dialogStore.getSnapshot().plan === null, 'an empty selection keeps no plan')
+  api.selectAllDialogTargets()
+  await waitFor(() => api.dialogStore.getSnapshot().refreshing !== true && api.dialogStore.getSnapshot().plan !== null, 'select-all plans again')
+  assert.deepEqual(api.dialogStore.getSnapshot().selection, ['session:session-a'])
+  const lastPlan = world.calls.filter((call) => call.url.endsWith('cleanup.plan')).at(-1)
+  assert.equal(lastPlan.body.includeDescendants, false, 'select-all re-checks the nodes explicitly while the switch is off')
+  assert.deepEqual(lastPlan.body.targets, [
+    { kind: 'session', id: 'session-a' },
+    { kind: 'session', id: 'child-1' },
+    { kind: 'session', id: 'child-2' },
+  ])
+  api.disposeDialog()
+})
+
+test('tree: a plan that still contains an un-checked node fails closed (UNCHECKED_TARGET_LEAK)', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setPlanResponse((body) => {
+    if (body.includeDescendants === false) {
+      // A misbehaving Host smuggles the un-checked node back into an explicit plan.
+      const plan = familyPlanFor(body)
+      plan.items.push({
+        kind: 'session', id: 'child-2', workspaceId: null, title: '子会话 2', path: '/tmp/child-2',
+        bytes: 100, files: 1, dirs: 0, parentSessionId: 'child-1', isDescendant: true,
+      })
+      return { ok: true, plan: plan }
+    }
+    return { ok: true, plan: familyPlanFor(body) }
+  })
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  const api = overlay.options.inject().api
+  api.openDialog([{ kind: 'session', id: 'session-a', title: '会话 A' }])
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  api.setDialogNodeSelection('child-2', false)
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'failed', 'failed phase')
+  const settled = api.dialogStore.getSnapshot()
+  assert.equal(settled.failureStage, 'plan')
+  assert.equal(settled.error.code, 'UNCHECKED_TARGET_LEAK', 'a leaked node fails the review closed')
+  assert.equal(world.calls.filter((call) => call.url.endsWith('cleanup.delete')).length, 0)
+  const text = collectText(renderDeep(overlay.component({ api, t: api.t })))
+  assert.match(text, /有已取消勾选的目标仍会被删除/)
+  api.disposeDialog()
+})
+
+test('tree: a node un-checked in a workspace clear is recorded in clear.excluded', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setCandidatesResponse(() => ({
+    ok: true,
+    candidates: [{ id: 'session-0', cwd: '/tmp/p0', deletable: true }],
+    total: 1,
+    truncated: false,
+    totals: { count: 1, bytes: 0 },
+  }))
+  world.setPlanResponse((body) => {
+    const plan = familyPlanFor({
+      mode: body.mode,
+      targets: body.targets,
+      includeDescendants: body.includeDescendants === true && body.targets.some((target) => target.id === 'session-0'),
+    })
+    // The clear's family lives under session-0 instead of session-a.
+    plan.targets = body.targets.map((target) => ({ kind: target.kind, id: target.id, title: target.id, path: null }))
+    if (body.includeDescendants === true && body.targets.some((target) => target.id === 'session-0')) {
+      plan.items.push({
+        kind: 'session', id: 'child-x', workspaceId: null, title: '子会话 X', path: '/tmp/child-x',
+        bytes: 10, files: 1, dirs: 0, parentSessionId: 'session-0', isDescendant: true,
+      })
+    }
+    return { ok: true, plan: plan }
+  })
+  clearMenuAction(world).run()
+  const api = slotApi(world, 'shell.overlay')
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  assert.ok(api.dialogStore.getSnapshot().knownNodes['child-x'], 'the clear batch collected the tree node')
+
+  api.setDialogNodeSelection('child-x', false)
+  await waitFor(() => {
+    const calls = world.calls.filter((call) => call.url.endsWith('cleanup.plan'))
+    return calls.length >= 2 && api.dialogStore.getSnapshot().refreshing !== true
+  }, 'explicit clear batch re-plan')
+  const state = api.dialogStore.getSnapshot()
+  assert.equal(state.includeDescendants, false)
+  assert.deepEqual(state.clear.excluded, { 'session:child-x': true }, 'the un-checked node is excluded like a row')
+  assert.deepEqual(world.calls.filter((call) => call.url.endsWith('cleanup.plan')).at(-1).body.targets, [
+    { kind: 'session', id: 'session-0' },
+  ], 'the batch plans the explicit checked set')
+
+  api.confirmDelete()
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'done', 'done phase')
+  assert.deepEqual(api.dialogStore.getSnapshot().clear.excluded, { 'session:child-x': true }, 'the exclusion survives the walk')
+  api.disposeDialog()
+})
+
+// =============================================================================================
+// 0.6.0: permanent deletion prominence (SPEC §9)
+// =============================================================================================
+
+test('dialog: permanent mode states its irreversibility next to the selector; trash stays the default', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setPlanResponse((body) => ({ ok: true, plan: planEchoingTargets(body) }))
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  const api = overlay.options.inject().api
+  api.openDialog([{ kind: 'session', id: 'session-a', title: 'A' }])
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  assert.equal(api.dialogStore.getSnapshot().mode, 'trash', 'the recoverable mode stays the default')
+  assert.equal(elementsByClass(renderDeep(overlay.component({ api, t: api.t })), 'dsh-cleanup-perm-warning').length, 0)
+
+  api.setDialogMode('permanent')
+  await waitFor(() => {
+    const calls = world.calls.filter((call) => call.url.endsWith('cleanup.plan'))
+    return calls.length >= 2 && api.dialogStore.getSnapshot().refreshing !== true && calls.at(-1).body.mode === 'permanent'
+  }, 'permanent re-plan')
+  const tree = renderDeep(overlay.component({ api, t: api.t }))
+  assert.equal(elementsByClass(tree, 'dsh-cleanup-perm-warning').length, 1, 'an explicit irreversible note is rendered')
+  assert.match(collectText(tree), /彻底删除会立即销毁数据，无法撤销，也不会进入回收站。/)
+  api.disposeDialog()
+})
+
+test('usage: the opt-in preference is plugin-owned and a blocked localStorage cannot break the page', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  const store = slotApi(world, 'settings.section').createPageStore()
+  const savedStorage = globalThis.localStorage
+  try {
+    const memory = new Map()
+    globalThis.localStorage = {
+      getItem(key) { return memory.has(key) ? memory.get(key) : null },
+      setItem(key, value) { memory.set(key, String(value)) },
+    }
+    assert.equal(store.getSnapshot().usageEnabled, false, 'the default is off')
+    await store.setUsageEnabled(true)
+    assert.equal(globalThis.localStorage.getItem('dsh-cleanup.usageEnabled'), 'true', 'the plugin-owned key is persisted')
+
+    // A browser that blocks storage must degrade to the default instead of throwing.
+    globalThis.localStorage = {
+      getItem() { throw new Error('blocked') },
+      setItem() { throw new Error('blocked') },
+    }
+    const blocked = slotApi(world, 'settings.section').createPageStore()
+    assert.equal(blocked.getSnapshot().usageEnabled, false, 'a throwing storage keeps the default')
+    await blocked.setUsageEnabled(true)
+    await blocked.setUsageEnabled(false)
+    blocked.dispose()
+  } finally {
+    globalThis.localStorage = savedStorage
+  }
+  store.dispose()
 })

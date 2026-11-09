@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Limpeza de armazenamento",
-    "description": "Exclui pastas de área de trabalho, registros de sessão isolados ou todos os de uma área de trabalho: com revisão, seleção linha a linha e lixeira recuperável por padrão.",
+    "description": "Exclui pastas de área de trabalho, registros de sessão isolados ou todos os de uma área de trabalho: com revisão, seleção linha a linha e lixeira recuperável por padrão. Mostra o consumo de tokens e a taxa de acerto de cache por sessão, permite escolher a árvore da família de conversa e limpa o cache de projeção ao excluir.",
     "detail": "docs/DETAIL.md"
   }
 }

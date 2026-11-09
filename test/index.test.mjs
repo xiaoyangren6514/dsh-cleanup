@@ -1,5 +1,5 @@
 /**
- * Contract tests for index.js (Host half): plugin shape, the fourteen routes, the HTTP envelope rules
+ * Contract tests for index.js (Host half): plugin shape, the sixteen routes, the HTTP envelope rules
  * (SPEC §4), the deferred-deletion start-up hook (SPEC §4.7/§5.8) and the read-only
  * `cleanup_inventory` tool (SPEC §6).
  *
@@ -31,6 +31,7 @@ after(async () => {
 
 const ROUTE_PATHS = [
   '/api/cleanup.inventory',
+  '/api/cleanup.usage',
   '/api/cleanup.candidates',
   '/api/cleanup.measure',
   '/api/cleanup.plan',
@@ -38,6 +39,7 @@ const ROUTE_PATHS = [
   '/api/cleanup.trash.list',
   '/api/cleanup.trash.restore',
   '/api/cleanup.trash.purge',
+  '/api/cleanup.open',
   '/api/cleanup.defer',
   '/api/cleanup.deferred.list',
   '/api/cleanup.deferred.cancel',
@@ -130,7 +132,10 @@ async function makeWorld() {
 
 /**
  * Start the plugin against a fake ctx and capture everything it registers.
- * @returns {{ registrations: object[], disposed: string[], tools: object[], dispose: Function, ctx: object }}
+ *
+ * `options.services` supplies the optional 0.6.0 seams (`sessionQuery`, `storageDomain`) the Host
+ * resolves through `ctx.get`; `options.emit` replaces the default recorder for emit-failure cases.
+ * @returns {{ registrations: object[], disposed: string[], tools: object[], dispose: Function, ctx: object, emits: [string, unknown][] }}
  */
 function startPlugin(world, options = {}) {
   /** @type {object[]} */
@@ -139,6 +144,8 @@ function startPlugin(world, options = {}) {
   const disposed = []
   /** @type {object[]} */
   const tools = []
+  /** @type {[string, unknown][]} */
+  const emits = []
   const toolsService = options.toolsService ?? null
   const ctx = {
     connection: {
@@ -157,12 +164,21 @@ function startPlugin(world, options = {}) {
     effect(fn) {
       return fn()
     },
+    // SPEC §3: a context without emit is legal; the recorder proves the best-effort call happened.
+    emit: options.emit === undefined
+      ? (event, payload) => {
+          emits.push([event, payload])
+        }
+      : options.emit,
     get(name) {
       if (options.get !== undefined) return options.get(name, world)
       if (name === 'tools') {
         if (toolsService === null) return undefined
         if (toolsService === 'throwing-get') throw new Error('tool registry unavailable')
         return toolsService
+      }
+      if (options.services !== undefined && Object.prototype.hasOwnProperty.call(options.services, name)) {
+        return options.services[name]
       }
       if (options.noOptionalServices === true) return undefined
       return world.defaultGet(name)
@@ -177,7 +193,7 @@ function startPlugin(world, options = {}) {
       ...(options.config ?? {}),
     })
   })
-  return { registrations, disposed, tools, dispose, ctx }
+  return { registrations, disposed, tools, dispose, ctx, emits }
 }
 
 /** A fake ToolRegistry whose `register` captures the tool definition. */
@@ -189,6 +205,55 @@ function makeToolsService(captured, disposers) {
         disposers.push('tool')
       }
     },
+  }
+}
+
+/**
+ * A fake shipped `storageDomain` service (SPEC §3/§5.5): `get('session_projcache').table('sessions')`
+ * exposes the record `delete(id)`. `dropped` records the ids actually asked for.
+ * @param {string[]} dropped - ids the table delete was called with.
+ * @returns {object} service implementing `get(name)`.
+ */
+function fakeStorageDomain(dropped) {
+  const table = {
+    async delete(id) {
+      dropped.push(id)
+      return true
+    },
+  }
+  const domain = {
+    table(name) {
+      return name === 'sessions' ? table : undefined
+    },
+  }
+  return {
+    get(name) {
+      return name === 'session_projcache' ? domain : undefined
+    },
+  }
+}
+
+/** A fake `sessionQuery` service (SPEC §4.10/§5.11) backed by a plain id -> observation map. */
+function fakeSessionQuery(observations = new Map()) {
+  return {
+    async readSession(id) {
+      const value = observations.get(id)
+      if (value === undefined) {
+        const error = new Error(`Session "${id}" was not found`)
+        error.name = 'SessionNotFoundError'
+        throw error
+      }
+      if (value instanceof Error) throw value
+      return value
+    },
+  }
+}
+
+/** One counted assistant-message event for the token fold. */
+function assistantUsageEvent(messageId, inputTokens = 100, outputTokens = 10) {
+  return {
+    type: 'assistant/message',
+    data: { message: { id: messageId }, usage: { inputTokens, cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens } },
   }
 }
 
@@ -372,12 +437,12 @@ describe('plugin shape (SPEC §3)', () => {
 // #region route registration (SPEC §4) --------------------------------------------------------
 
 describe('route registration', () => {
-  test('registers exactly the fourteen authenticated POST routes, each owning one path', async () => {
+  test('registers exactly the sixteen authenticated POST routes, each owning one path', async () => {
     const world = await makeWorld()
     const { registrations, dispose } = startPlugin(world)
-    assert.equal(registrations.length, 14)
+    assert.equal(registrations.length, 16)
     assert.deepEqual(registrations.map((entry) => entry.path).sort(), [...ROUTE_PATHS].sort())
-    assert.equal(new Set(registrations.map((entry) => entry.path)).size, 14)
+    assert.equal(new Set(registrations.map((entry) => entry.path)).size, 16)
     for (const registration of registrations) {
       assert.deepEqual(registration.methods, ['POST'], registration.path)
       assert.equal(registration.requestBody, 'buffered', registration.path)
@@ -398,7 +463,7 @@ describe('route registration', () => {
     assert.deepEqual([...disposed].sort(), [...ROUTE_PATHS].reverse().sort())
     assert.deepEqual(toolDisposers, ['tool'])
     await assert.doesNotReject(() => dispose())
-    assert.equal(disposed.length, 14)
+    assert.equal(disposed.length, 16)
   })
 })
 
@@ -483,6 +548,7 @@ describe('HTTP envelope', () => {
     assert.match(response.headers.get('content-type'), /application\/json/)
     assert.deepEqual(Object.keys(response.body).sort(), [
       'audit',
+      'capabilities',
       'deferred',
       'dshHome',
       'generatedAt',
@@ -538,7 +604,43 @@ describe('route payloads', () => {
     })
     assert.deepEqual(response.body.deferred, { count: 0, retained: 0, lastRun: null })
     assert.deepEqual(response.body.audit, { enabled: true, lastStartup: null, recent: [] })
+    // SPEC §3: all three optional-capability flags are reported as plain booleans.
+    assert.deepEqual(response.body.capabilities, {
+      usage: false,
+      projectionCache: false,
+      openPath: ['darwin', 'win32', 'linux'].includes(process.platform),
+    })
     await dispose()
+  })
+
+  test('inventory reports usage/projectionCache capabilities from the optional seams', async () => {
+    const world = await makeWorld()
+    const { registrations, dispose } = startPlugin(world, {
+      services: {
+        sessionQuery: { readSession: async () => null },
+        storageDomain: fakeStorageDomain([]),
+      },
+    })
+    const response = await call(registrations, '/api/cleanup.inventory', {})
+    assert.equal(response.status, 200)
+    assert.deepEqual(response.body.capabilities, {
+      usage: true,
+      projectionCache: true,
+      openPath: ['darwin', 'win32', 'linux'].includes(process.platform),
+    })
+    // A seam that resolves but does not expose the documented shape is not a capability.
+    const partial = await makeWorld()
+    const { registrations: partialRegistrations, dispose: partialDispose } = startPlugin(partial, {
+      services: { sessionQuery: {}, storageDomain: {} },
+    })
+    const partialInventory = await call(partialRegistrations, '/api/cleanup.inventory', {})
+    assert.deepEqual(partialInventory.body.capabilities, {
+      usage: false,
+      projectionCache: false,
+      openPath: ['darwin', 'win32', 'linux'].includes(process.platform),
+    })
+    await dispose()
+    await partialDispose()
   })
 
   test('candidates answers the SPEC §4.9 envelope and maps bad requests to HTTP 400', async () => {
@@ -732,6 +834,225 @@ describe('route payloads', () => {
 
 // #endregion
 
+// #region usage route (SPEC §4.10) -------------------------------------------------------------
+
+describe('usage route (SPEC §4.10)', () => {
+  test('answers { available:false, usage:{} } when the Host has no sessionQuery seam', async () => {
+    const world = await makeWorld()
+    const { registrations, dispose } = startPlugin(world)
+    const response = await call(registrations, '/api/cleanup.usage', { sessionIds: ['s1'] })
+    assert.equal(response.status, 200)
+    assert.deepEqual(response.body, { ok: true, available: false, usage: {} })
+    assert.equal('failed' in response.body, false, 'failed is omitted when the Host cannot fold usage')
+    await dispose()
+  })
+
+  test('folds through a fake sessionQuery and omits an empty failed map', async () => {
+    const world = await makeWorld()
+    const observations = new Map([
+      ['s1', { session: { id: 's1' }, inheritedEventCount: 0, events: [assistantUsageEvent('m1', 900, 20)] }],
+    ])
+    const { registrations, dispose } = startPlugin(world, { services: { sessionQuery: fakeSessionQuery(observations) } })
+    const response = await call(registrations, '/api/cleanup.usage', { sessionIds: ['s1'] })
+    assert.equal(response.status, 200)
+    assert.equal(response.body.ok, true)
+    assert.equal(response.body.available, true)
+    assert.deepEqual(Object.keys(response.body).sort(), ['available', 'ok', 'usage'])
+    assert.equal(response.body.usage.s1.totalTokens, 920)
+    assert.equal(response.body.usage.s1.requestCount, 1)
+    assert.equal('failed' in response.body, false)
+    await dispose()
+  })
+
+  test('one unreadable Session is a per-id failed entry and stays HTTP 200', async () => {
+    const world = await makeWorld()
+    const observations = new Map([
+      ['s1', { session: { id: 's1' }, inheritedEventCount: 0, events: [assistantUsageEvent('m1')] }],
+      ['broken', new Error('the log is corrupt')],
+    ])
+    const { registrations, dispose } = startPlugin(world, { services: { sessionQuery: fakeSessionQuery(observations) } })
+    const response = await call(registrations, '/api/cleanup.usage', { sessionIds: ['s1', 'ghost', 'broken'] })
+    assert.equal(response.status, 200)
+    assert.equal(response.body.ok, true)
+    assert.deepEqual(Object.keys(response.body.usage), ['s1'])
+    assert.deepEqual(response.body.failed, { ghost: 'UNKNOWN_SESSION', broken: 'READ_FAILED' })
+    await dispose()
+  })
+
+  test('validates the id list as HTTP 400 BAD_REQUEST', async () => {
+    const world = await makeWorld()
+    const { registrations, dispose } = startPlugin(world)
+    const cases = [
+      undefined,
+      'not json',
+      { sessionIds: [] },
+      { sessionIds: 's1' },
+      { sessionIds: [42] },
+      { sessionIds: [''] },
+      { sessionIds: Array.from({ length: 201 }, (_, index) => `session-${index}`) },
+    ]
+    for (const body of cases) {
+      const response = await call(registrations, '/api/cleanup.usage', body)
+      assert.equal(response.status, 400, JSON.stringify(body?.toString?.() ?? body))
+      assert.equal(response.body.error.code, 'BAD_REQUEST', JSON.stringify(body?.toString?.() ?? body))
+    }
+    await dispose()
+  })
+
+  test('de-duplicates repeated ids silently', async () => {
+    const world = await makeWorld()
+    const observations = new Map([
+      ['s1', { session: { id: 's1' }, inheritedEventCount: 0, events: [assistantUsageEvent('m1')] }],
+    ])
+    const { registrations, dispose } = startPlugin(world, { services: { sessionQuery: fakeSessionQuery(observations) } })
+    const response = await call(registrations, '/api/cleanup.usage', { sessionIds: ['s1', 's1', 's1'] })
+    assert.equal(response.status, 200)
+    assert.deepEqual(Object.keys(response.body.usage), ['s1'])
+    assert.equal(response.body.usage.s1.requestCount, 1)
+    await dispose()
+  })
+})
+
+// #endregion
+
+// #region open route (SPEC §4.11) ---------------------------------------------------------------
+
+describe('open route (SPEC §4.11)', () => {
+  test('is registered as a buffered POST and answers HTTP 400 for a malformed body', async () => {
+    const world = await makeWorld()
+    const { registrations, dispose } = startPlugin(world)
+    const registration = registrations.find((entry) => entry.path === '/api/cleanup.open')
+    assert.ok(registration, 'the open route is registered')
+    assert.deepEqual(registration.methods, ['POST'])
+    assert.equal(registration.requestBody, 'buffered')
+    const malformed = await call(registrations, '/api/cleanup.open', '{not json')
+    assert.equal(malformed.status, 400)
+    assert.equal(malformed.body.error.code, 'BAD_REQUEST')
+    await dispose()
+  })
+
+  test('validates kind and id as HTTP 400 BAD_REQUEST (unknown kind, missing id, path-shaped id)', async () => {
+    const world = await makeWorld()
+    const { registrations, dispose } = startPlugin(world)
+    const cases = [
+      {},
+      { kind: 'nope', id: 's1' },
+      { kind: 'session' },
+      { kind: 'session', id: 42 },
+      { kind: 'session', id: '' },
+      { kind: 'workspace' },
+      { kind: 'trash' },
+      // A hostile caller cannot smuggle a path in through the id.
+      { kind: 'session', id: '../sessions/s1' },
+      { kind: 'trash', id: world.sessionDir },
+    ]
+    for (const body of cases) {
+      const response = await call(registrations, '/api/cleanup.open', body)
+      assert.equal(response.status, 400, JSON.stringify(body))
+      assert.equal(response.body.error.code, 'BAD_REQUEST', JSON.stringify(body))
+    }
+    await dispose()
+  })
+
+  test('a domain failure stays HTTP 200: unknown session / unknown trash entry / missing cache directory', async () => {
+    const world = await makeWorld()
+    const saved = process.env.DSH_HOME
+    const fakeHome = path.join(world.root, 'empty-home')
+    try {
+      process.env.DSH_HOME = fakeHome
+      const { registrations, dispose } = startPlugin(world)
+      const unknownSession = await call(registrations, '/api/cleanup.open', { kind: 'session', id: 'ghost' })
+      assert.equal(unknownSession.status, 200)
+      assert.equal(unknownSession.body.ok, false)
+      assert.equal(unknownSession.body.error.code, 'UNKNOWN_SESSION')
+
+      const unknownTrash = await call(registrations, '/api/cleanup.open', { kind: 'trash', id: 'no-such-entry' })
+      assert.equal(unknownTrash.status, 200)
+      assert.equal(unknownTrash.body.error.code, 'TRASH_ENTRY_UNKNOWN')
+
+      // The cache directory is resolved from DSH_HOME and is not created; a missing one is IO_ERROR.
+      const missingCache = await call(registrations, '/api/cleanup.open', { kind: 'cache' })
+      assert.equal(missingCache.status, 200)
+      assert.equal(missingCache.body.ok, false)
+      assert.equal(missingCache.body.error.code, 'IO_ERROR')
+      await dispose()
+    } finally {
+      if (saved === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = saved
+    }
+  })
+})
+
+// #endregion
+
+// #region delete route: cacheDropped + api-session/removed (SPEC §4.4/§5.5) --------------------
+
+describe('delete route: projection-cache drop and api-session/removed', () => {
+  test('a trashed Session reports cacheDropped:true and emits api-session/removed', async () => {
+    const world = await makeWorld()
+    const dropped = []
+    const { registrations, emits, dispose } = startPlugin(world, { services: { storageDomain: fakeStorageDomain(dropped) } })
+    const planned = await call(registrations, '/api/cleanup.plan', { targets: [{ kind: 'session', id: 's1' }], mode: 'trash' })
+    assert.equal(planned.body.ok, true)
+    const deleted = await call(registrations, '/api/cleanup.delete', { planId: planned.body.plan.planId })
+    assert.equal(deleted.status, 200)
+    assert.equal(deleted.body.ok, true)
+    const [item] = deleted.body.result.items
+    assert.equal(item.kind, 'session')
+    assert.equal(item.status, 'trashed')
+    assert.equal(item.cacheDropped, true)
+    assert.deepEqual(dropped, ['s1'])
+    assert.deepEqual(emits, [['api-session/removed', 's1']])
+    await dispose()
+  })
+
+  test('without storageDomain the item succeeds with cacheDropped:false and still emits', async () => {
+    const world = await makeWorld()
+    const { registrations, emits, dispose } = startPlugin(world)
+    const planned = await call(registrations, '/api/cleanup.plan', { targets: [{ kind: 'session', id: 's1' }], mode: 'trash' })
+    const deleted = await call(registrations, '/api/cleanup.delete', { planId: planned.body.plan.planId })
+    assert.equal(deleted.body.ok, true)
+    assert.equal(deleted.body.result.items[0].cacheDropped, false)
+    assert.deepEqual(emits, [['api-session/removed', 's1']])
+    await dispose()
+  })
+
+  test('a throwing cache or a throwing emitter never fails the item', async () => {
+    // (a) The projection-cache resolve/delete throws: cacheDropped:false, deletion succeeds.
+    const cacheWorld = await makeWorld()
+    const throwingStorageDomain = {
+      get() {
+        throw new Error('the storage domain is closed')
+      },
+    }
+    const cacheRun = startPlugin(cacheWorld, { services: { storageDomain: throwingStorageDomain } })
+    const cachePlan = await call(cacheRun.registrations, '/api/cleanup.plan', { targets: [{ kind: 'session', id: 's1' }], mode: 'trash' })
+    const cacheDelete = await call(cacheRun.registrations, '/api/cleanup.delete', { planId: cachePlan.body.plan.planId })
+    assert.equal(cacheDelete.status, 200)
+    assert.equal(cacheDelete.body.ok, true)
+    assert.equal(cacheDelete.body.result.items[0].status, 'trashed')
+    assert.equal(cacheDelete.body.result.items[0].cacheDropped, false)
+    await cacheRun.dispose()
+
+    // (b) The emitter throws: the result is untouched (best effort, SPEC §3).
+    const emitWorld = await makeWorld()
+    const emitRun = startPlugin(emitWorld, {
+      emit() {
+        throw new Error('the event bus is gone')
+      },
+    })
+    const emitPlan = await call(emitRun.registrations, '/api/cleanup.plan', { targets: [{ kind: 'session', id: 's1' }], mode: 'trash' })
+    const emitDelete = await call(emitRun.registrations, '/api/cleanup.delete', { planId: emitPlan.body.plan.planId })
+    assert.equal(emitDelete.status, 200)
+    assert.equal(emitDelete.body.ok, true)
+    assert.equal(emitDelete.body.result.items[0].status, 'trashed')
+    assert.equal(emitDelete.body.result.items[0].cacheDropped, false)
+    await emitRun.dispose()
+  })
+})
+
+// #endregion
+
 // #region read-only agent tool (SPEC §6) ------------------------------------------------------
 
 describe('cleanup_inventory tool', () => {
@@ -871,7 +1192,7 @@ describe('cleanup_inventory tool', () => {
   test('is omitted without throwing when the tools service is absent', async () => {
     const world = await makeWorld()
     const { registrations, dispose } = startPlugin(world)
-    assert.equal(registrations.length, 14)
+    assert.equal(registrations.length, 16)
     await dispose()
   })
 
@@ -883,7 +1204,7 @@ describe('cleanup_inventory tool', () => {
         return world.defaultGet(name)
       },
     })
-    assert.equal(throwing.registrations.length, 14)
+    assert.equal(throwing.registrations.length, 16)
     await throwing.dispose()
 
     const failing = startPlugin(world, {
@@ -893,7 +1214,7 @@ describe('cleanup_inventory tool', () => {
         },
       },
     })
-    assert.equal(failing.registrations.length, 14)
+    assert.equal(failing.registrations.length, 16)
     await failing.dispose()
   })
 
@@ -1020,7 +1341,7 @@ describe('optional service degradation', () => {
   test('missing optional services keep the plugin active', async () => {
     const world = await makeWorld()
     const { registrations, dispose } = startPlugin(world, { noOptionalServices: true })
-    assert.equal(registrations.length, 14)
+    assert.equal(registrations.length, 16)
     const inventory = await call(registrations, '/api/cleanup.inventory', {})
     assert.equal(inventory.status, 200)
     assert.equal(inventory.body.ok, true)
@@ -1133,7 +1454,7 @@ describe('deferred-deletion routes and start-up hook', () => {
     await writeDeferredQueue(world, [queuedSessionEntry('s1')])
     const logs = []
     const { registrations, dispose } = startPlugin(world, { logger: { info: (message) => logs.push(message) } })
-    assert.equal(registrations.length, 14)
+    assert.equal(registrations.length, 16)
     const applied = await waitFor(async () => {
       const document = await readDeferredQueue(world)
       return document !== null && document.entries.length === 0 && document.lastRun !== null
@@ -1162,7 +1483,7 @@ describe('deferred-deletion routes and start-up hook', () => {
     // New work queued while this process is still running must wait for the NEXT process start.
     await writeDeferredQueue(world, [queuedSessionEntry('s1')])
     const reloaded = startPlugin(world)
-    assert.equal(reloaded.registrations.length, 14)
+    assert.equal(reloaded.registrations.length, 16)
     await new Promise((resolve) => setTimeout(resolve, 100))
     const document = await readDeferredQueue(world)
     assert.equal(document.entries.length, 1, 'the hot-reloaded apply must not consume the queue')
@@ -1175,7 +1496,7 @@ describe('deferred-deletion routes and start-up hook', () => {
     await fsp.mkdir(path.dirname(world.deferredFile), { recursive: true })
     await fsp.writeFile(world.deferredFile, '{not json')
     const { registrations, dispose } = startPlugin(world)
-    assert.equal(registrations.length, 14, 'a broken queue must never block activation')
+    assert.equal(registrations.length, 16, 'a broken queue must never block activation')
     await new Promise((resolve) => setTimeout(resolve, 100))
     assert.equal(await fsp.readFile(world.deferredFile, 'utf8'), '{not json', 'the hook leaves the corrupt file alone')
     const inventory = await call(registrations, '/api/cleanup.inventory', {})

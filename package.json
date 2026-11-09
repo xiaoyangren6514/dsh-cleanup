@@ -1,8 +1,8 @@
 {
   "name": "dsh-cleanup",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "type": "module",
-  "description": "Workspace folder and Session log deletion with a recoverable trash, an explicit review step, and a storage overview page",
+  "description": "Workspace folder and Session log deletion with a recoverable trash, an explicit review step, token-usage insight, a selectable Session family tree, projection-cache cleanup, and a storage overview page",
   "license": "MIT",
   "publishConfig": {
     "access": "public",

@@ -30,6 +30,18 @@ Four product rules drive every design decision:
 
 The agent gets a **read-only** inventory tool. Deletion is user-only, performed from the UI.
 
+Since 0.6.0 the plugin also *shows what it deletes*, and stops leaving residue:
+
+- **Usage insight.** Per-Session token usage and cache-hit rate folded from the Session's own log
+  through the Host's query seam (§4.10, §5.11), opt-in from the Sessions list and switchable off.
+- **The Session family as a tree.** The review dialog renders subagent descendants as a tree with one
+  checkbox per node (§9), so a user can keep one runaway subagent log while deleting its parent.
+- **No projection-cache residue.** A deleted Session's `session_projcache` record goes with its files
+  (§5.5), and deleting emits the shipped `api-session/removed` event, so the sidebar row leaves
+  without a page reload.
+- **Open in the file manager.** A folder/cache opener that only ever opens a directory the Host
+  resolved itself from an id — never a caller-supplied path (§4.11).
+
 The published bundle declares `dsh.bundle.platforms: ["darwin", "linux", "win32"]`: the destructive
 path handling is written for both POSIX and Windows spellings — a drive or UNC root, a
 case-insensitive comparison, and a depth counted below that root, so `C:\proj` is refused as a
@@ -40,9 +52,11 @@ manifest does not name.
 
 | Path | Owner | Notes |
 |---|---|---|
-| `package.json`, `cordis.patch.yml`, `locale/*.json`, `icon.svg`, `README.md`, `docs/*` | Lead | Do not edit |
+| `package.json`, `CHANGELOG.md`, `cordis.patch.yml`, `locale/*.json`, `icon.svg`, `README.md`, `docs/*`, `.github/workflows/*` | Lead | Do not edit |
 | `lib/paths.js` | Lead | Frozen; do not edit. Read it and use it |
-| `lib/engine.js` | host-dev | Host domain logic (scan, plan, execute, trash) |
+| `lib/engine.js` | host-dev | Host domain logic (scan, plan, execute, trash, usage, open) |
+| `lib/usage.js` | host-dev | Usage folding (§5.11); pure, imports Node builtins only |
+| `lib/open.js` | host-dev | Platform directory opener (§4.11); argument vector, never a shell string |
 | `index.js` | host-dev | `apply(ctx, config)`: routes + read-only tool |
 | `client.js` | client-dev | Browser half |
 | `test/*.test.mjs` | qa-dev | `node --test 'test/**/*.test.mjs'` |
@@ -74,7 +88,8 @@ export const inject = ['connection', 'workspaceRegistry', 'sessionPersistence']
 //   ctx.get('sessions')      SessionStore      — live check
 //   ctx.get('agents')        AgentRegistry     — live/running check
 //   ctx.get('tools')         ToolRegistry      — read-only inventory tool
-//   ctx.get('sessionQuery')  SessionQuery      — not required; do not use
+//   ctx.get('sessionQuery')  SessionQuery      — token usage folding (§4.10, §5.11)
+//   ctx.get('storageDomain') StorageDomain     — projection-cache record drop (§5.5)
 export function apply(ctx, config) { /* ... */ }
 ```
 
@@ -99,6 +114,19 @@ export function apply(ctx, config) { /* ... */ }
 
 Register every resource with `ctx.effect(...)` and return the disposer. All route registrations
 go through `ctx.connection.fetch.register`. `apply` must never throw for an optional service.
+
+Two optional capabilities are services that may be absent; one is a platform fact. `inventory`
+(§4.1) reports all three as `capabilities`, and the Client hides a surface whose flag is false:
+
+| Flag | True when |
+|---|---|
+| `usage` | The `sessionQuery` service resolves and exposes `readSession(id)` |
+| `projectionCache` | The `storageDomain` service resolves a `session_projcache` domain with a `sessions` table |
+| `openPath` | `process.platform` is `darwin`, `win32`, or `linux` |
+
+Deleting a Session also emits the shipped `api-session/removed` event with the Session id, so every
+connected Client drops the sidebar row exactly as it does for a disposed Session. Emitting is
+best-effort: a minimal Host or a test context may have no `emit`, which must never change a result.
 
 ## 4. Host: HTTP routes
 
@@ -128,6 +156,7 @@ Request: `{}`.
   "ok": true,
   "generatedAt": 1730000000000,
   "dshHome": "/Users/x/.dsh",
+  "capabilities": { "usage": true, "projectionCache": true, "openPath": true },  // see §3
   "trash": { "root": "/Users/x/.dsh/trash/dsh-cleanup", "entries": 2, "bytes": 4096,
              "oldestMovedAt": 1730000000000, "overRetention": false, "overCapacity": false,
              "suggestedEntryIds": [] },   // oldest entries whose purge gets under trashMaxBytes
@@ -284,6 +313,14 @@ failure happens while the user's data is still in place: the item fails with `IO
 directory was removed keeps `movedTo: null` (nowhere to recover from).
 `totals.bytes` counts only items whose status is `trashed` or `deleted`; a failed item contributes to
 `totals.failed` only.
+
+A Session item that removed its artifact directory — or found it already missing, including a
+Session that never materialized on disk — additionally reports
+`"cacheDropped": true` when the shipped projection-cache record was dropped with it, `false` when the
+record could not be dropped (the storage service is absent, the domain is closed, or the delete
+threw). The field is absent for workspace items and for items that failed before touching the
+filesystem. After every Session item with status `trashed` or `deleted` the Host emits
+`api-session/removed` with that id (§5.5).
 
 ### 4.5 Trash routes
 
@@ -451,11 +488,75 @@ settings object). Bounds: `maxScanEntries`
 1..5,000,000; `scanTimeoutMs` 1..600,000; `planTtlMs` 1,000..86,400,000; `maxPlans` 1..1,000;
 `auditMaxBytes` 0..1,073,741,824; `trashRetentionDays` 0..3650; `trashMaxBytes` 0..1e15 (1,000,000,000,000,000); `gitSafetyCheck` boolean.
 
+### 4.10 `POST /api/cleanup.usage`
+
+Request `{ "sessionIds": ["session-…", …] }` — 1 to 200 ids, each a non-empty string; an empty list,
+a non-array, a non-string element, or more than 200 ids answers `BAD_REQUEST`.
+
+```jsonc
+{
+  "ok": true,
+  "available": true,              // false when this Host has no sessionQuery seam (§3)
+  "usage": {
+    "session-…": {
+      "cacheReadInputTokens": 100,      // prompt tokens served from cache
+      "cacheMissInputTokens": 900,      // prompt tokens not served from cache (input + cache write)
+      "cacheWriteTokens": 0,
+      "outputTokens": 50,
+      "totalTokens": 1050,              // miss + read + output
+      "requestCount": 3,                // distinct model requests counted
+      "complete": true,                 // false when some request carried no message id
+      "note": null,                     // English reason when `complete` is false
+      "inheritedEvents": 0,             // leading forked events skipped (§5.11)
+      "duplicateRequests": 0            // repeated message ids counted once
+    }
+  },
+  "failed": { "session-…": "UNKNOWN_SESSION" }   // omitted when empty
+}
+```
+
+One unreadable Session never fails the request: it appears in `failed` (`UNKNOWN_SESSION` when the
+persistence seam does not know the id, `READ_FAILED` when reading or replay validation throws) while
+every other named id still folds. `available: false` means the Host cannot fold usage at all: `usage`
+is `{}`, `failed` is omitted, and the client hides every usage surface. Folding rules are §5.11; a
+successful read is cached until that Session's log changes (§5.11), so repeated requests cost one
+read per changed Session.
+
+### 4.11 `POST /api/cleanup.open`
+
+Request `{ "kind": "session" | "workspace" | "trash" | "cache", "id": "…" }`. `id` is required for
+`session`, `workspace` and `trash` and is ignored for `cache`; an unknown `kind`, a missing `id`, or a
+malformed id answers `BAD_REQUEST`.
+
+```jsonc
+{ "ok": true, "path": "/abs/path" }
+```
+
+The Host resolves the directory itself and never accepts a path from the caller:
+
+- `session` — the stored Session directory, resolved exactly like §5.1; an id the persistence seam
+  does not know answers `UNKNOWN_SESSION`, an unreadable one `IO_ERROR`, and a directory that no
+  longer exists `IO_ERROR` with "the directory no longer exists".
+- `workspace` — the registered Workspace's own directory, resolved through
+  `workspaceRegistry.get(id)` (never a path from the caller); an id the registry does not know
+  answers `UNKNOWN_WORKSPACE`, a stored path that is not absolute answers `PATH_NOT_ABSOLUTE`, and a
+  directory that no longer exists answers `IO_ERROR`. Opening is read-only: the §5.3 protection rules
+  decide *deletion*, not opening, so a registered workspace is opened even when deleting it would be
+  refused.
+- `trash` — one trash entry directory from §5.7; an unknown entry answers `TRASH_ENTRY_UNKNOWN`.
+- `cache` — the Host's projection-cache directory `<DSH_HOME>/storages/session_projcache`; a missing
+  directory answers `IO_ERROR`.
+
+`OPEN_UNAVAILABLE` answers when the platform has no opener (any `process.platform` outside
+`darwin`/`win32`/`linux`), `OPEN_FAILED` when the opener cannot be started. The call is
+fire-and-forget: the answer reports the resolved path whether or not a file manager ends up focused,
+and a launcher that exits non-zero on a success path (Windows `explorer.exe`) is not a failure.
+
 ### 4.6 Error codes
 
 `BAD_REQUEST`, `UNKNOWN_WORKSPACE`, `UNKNOWN_SESSION`, `PLAN_UNKNOWN`, `PLAN_EXPIRED`,
-`STATE_CHANGED`, `CONFIRMATION_REQUIRED`, `CONFIRMATION_MISMATCH`, `PERMANENT_DISABLED`,
-`PERMANENT_MULTIPLE_DIRECTORIES`, `WORKSPACE_CONTAINS_WORKSPACE`, `DEFERRED_FULL`, `DEFERRED_BUSY`,
+`STATE_CHANGED`, `CONFIRMATION_REQUIRED`, `CONFIRMATION_MISMATCH`, `OPEN_FAILED`, `OPEN_UNAVAILABLE`,
+`PERMANENT_DISABLED`, `PERMANENT_MULTIPLE_DIRECTORIES`, `WORKSPACE_CONTAINS_WORKSPACE`, `DEFERRED_FULL`, `DEFERRED_BUSY`,
 `DEFERRED_TARGETS_CHANGED`, `PATH_NOT_ABSOLUTE`,
 `PATH_NOT_DIRECTORY`, `PATH_NOT_SESSION_DIR`,
 `TRASH_UNAVAILABLE`, `TRASH_CROSS_DEVICE`, `TRASH_ENTRY_UNKNOWN`, `RESTORE_ORIGINAL_EXISTS`,
@@ -471,7 +572,10 @@ whose `AbortSignal` fired (before the first item, or before an individual item s
 
 ## 5. Host: domain rules (the part that must be exactly right)
 
-`lib/engine.js` exports one factory so tests inject fakes:
+`lib/engine.js` exports one factory so tests inject fakes. Besides the services above, the factory
+accepts two additive test seams — `platform` (the platform string `capabilities.openPath` and the
+opener use) and `openDirectory` (the opener function §4.11 calls) — so a test never launches a real
+file manager; neither seam exists on the wire.
 
 ```js
 export function createEngine(deps) // → { inventory, measure, plan, execute, trashList, trashRestore, trashPurge }
@@ -622,7 +726,16 @@ and a missing `git` binary silently, and never changes a blocker into an allow o
    failure therefore happens with the user's data untouched: discard the empty allocation and fail the
    item with `IO_ERROR` and "nothing was moved". There is no rollback; the only copy of the data is
    never at risk.
-7. Never throw out of `execute`: every item gets a status.
+7. After a Session item's artifact directory is gone (or was already missing), drop its
+   projection-cache record when the capability is available (§4.1 `projectionCache`): resolve the
+   `session_projcache` domain through `storageDomain` and delete the `sessions` table row for that id.
+   The record is a disposable fold shortcut: an absent service, a closed domain, or a throwing delete
+   is a per-item `cacheDropped: false`; it never fails a deletion and adds no plan warning. The
+   missing capability is reported once through `inventory.capabilities.projectionCache` (§4.1), which
+   is what the Client uses to explain the leftover instead of warning on every plan.
+8. After each Session item succeeds (`trashed` or `deleted`), emit `api-session/removed` with its id
+   (§3). A context without `emit` is ignored.
+9. Never throw out of `execute`: every item gets a status.
 
 `rm -rf` must be implemented as a bounded recursive walk with `lstat` (never following
 symlinks), the configured entry budget plus a fixed internal depth bound, and it must refuse to run on an empty or
@@ -740,6 +853,33 @@ never served from cache. Any mutation that changes the disk (delete, trash resto
 Sizes are advisory previews only — the deletion path never trusts a cached size — and a cache miss is
 always a fresh bounded walk.
 
+### 5.11 Usage folding (the numbers a user decides with)
+
+A Session's own usage is folded from its replay-validated event log, read through
+`sessionQuery.readSession(id)` — never by opening a log file, because a stored log may be compressed
+and is only decodable through the Host's own persistence stack. `readSession` returns
+`{ session, inheritedEventCount, events }`; `session` is the header, `events` the raw event array.
+
+- **Only model answers count.** Walk the events and keep `type === 'assistant/message'` with a
+  `data.usage` object. Every other event type contributes nothing.
+- **A fork never re-counts its ancestor.** The first `inheritedEventCount` events are the ancestor's
+  copied prefix (the loader reports that count next to the header); start folding after them. A log whose inherited
+  count covers the whole array reports zero usage — the Session made no request of its own yet.
+- **A request is counted once.** De-duplicate by the assistant message id (`data.message.id`); a
+  repeated id is counted once and reported through `duplicateRequests`. A request without a usable id
+  is still counted but reported through `complete: false` and a note, because it cannot be
+  de-duplicated.
+- **The four buckets.** `cacheReadInputTokens = usage.cacheReadTokens`,
+  `cacheMissInputTokens = usage.inputTokens + usage.cacheWriteTokens`,
+  `cacheWriteTokens = usage.cacheWriteTokens`, `outputTokens = usage.outputTokens`, and
+  `totalTokens = miss + read + output`. This keeps the three-way share bar addable to 100 %: a
+  provider that ever bills cache writes still has those tokens in the miss bucket exactly once.
+- **Cache until the log changes.** The reader keeps at most 200 folded Sessions keyed by
+  `(eventCount, sizeBytes)` from the persistence snapshot; a Session whose snapshot key changed is
+  re-folded, an unchanged one is answered from memory. The cache is never written to disk.
+- **Read-only by construction.** Folding never opens a write handle, never makes a Session live, and
+  never throws for one bad log: the failure is that id's entry in `failed` (§4.10).
+
 ### 5.7 Trash layout
 
 ```
@@ -841,6 +981,13 @@ window.__ModuleLoader__.load({
    - Reading `target.value` twice is a bug: the registry passes the *value*, so implement
      `resolve(target)` against the plain `{ sessionId, displayTitle }` / `{ workspaceId, path, displayTitle }`.
 
+A Session row's `⋯` menu and its right-click menu are the **same** context-menu target: the shipped
+row opens `contextMenus.open({ kind: 'session', value: { sessionId, displayTitle } })` for both, and
+the `sidebar.workspaces.session.menu.item` slot the row's menu renders consumes the same registered
+items. Contributing one `contextMenus.register({ target: 'session' })` action therefore surfaces in
+both places (order 500 puts it after pin/rename/fork/archive); registering a second slot row as well
+would duplicate the action and is wrong.
+
 All registrations are disposed by their owning slot/effect; the dialog and page must also cancel
 in-flight fetches and clear timers on unmount.
 
@@ -855,6 +1002,8 @@ const ROUTE = {
   trashList: '/api/cleanup.trash.list'.slice(1),
   trashRestore: '/api/cleanup.trash.restore'.slice(1),
   trashPurge: '/api/cleanup.trash.purge'.slice(1),
+  usage:     '/api/cleanup.usage'.slice(1),
+  open:      '/api/cleanup.open'.slice(1),
 }
 ```
 `fetch` is **document-relative** (no leading slash) exactly like the shipped session export. Send
@@ -926,6 +1075,33 @@ candidates page brings it back. Subagent descendants follow a `同时删除子�
 (`includeDescendants`), shown whenever a Session target is planned outside a workspace clear and
 re-planning on toggle, so the collapsed group disappears and reappears with it; when the dialog
 turned the switch off automatically, the reason from above is shown next to it.
+
+**The family tree (0.6.0).** When a Session target's plan items include descendants, the collapsed
+ride-along group expands into a tree instead of a flat list: one row per Session item, ordered
+depth-first by the `parentSessionId` chain inside the plan, indented one step per level, carrying the
+item's title, size, and a `子代理`/`派生` badge. Every node has its own checkbox and the family's own
+counts:
+
+- The reviewed target row's checkbox still means "the root target itself" and keeps narrowing the
+  plan like any other row.
+- The `同时删除子代理会话` switch and the tree are two views of one set. Switch **on** selects every
+  node and plans the family through `includeDescendants: true`. Un-checking any node switches it off
+  (the existing auto-off explanation) and plans an **explicit** set: `targets` = every checked
+  reviewed target plus every checked node id, `includeDescendants: false`, so the Host plans exactly
+  the named logs. Switching it back on re-checks every node. Checking one node while the switch is
+  off adds that node and its subtree to the explicit set.
+- Checking a node checks its subtree; un-checking it un-checks its subtree. A node whose subtree is
+  partially selected renders `aria-checked="mixed"`, and the group header reports `已选 n/m 条日志`.
+- `全选` selects every row and node; `反选` inverts both.
+- The tree applies wherever the review renders Session ride-alongs, including a workspace-clear
+  batch: a node un-checked there is recorded in `clear.excluded` exactly like an un-checked row, so a
+  refilled candidates page cannot bring it back.
+- A **workspace folder sweep** has no tree: its Sessions are swept by the folder predicate, not by
+  id, so their control stays the `同时删除该目录内的会话记录` switch plus the row checkbox.
+- The tree is a `role="group"`; each node's checkbox keeps the ordinary row keyboard pattern (Tab,
+  Space), and the expand control is a button with `aria-expanded`/`aria-controls`.
+- The `UNCHECKED_TARGET_LEAK` guard extends to nodes: a plan item that is neither a checked target
+  nor a checked node fails the review closed instead of being deleted.
 
 A review opened from the settings page renders **inside** that page, not in `shell.overlay`: the host
 paints the overlay seat at `z-index: 20` inside the app frame while the settings sheet is a fixed
@@ -1079,6 +1255,21 @@ A `settings.section` page titled "存储清理" with four tabs: **工作区**, *
 - Footer note: the recovery window is not time-limited — trash is manual — and permanent deletion
   cannot be undone.
 
+**Usage (0.6.0).** The Sessions tab gains an opt-in `用量` toggle (a plugin-owned `localStorage`
+key, default off) and, while it is on and `inventory.capabilities.usage` is true, two per-row
+columns: total tokens (compact, `12.3k`) and cache-hit rate (`87%`), a `按用量排序` option, and the
+family total for a row that has descendants (`own/family` — a parent row counts only the requests it
+made itself, never its children's). Usage comes from `/api/cleanup.usage` in chunks of at most 200
+ids, merged into a page-level map and discarded for a Session whose `eventCount`/`sizeBytes` changed.
+A Host that answers `available: false` hides the columns and says why; it never blocks the list. A
+row whose usage is not known yet renders a muted `—`, never a zero.
+
+**Open (0.6.0).** While `inventory.capabilities.openPath` is true, Workspaces rows, Sessions rows,
+Trash entries, and the review dialog's summary carry a `打开文件夹` control, and the Trash tab header
+carries `打开缓存目录`. All of them call `/api/cleanup.open` with a kind and an id — never a path —
+and report `OPEN_FAILED`/`OPEN_UNAVAILABLE` through the ordinary error text. Each control's
+accessible name names its target (`打开「proj」所在文件夹`).
+
 Data: `inventory` on mount (and after every mutation), `measure` on demand from the page,
 `trashList` for the trash tab. The review dialog never measures separately: its plan already carries
 the per-item sizes computed at plan time, so the numbers it shows are exactly the numbers the Host
@@ -1125,6 +1316,11 @@ polling. Re-render from the store with `useSyncExternalStore`.
 - Host: `node --test 'test/**/*.test.mjs'` (a bare positional directory is not expanded by this
   Node build) once the tests exist; until then at least a scratch script that
   imports `lib/engine.js` with fake deps and exercises plan → execute on a temp directory.
-- Client: no automated test — prove the module parses, that the returned object shape is
-  `{inject, apply}`, and that registration ids and slot names match §7 exactly (grep them).
+- Client: `test/client.test.mjs` loads `client.js` through a fake `window.__ModuleLoader__` and a
+  React shim and drives the exported component/store API. Add a case for every surface you add; keep
+  the existing suite green. Prove the module still returns `{inject, apply}`, and that registration
+  ids and slot names match §7 exactly (grep them).
+- Usage/open: the Host tests must cover an unusable `sessionQuery`/`storageDomain` (capability false,
+  `available: false`, `cacheDropped: false`) and a hostile caller (path-shaped id, unknown kind,
+  over-limit id list).
 - Report what you could not verify (no browser control in this environment).

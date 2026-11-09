@@ -1,8 +1,8 @@
 /**
  * dsh-cleanup — Host half.
  *
- * Registers the fourteen authenticated POST routes (SPEC §4, §4.7, §4.8) over the shared `/api`
- * connection channel
+ * Registers the sixteen authenticated POST routes (SPEC §4, §4.7, §4.8, §4.10, §4.11) over the
+ * shared `/api` connection channel
  * and, when the optional ToolRegistry is present, the **read-only** `cleanup_inventory` agent tool
  * (SPEC §6). All domain logic lives in `./lib/engine.js`; this module owns only the Cordis lifecycle,
  * config defaults, HTTP bodies/statuses and the tool projection.
@@ -27,6 +27,8 @@ export const inject = ['connection', 'workspaceRegistry', 'sessionPersistence']
 const ROUTE_DEFINITIONS = Object.freeze([
   ['/api/cleanup.inventory', (engine) => engine.inventory()],
   ['/api/cleanup.measure', (engine, body) => engine.measure(body)],
+  // Per-Session token usage folded through the optional sessionQuery seam (SPEC §4.10/§5.11).
+  ['/api/cleanup.usage', (engine, body) => engine.usage(body)],
   // Read-only cleanup-wizard preview (SPEC §4.9): a projection of the inventory snapshot.
   ['/api/cleanup.candidates', (engine, body) => engine.candidates(body)],
   ['/api/cleanup.plan', (engine, body, request) => engine.plan(body, { signal: request?.signal })],
@@ -34,6 +36,8 @@ const ROUTE_DEFINITIONS = Object.freeze([
   ['/api/cleanup.trash.list', (engine) => engine.trashList()],
   ['/api/cleanup.trash.restore', (engine, body) => engine.trashRestore(body)],
   ['/api/cleanup.trash.purge', (engine, body) => engine.trashPurge(body)],
+  // Reveal a Host-resolved directory in the platform file manager (SPEC §4.11); never a caller path.
+  ['/api/cleanup.open', (engine, body) => engine.open(body)],
   // Deferred deletions: the only safe way to delete a Session opened in this app run, applied at the
   // next Host start before any Agent exists.
   ['/api/cleanup.defer', (engine, body) => engine.defer(body)],
@@ -91,6 +95,23 @@ export function apply(ctx, config) {
     // A live Agent's effective working directory can differ from the session header's creation cwd,
     // so the "is a live session using this folder" gate reads it through the optional service.
     workingDirectory: lazyServiceFacade(ctx, 'workingDirectory'),
+    // Usage folding (SPEC §4.10/§5.11) reads the optional SessionQuery service per call, so a service
+    // that loads after this plugin still folds usage on the next request.
+    sessionQuery: lazySessionQueryView(ctx),
+    // A deleted Session's projection-cache record goes with its files (SPEC §5.5 step 7). The view
+    // resolves storageDomain → the session_projcache domain → its sessions table per call, so a
+    // domain opened later still works and an absent one is only `cacheDropped: false`.
+    projectionCache: lazyProjectionCacheView(ctx),
+    // Deleting a Session emits the shipped event so every connected client drops the sidebar row
+    // exactly as it does for a disposed Session (SPEC §3). Best effort: a minimal context may have no
+    // emitter, and a throwing emitter must never change a deletion result.
+    emitSessionRemoved: (sessionId) => {
+      try {
+        ctx.emit?.('api-session/removed', sessionId)
+      } catch {
+        /* the removal notice is advisory: the sidebar row can still be refreshed manually */
+      }
+    },
   })
 
   /** @type {Function[]} */
@@ -205,6 +226,91 @@ function lazyServiceFacade(ctx, serviceName) {
         return typeof service?.get === 'function' ? service.get(argument) : undefined
       } catch {
         return undefined
+      }
+    },
+  }
+}
+
+/**
+ * Read the optional SessionQuery service as a lazily-resolved view (SPEC §3/§4.10).
+ *
+ * The service is optional and may load after this plugin, so it is resolved on every call. An absent
+ * service is reported through `available()` and makes `readSession` reject, which the usage folder
+ * surfaces as that id's `READ_FAILED` entry; it never breaks a request or activation.
+ * @param {object} ctx - plugin context.
+ * @returns {{ available: () => boolean, readSession: (id: string) => Promise<object> }}
+ */
+function lazySessionQueryView(ctx) {
+  /**
+   * Resolve the optional service, or undefined when the profile does not compose it.
+   * @returns {object | undefined}
+   */
+  function resolve() {
+    if (typeof ctx.get !== 'function') return undefined
+    try {
+      const service = ctx.get('sessionQuery')
+      return service === null ? undefined : service
+    } catch {
+      return undefined
+    }
+  }
+  return {
+    available() {
+      const service = resolve()
+      return typeof service?.readSession === 'function'
+    },
+    readSession(id) {
+      const service = resolve()
+      const read = service?.readSession
+      if (typeof read !== 'function') {
+        // A resolver-side absence reaches the engine as a normal read failure, never a hang.
+        return Promise.reject(new Error(`The session query service is unavailable, so session "${id}" cannot be read.`))
+      }
+      // Run the call asynchronously so a synchronous throw becomes a rejection the folder classifies.
+      return Promise.resolve().then(() => read.call(service, id))
+    },
+  }
+}
+
+/**
+ * Read the shipped projection-cache domain as a lazily-resolved view (SPEC §3/§5.5 step 7).
+ *
+ * The capability probe and the record drop both resolve `storageDomain` → the `session_projcache`
+ * domain → its `sessions` table on every call, so a domain opened later still works and a service
+ * that vanishes degrades to `cacheDropped: false` instead of failing a deletion.
+ * @param {object} ctx - plugin context.
+ * @returns {{ available: () => boolean, drop: (sessionId: string) => Promise<boolean> }}
+ */
+function lazyProjectionCacheView(ctx) {
+  /**
+   * Resolve the shipped `sessions` table, or null when the seam is absent/unusable right now.
+   * @returns {object | null}
+   */
+  function resolveTable() {
+    if (typeof ctx.get !== 'function') return null
+    try {
+      const storageDomain = ctx.get('storageDomain')
+      if (storageDomain === null || storageDomain === undefined || typeof storageDomain.get !== 'function') return null
+      const domain = storageDomain.get('session_projcache')
+      if (domain === null || domain === undefined || typeof domain.table !== 'function') return null
+      const table = domain.table('sessions')
+      return table === null || table === undefined ? null : table
+    } catch {
+      return null
+    }
+  }
+  return {
+    available() {
+      return typeof resolveTable()?.delete === 'function'
+    },
+    async drop(sessionId) {
+      try {
+        const table = resolveTable()
+        if (typeof table?.delete !== 'function') return false
+        return (await table.delete(sessionId)) === true
+      } catch {
+        // A closed domain or a throwing delete is a per-item `cacheDropped: false` (SPEC §5.5).
+        return false
       }
     },
   }
