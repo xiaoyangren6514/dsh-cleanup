@@ -9,6 +9,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 _No changes yet._
 
+## [0.5.1] - 2026-11-09
+
+First public release. Version `0.5.0` was consumed by the registry's staged-publishing bootstrap and
+never became installable, so this release carries the same code under a fresh version.
+
 ## [0.5.0] - 2026-11-05
 
 ### Added

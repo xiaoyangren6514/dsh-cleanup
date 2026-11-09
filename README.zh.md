@@ -14,7 +14,7 @@ DSH 本身对工作区只做「移除注册」（目录、文件与会话历史�
 | | |
 |---|---|
 | 包名 | `dsh-cleanup`（不依赖任何 `@deepseek-ai/*` 包，运行时零依赖） |
-| 版本 | 0.5.0 |
+| 版本 | 0.5.1 |
 | 仓库 | <https://github.com/xiaoyangren6514/dsh-cleanup> |
 | 作者 | fly |
 | 许可证 | [MIT](LICENSE) |
@@ -63,10 +63,10 @@ DSH 本身对工作区只做「移除注册」（目录、文件与会话历史�
 
 ```sh
 # 从 npm 安装（包发布之后）
-dsh plugin --profile web add dsh-cleanup@0.5.0
+dsh plugin --profile web add dsh-cleanup@0.5.1
 
-# 从 GitHub 安装（v0.5.0 是 tag，指向固定提交；需要严格 pin 时用 `git rev-parse v0.5.0` 换成完整 sha）
-dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.5.0
+# 从 GitHub 安装（v0.5.1 是 tag，指向固定提交；需要严格 pin 时用 `git rev-parse v0.5.1` 换成完整 sha）
+dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.5.1
 
 # 从本地 checkout 安装
 git clone https://github.com/xiaoyangren6514/dsh-cleanup.git

@@ -14,7 +14,7 @@ DSH itself only unregisters a workspace (the folder and its Sessions stay on dis
 | | |
 |---|---|
 | Package | `dsh-cleanup` (imports no `@deepseek-ai/*` package, zero runtime dependencies) |
-| Version | 0.5.0 |
+| Version | 0.5.1 |
 | Repository | <https://github.com/xiaoyangren6514/dsh-cleanup> |
 | Author | fly |
 | License | [MIT](LICENSE) |
@@ -63,10 +63,10 @@ Install the bundle into a DSH profile, then refresh the Web page once. The Host 
 
 ```sh
 # From npm (after the package is published)
-dsh plugin --profile web add dsh-cleanup@0.5.0
+dsh plugin --profile web add dsh-cleanup@0.5.1
 
-# From GitHub, pinned to the v0.5.0 tag (a fixed commit; swap in `git rev-parse v0.5.0` for the raw sha)
-dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.5.0
+# From GitHub, pinned to the v0.5.1 tag (a fixed commit; swap in `git rev-parse v0.5.1` for the raw sha)
+dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.5.1
 
 # From a local checkout
 git clone https://github.com/xiaoyangren6514/dsh-cleanup.git
