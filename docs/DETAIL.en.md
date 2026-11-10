@@ -15,7 +15,7 @@ kind: "package-bundle"
 
 DSH itself only unregisters a workspace — the folder, its files, and its Session history stay on disk — and Sessions can only be archived, never deleted. `dsh-cleanup` fills that gap while keeping the destructive surface narrow: targets are addressed by DSH identity, never by arbitrary path; every deletion is planned, reviewed, and confirmed; and the default outcome is a recoverable trash.
 
-- Package: `dsh-cleanup` 0.6.0
+- Package: `dsh-cleanup` 0.6.1
 - Repository: <https://github.com/xiaoyangren6514/dsh-cleanup>
 - License: MIT © 2026 fly
 - Tested with: DSH 0.2.2-rc.1
@@ -124,10 +124,10 @@ For Sessions opened in the current Host, the review dialog offers **Schedule del
 
 ```sh
 # From npm (after publication)
-dsh plugin --profile web add dsh-cleanup@0.6.0
+dsh plugin --profile web add dsh-cleanup@0.6.1
 
-# From GitHub, pinned to the v0.6.0 tag (a fixed commit; swap in `git rev-parse v0.6.0` for the raw sha)
-dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.0
+# From GitHub, pinned to the v0.6.1 tag (a fixed commit; swap in `git rev-parse v0.6.1` for the raw sha)
+dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.1
 
 # From a local checkout
 git clone https://github.com/xiaoyangren6514/dsh-cleanup.git

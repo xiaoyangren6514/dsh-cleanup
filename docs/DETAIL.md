@@ -15,7 +15,7 @@ kind: "package-bundle"
 
 DSH 本身对工作区只做「移除注册」——目录、文件与会话历史都留在磁盘上；对会话只有「归档」，没有删除。`dsh-cleanup` 补上这一段，同时把破坏面收窄：目标只能用 DSH 的身份指定、绝不用任意路径；每次删除都经过计划、复核与确认；默认结果是可恢复的回收站。
 
-- 包名：`dsh-cleanup` 0.6.0
+- 包名：`dsh-cleanup` 0.6.1
 - 仓库：<https://github.com/xiaoyangren6514/dsh-cleanup>
 - 许可证：MIT © 2026 fly
 - 验证环境：DSH 0.2.2-rc.1
@@ -124,10 +124,10 @@ DSH 会让 Agent 及其会话写句柄存活到进程结束，并且没有公开
 
 ```sh
 # 从 npm 安装（包发布之后）
-dsh plugin --profile web add dsh-cleanup@0.6.0
+dsh plugin --profile web add dsh-cleanup@0.6.1
 
-# 从 GitHub 安装（v0.6.0 是 tag，指向固定提交；需要严格 pin 时用 `git rev-parse v0.6.0` 换成完整 sha）
-dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.0
+# 从 GitHub 安装（v0.6.1 是 tag，指向固定提交；需要严格 pin 时用 `git rev-parse v0.6.1` 换成完整 sha）
+dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.1
 
 # 从本地 checkout 安装
 git clone https://github.com/xiaoyangren6514/dsh-cleanup.git

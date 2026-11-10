@@ -1,6 +1,6 @@
 # 常见问题（FAQ）
 
-> 适用版本：dsh-cleanup 0.6.0 · DSH 0.2.2-rc.1。
+> 适用版本：dsh-cleanup 0.6.1 · DSH 0.2.2-rc.1。
 > 文中 `~/.dsh` 指当前 profile 的 DSH home；插件状态文件位于 `~/.dsh/cleanup/`，回收站位于 `~/.dsh/trash/dsh-cleanup/`（除非在清理设置里配置了专用的 `trashRoot`）。
 
 ## 安装、升级与卸载
@@ -10,10 +10,10 @@
 
 ```sh
 # npm（包发布之后）
-dsh plugin --profile web add dsh-cleanup@0.6.0
+dsh plugin --profile web add dsh-cleanup@0.6.1
 
-# GitHub，固定到 v0.6.0 tag（指向固定提交；需要严格 pin 时用 `git rev-parse v0.6.0` 换成完整 sha）
-dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.0
+# GitHub，固定到 v0.6.1 tag（指向固定提交；需要严格 pin 时用 `git rev-parse v0.6.1` 换成完整 sha）
+dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.1
 
 # 本地 checkout
 git clone https://github.com/xiaoyangren6514/dsh-cleanup.git
