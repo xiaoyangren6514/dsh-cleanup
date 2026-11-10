@@ -12,8 +12,16 @@
  * Checks:
  *  1. SPEC route list == index.js route table (and every route is a POST under /api).
  *  2. Every error/warning code the engine can emit is listed in SPEC and localized by the client.
- *  3. Every SPEC §4.6/§5.4 code is either emitted, or documented as client/settings-only.
- *  4. Client locale: zh/en key parity, identical `{param}` sets, every literal `t()` key present,
+ *  3. Every SPEC §4.6/§5.4 code is either emitted, or documented as client/settings-only. The scan
+ *     also covers the opener module's `openerError('CODE')` emitter, so a new Host module cannot slip
+ *     an undocumented wire code past the check.
+ *  4. The `files` allowlist in package.json actually matches shipped files: glob entries
+ *     (`lib/*.js`, `locale/ui/*.json`) are expanded and every matched file must exist.
+ *  5. Plugin-manager locale metadata (`locale/<lang>.json`) parses and carries a non-empty
+ *     title/description/detail, and the detail document it names exists.
+ *  6. The SPEC's open-kind vocabulary (`session`/`workspace`/`trash`/`cache`) and the inventory
+ *     capability keys are present in the Host source rather than only in prose.
+ *  7. Client locale: zh/en key parity, identical `{param}` sets, every literal `t()` key present,
  *     and every plural base has `_one`/`_other`. The published mirrors `locale/ui/en.json` and
  *     `locale/ui/zh.json` must be identical to the inline `en`/`zh` dictionaries (same key set,
  *     same values; key order is free). Any other `locale/ui/<lang>.json` must carry the en key set
@@ -111,11 +119,12 @@ function paramsOf(template) {
 }
 
 async function main() {
-  const [spec, engineSource, indexSource, clientSource] = await Promise.all([
+  const [spec, engineSource, indexSource, clientSource, openSource] = await Promise.all([
     read('SPEC.md'),
     read('lib/engine.js'),
     read('index.js'),
     read('client.js'),
+    readOptional('lib/open.js'),
   ])
 
   // ---- 1. routes -------------------------------------------------------------------------------
@@ -145,6 +154,8 @@ async function main() {
     error: unique([
       ...matches(engineSource, /\b(?:fail|blocker|DomainError)\(\s*'([A-Z][A-Z0-9_]{2,})'/g),
       ...matches(engineSource, /restorableCode: '([A-Z][A-Z0-9_]{2,})'/g),
+      // The platform opener is its own module; its two wire codes are emitted through openerError().
+      ...matches(openSource, /\bopenerError\(\s*'([A-Z][A-Z0-9_]{2,})'/g),
       ...pathCodes,
     ]),
     warning: unique([
@@ -310,13 +321,62 @@ async function main() {
 
   // ---- 4. manifest hooks ----------------------------------------------------------------------
   const pkg = JSON.parse(await read('package.json'))
-  for (const file of pkg.files ?? []) {
-    if (file.includes('*')) continue
-    const text = await readOptional(file)
-    if (text === '' && !(await exists(file))) fail(`package.json files: missing ${file}`)
+  let shippedFiles = 0
+  for (const entry of pkg.files ?? []) {
+    const expanded = await expandFileEntry(entry)
+    if (expanded === null) {
+      fail(`package.json files: ${entry} matches no file (a shipped path silently disappeared)`)
+      continue
+    }
+    for (const file of expanded) {
+      if (await exists(file)) shippedFiles += 1
+      else fail(`package.json files: missing ${file}`)
+    }
   }
+  notes.push(`package files: ${shippedFiles} shipped path(s) exist`)
   if (pkg.dsh?.bundle?.patch === undefined) fail('package.json: missing dsh.bundle.patch')
   if (pkg.dsh?.client?.platform !== 'web') fail('package.json: dsh.client.platform must be web')
+
+  // ---- 5. plugin-manager locale metadata -----------------------------------------------------
+  let metadataFiles = []
+  try {
+    metadataFiles = (await readdir(path.join(ROOT, 'locale'))).filter((name) => name.endsWith('.json')).sort()
+  } catch {
+    metadataFiles = []
+  }
+  if (metadataFiles.length === 0) fail('locale/: no plugin-manager metadata files found')
+  for (const name of metadataFiles) {
+    const relative = `locale/${name}`
+    let parsed
+    try {
+      parsed = JSON.parse(await read(relative))
+    } catch (error) {
+      fail(`${relative}: not valid JSON (${error.message})`)
+      continue
+    }
+    const meta = isPlainObject(parsed) && isPlainObject(parsed.meta) ? parsed.meta : null
+    if (meta === null) {
+      fail(`${relative}: missing "meta" object`)
+      continue
+    }
+    for (const field of ['title', 'description', 'detail']) {
+      if (typeof meta[field] !== 'string' || meta[field].trim() === '') fail(`${relative}: meta.${field} must be a non-empty string`)
+    }
+    if (typeof meta.detail === 'string' && meta.detail.trim() !== '') {
+      if ((await readOptional(meta.detail)) === '') fail(`${relative}: meta.detail document "${meta.detail}" is missing`)
+    }
+  }
+  notes.push(`locale metadata: ${metadataFiles.length} language file(s) parsed`)
+
+  // ---- 6. SPEC vocabulary ↔ Host source ------------------------------------------------------
+  const openSection = section(spec, '### 4.11')
+  for (const kind of ['session', 'workspace', 'trash', 'cache']) {
+    if (!new RegExp(`"${kind}"`).test(openSection)) fail(`SPEC §4.11 does not document the open kind "${kind}"`)
+    if (!engineSource.includes(`'${kind}'`)) fail(`engine: open route does not handle the documented kind "${kind}"`)
+  }
+  for (const capability of ['usage', 'projectionCache', 'openPath']) {
+    if (!new RegExp('\\b' + capability + '\\s*:').test(engineSource)) fail(`engine: inventory.capabilities.${capability} is missing from the Host source`)
+  }
 
   // ---- report ---------------------------------------------------------------------------------
   for (const note of notes) process.stdout.write(`• ${note}\n`)
@@ -327,6 +387,37 @@ async function main() {
     return
   }
   process.stdout.write('\n✓ contract check passed\n')
+}
+
+/** @param {unknown} value @returns {value is Record<string, any>} */
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * Expand one `package.json` `files` entry. A concrete path must exist; a single-segment glob
+ * (`lib/*.js`, `locale/ui/*.json`) is expanded against the directory listing and must match at least
+ * one file, so a renamed module cannot silently drop out of the published tarball.
+ * @param {string} entry - manifest entry, relative to the repository root.
+ * @returns {Promise<string[] | null>} matched relative paths, or null when nothing matches.
+ */
+async function expandFileEntry(entry) {
+  if (typeof entry !== 'string' || entry === '') return null
+  if (!entry.includes('*')) return (await exists(entry)) ? [entry] : null
+  const slash = entry.lastIndexOf('/')
+  const directory = slash < 0 ? '.' : entry.slice(0, slash)
+  const pattern = slash < 0 ? entry : entry.slice(slash + 1)
+  if (!pattern.includes('*') || pattern.includes('**')) return null
+  const matcher = new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*')}$`)
+  let names
+  try {
+    names = await readdir(path.join(ROOT, directory))
+  } catch {
+    return null
+  }
+  const matched = names.filter((name) => !name.startsWith('.') && matcher.test(name)).sort()
+  if (matched.length === 0) return null
+  return matched.map((name) => (directory === '.' ? name : `${directory}/${name}`))
 }
 
 /** @param {string} file @returns {Promise<boolean>} */

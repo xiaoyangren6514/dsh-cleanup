@@ -31,11 +31,14 @@ jobs:
           done
 
       - name: Unit tests
-        # A quoted glob is only expanded by newer Node test runners, so let bash's globstar turn it
-        # into explicit paths; the same test files then run on both matrix versions.
-        run: |
-          shopt -s globstar
-          node --test test/**/*.test.mjs
+        # `npm test` runs scripts/run-tests.mjs, which expands the test glob itself so the same
+        # command works on Node 20 and 22 without relying on the shell or the test runner's globbing.
+        run: npm test
 
       - name: Contract check
-        run: node scripts/check-contract.mjs
+        run: npm run check
+
+      - name: Package contents
+        # The package ships extra files (SPEC, CHANGELOG, docs, locale mirrors); `npm pack --dry-run`
+        # is the only step that proves the manifest actually includes them.
+        run: npm pack --dry-run

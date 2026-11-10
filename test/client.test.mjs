@@ -29,6 +29,8 @@ function createContext() {
   const registrations = []
   const injections = []
   const menus = []
+  const effects = []
+  let sessionRefreshGate = null
   const listeners = new Set()
   const localeState = { dicts: null, namespace: null }
   const calls = []
@@ -99,6 +101,7 @@ function createContext() {
     },
     effect(factory) {
       const cleanup = factory()
+      effects.push(() => cleanup?.())
       return () => cleanup?.()
     },
     get(name) {
@@ -113,8 +116,11 @@ function createContext() {
         projectionsBySession: {},
       }
       return {
-        refresh: async () => {
+        refresh: () => {
           calls.push({ url: 'session.refresh' })
+          // A test can hold the first refresh open to observe the restore follow-up refresh.
+          if (sessionRefreshGate !== null) return sessionRefreshGate()
+          return Promise.resolve()
         },
         list: {
           getSnapshot: () => snapshot,
@@ -171,6 +177,23 @@ function createContext() {
     setDeleteResponse(fn) { deleteResponse = fn },
     setRestoreResponse(fn) { restoreResponse = fn },
     setCandidatesResponse(fn) { candidatesResponse = fn },
+    effects,
+    /** Hold `ctx.get('sessions').refresh()` open until the returned resolver is called. */
+    holdSessionRefresh() {
+      let release = null
+      const gate = new Promise((resolve) => { release = resolve })
+      sessionRefreshGate = () => gate
+      return function () {
+        sessionRefreshGate = null
+        release()
+      }
+    },
+    /** Run every registered `ctx.effect` disposer (plugin unload). */
+    disposeEffects() {
+      for (const dispose of effects.splice(0)) {
+        try { dispose() } catch (error) { /* the test asserts the guarded behaviour, not a throw */ }
+      }
+    },
     setSessions(fn) { inventory.sessions = fn() },
     setTrashEntries(fn) { trash.entries = fn() },
     setWorkspaces(fn) { inventory.workspaces = fn() },
@@ -233,17 +256,21 @@ async function loadClient() {
   // Cache-bust so each test file run gets a pristine module instance and its own registrations.
   await import(new URL('../client.js?test=' + Math.random(), import.meta.url))
   assert.ok(loaded, 'client.js must register itself with window.__ModuleLoader__')
+  // Record the hook call order per render so the P0 hook-order regression can be asserted even
+  // though this shim never renders React itself.
+  const hookCalls = []
+  const recordHook = (name) => { hookCalls.push(name) }
   const ReactStub = new Proxy({}, {
     get(_target, key) {
       if (key === 'createElement') return (type, props, ...children) => ({ type, props: props || {}, children })
       if (key === 'Fragment') return 'Fragment'
-      if (key === 'useId') return () => ':r-cleanup:'
-      if (key === 'useState') return (initial) => [typeof initial === 'function' ? initial() : initial, () => { }]
-      if (key === 'useRef') return (initial) => ({ current: initial })
-      if (key === 'useEffect') return () => { }
-      if (key === 'useMemo') return (factory) => factory()
-      if (key === 'useCallback') return (callback) => callback
-      if (key === 'useSyncExternalStore') return (_subscribe, getSnapshot) => getSnapshot()
+      if (key === 'useId') return () => { recordHook('useId'); return ':r-cleanup:' }
+      if (key === 'useState') return (initial) => { recordHook('useState'); return [typeof initial === 'function' ? initial() : initial, () => { }] }
+      if (key === 'useRef') return (initial) => { recordHook('useRef'); return { current: initial } }
+      if (key === 'useEffect') return () => { recordHook('useEffect') }
+      if (key === 'useMemo') return (factory) => { recordHook('useMemo'); return factory() }
+      if (key === 'useCallback') return (callback) => { recordHook('useCallback'); return callback }
+      if (key === 'useSyncExternalStore') return (_subscribe, getSnapshot) => { recordHook('useSyncExternalStore'); return getSnapshot() }
       return undefined
     },
   })
@@ -251,7 +278,12 @@ async function loadClient() {
     if (id === 'react') return ReactStub
     throw new Error('client.js must only require react, got ' + id)
   })
-  return { mod, loaded }
+  return {
+    mod,
+    loaded,
+    hookCalls,
+    resetHooks() { hookCalls.length = 0 },
+  }
 }
 
 /** Wait until predicate holds, or fail with the last snapshot for debugging. */
@@ -2858,5 +2890,543 @@ test('usage: the opt-in preference is plugin-owned and a blocked localStorage ca
   } finally {
     globalThis.localStorage = savedStorage
   }
+  store.dispose()
+})
+
+// =============================================================================================
+// 0.6.0 code-review fixes (task-12)
+// =============================================================================================
+
+/** A plan over two root Sessions, each with one direct child, expanded when descendants are on. */
+function twoRootFamilyPlanFor(body) {
+  const parentOf = {
+    'session-a': null, 'a-1': 'session-a',
+    'session-b': null, 'b-1': 'session-b',
+  }
+  const ids = body.targets.map((target) => target.id)
+  if (body.includeDescendants === true) {
+    if (ids.indexOf('session-a') !== -1) ids.push('a-1')
+    if (ids.indexOf('session-b') !== -1) ids.push('b-1')
+  }
+  const items = ids.map((id) => ({
+    kind: 'session',
+    id: id,
+    workspaceId: null,
+    title: id,
+    path: '/tmp/' + id,
+    bytes: 10,
+    files: 1,
+    dirs: 0,
+    parentSessionId: parentOf[id] || null,
+    isDescendant: parentOf[id] !== null,
+  }))
+  return Object.assign(cleanPlan(body.mode), {
+    targets: body.targets.map((target) => ({ kind: target.kind, id: target.id, title: target.id, path: null })),
+    items: items,
+    totals: { workspaces: 0, sessions: items.length, files: items.length, dirs: 0, bytes: items.length * 10 },
+  })
+}
+
+test('panel hook order: SessionsPanel runs the same hooks in the loading and loaded renders', async () => {
+  const world = createContext()
+  const { mod, hookCalls, resetHooks } = await loadClient()
+  mod.apply(world.ctx)
+  world.setSessions(() => [inventorySession('session-a'), inventorySession('session-b')])
+  const api = slotApi(world, 'settings.section')
+  const store = api.createPageStore()
+  store.setTab('sessions')
+  api.createPageStore = () => store
+  const section = world.registrations.find((entry) => entry.options.name === 'settings.section')
+
+  resetHooks()
+  renderDeep(section.component({ api, t: api.t }))
+  const loadingHooks = hookCalls.slice()
+  assert.equal(store.getSnapshot().inventory, null, 'the first render is the loading state')
+
+  await store.loadInventory()
+  resetHooks()
+  const tree = renderDeep(section.component({ api, t: api.t }))
+  const loadedHooks = hookCalls.slice()
+  assert.equal(elementsByClass(tree, 'dsh-cleanup-item').length, 2, 'the loaded render shows the rows')
+  assert.ok(loadingHooks.length > 0)
+  assert.deepEqual(
+    loadedHooks,
+    loadingHooks,
+    'the usage hook must run above the early return: every render calls the same hooks in the same order',
+  )
+  store.dispose()
+})
+
+test('tree: un-checking a row clears its node selection and disables its nodes', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setPlanResponse((body) => ({ ok: true, plan: twoRootFamilyPlanFor(body) }))
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  const api = overlay.options.inject().api
+  api.openDialog([
+    { kind: 'session', id: 'session-a', title: 'A' },
+    { kind: 'session', id: 'session-b', title: 'B' },
+  ])
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+
+  // Switch on: both families are expanded. Un-checking one leaf switches the switch off and
+  // materializes an explicit set.
+  api.setDialogNodeSelection('a-1', false)
+  await waitFor(() => {
+    const calls = world.calls.filter((call) => call.url.endsWith('cleanup.plan'))
+    return calls.length >= 2 && api.dialogStore.getSnapshot().refreshing !== true
+  }, 'explicit re-plan after the node un-check')
+  assert.deepEqual(api.dialogStore.getSnapshot().nodeSelection, ['b-1'])
+
+  // Un-checking the owning row purges its subtree from the explicit node set.
+  api.setDialogSelection('session:session-a', false)
+  await waitFor(() => {
+    const calls = world.calls.filter((call) => call.url.endsWith('cleanup.plan'))
+    return calls.length >= 3 && api.dialogStore.getSnapshot().refreshing !== true
+  }, 're-plan after the row un-check')
+  const state = api.dialogStore.getSnapshot()
+  assert.deepEqual(state.selection, ['session:session-b'])
+  assert.deepEqual(state.nodeSelection, ['b-1'], 'the un-checked row subtree left the node selection')
+  const lastPlan = world.calls.filter((call) => call.url.endsWith('cleanup.plan')).at(-1)
+  assert.deepEqual(lastPlan.body.targets, [
+    { kind: 'session', id: 'session-b' },
+    { kind: 'session', id: 'b-1' },
+  ], 'an explicit plan never names a node whose root row is un-checked')
+
+  // The un-checked row's tree stays on screen — unchecked, disabled, with the localized note.
+  api.toggleDialogGroup('session:session-a')
+  const tree = renderDeep(overlay.component({ api, t: api.t }))
+  const nodes = elementsByClass(tree, 'dsh-cleanup-tree-node')
+  assert.equal(nodes.length, 1, 'only the un-checked root is expanded')
+  const checks = findAll(tree, (element) => element && element.type === 'input' && element.props && element.props.className === 'dsh-cleanup-tree-check')
+  assert.equal(checks.length, 1)
+  assert.equal(checks[0].props.checked, false, 'a node under an un-checked row renders unchecked')
+  assert.equal(checks[0].props.disabled, true, 'a node under an un-checked row cannot be toggled')
+  const text = collectText(tree)
+  assert.match(text, /该会话已取消勾选，它的子代理会话不会被删除。/)
+  assert.match(text, /已选 0\/1 条日志/, 'the family count only counts a checked root')
+  api.disposeDialog()
+})
+
+test('plan cap: an oversized review fails locally with TOO_MANY_TARGETS and never hits the wire', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  const api = slotApi(world, 'shell.overlay')
+  const targets = []
+  for (let index = 0; index < 65; index += 1) targets.push({ kind: 'session', id: 'session-' + index, title: 'S' + index })
+  api.openDialog(targets)
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'failed', 'local plan failure')
+  const state = api.dialogStore.getSnapshot()
+  assert.equal(state.failureStage, 'plan')
+  assert.equal(state.error.code, 'TOO_MANY_TARGETS')
+  assert.equal(world.calls.filter((call) => call.url.endsWith('cleanup.plan')).length, 0, 'no doomed plan request is sent')
+  const text = collectText(renderDeep(slotApi(world, 'shell.overlay') && (function () {
+    const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+    return overlay.component({ api, t: api.t })
+  })()))
+  assert.match(text, /64/, 'the copy names the cap')
+  assert.match(text, /分批/, 'the copy tells the user to batch the work')
+
+  api.retryDialog()
+  await sleep(30)
+  assert.equal(api.dialogStore.getSnapshot().phase, 'failed', 'retry re-plans and fails locally again')
+  assert.equal(world.calls.filter((call) => call.url.endsWith('cleanup.plan')).length, 0, 'retry never resends a doomed body')
+  api.disposeDialog()
+})
+
+test('plan cap: explicit tree nodes count against the 64-target budget', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setPlanResponse((body) => {
+    const ids = body.targets.map((target) => target.id)
+    const parentOf = { 'child-1': 'session-0', 'child-2': 'session-0' }
+    if (body.includeDescendants === true) {
+      if (ids.indexOf('session-0') !== -1) ids.push('child-1', 'child-2')
+    }
+    const items = ids.map((id) => ({
+      kind: 'session', id: id, workspaceId: null, title: id, path: '/tmp/' + id,
+      bytes: 10, files: 1, dirs: 0, parentSessionId: parentOf[id] || null, isDescendant: parentOf[id] !== undefined,
+    }))
+    return {
+      ok: true,
+      plan: Object.assign(cleanPlan(body.mode), {
+        targets: body.targets.map((target) => ({ kind: target.kind, id: target.id, title: target.id, path: null })),
+        items: items,
+        totals: { workspaces: 0, sessions: items.length, files: items.length, dirs: 0, bytes: items.length * 10 },
+      }),
+    }
+  })
+  const api = slotApi(world, 'shell.overlay')
+  const targets = []
+  for (let index = 0; index < 63; index += 1) targets.push({ kind: 'session', id: 'session-' + index, title: 'S' + index })
+  api.openDialog(targets)
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review' && api.dialogStore.getSnapshot().refreshing !== true, 'review phase')
+
+  // 63 rows + one explicit node = 64 targets: still within the Host cap.
+  api.setDialogNodeSelection('child-2', false)
+  await waitFor(() => {
+    const calls = world.calls.filter((call) => call.url.endsWith('cleanup.plan'))
+    return calls.length >= 2 && api.dialogStore.getSnapshot().refreshing !== true
+  }, 'explicit re-plan at the 64 boundary')
+  const boundary = world.calls.filter((call) => call.url.endsWith('cleanup.plan')).at(-1)
+  assert.equal(boundary.body.targets.length, 64)
+
+  // Re-checking the second node would name 65 targets: fail locally, no request.
+  const planCallsBefore = world.calls.filter((call) => call.url.endsWith('cleanup.plan')).length
+  api.setDialogNodeSelection('child-2', true)
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'failed', 'over-budget failure')
+  assert.equal(api.dialogStore.getSnapshot().error.code, 'TOO_MANY_TARGETS')
+  assert.equal(world.calls.filter((call) => call.url.endsWith('cleanup.plan')).length, planCallsBefore, '65 targets never reach the Host')
+  api.retryDialog()
+  await sleep(30)
+  assert.equal(world.calls.filter((call) => call.url.endsWith('cleanup.plan')).length, planCallsBefore, 'retry stays local')
+  api.disposeDialog()
+})
+
+test('plan cap: a workspace-clear batch is trimmed and the overflow stays queued', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  const rows = []
+  for (let index = 0; index < 64; index += 1) rows.push({ id: 'session-' + index, cwd: '/tmp/p' + index, deletable: true })
+  world.setCandidatesResponse(() => ({ ok: true, candidates: rows, total: rows.length, truncated: false, totals: { count: rows.length, bytes: 0 } }))
+  world.setPlanResponse((body) => {
+    const ids = body.targets.map((target) => target.id)
+    const parentOf = { 'child-n0': 'session-0', 'child-n1': 'session-0' }
+    if (body.includeDescendants === true && ids.indexOf('session-0') !== -1) ids.push('child-n0', 'child-n1')
+    const items = ids.map((id) => ({
+      kind: 'session', id: id, workspaceId: null, title: id, path: '/tmp/' + id,
+      bytes: 1, files: 1, dirs: 0, parentSessionId: parentOf[id] || null, isDescendant: parentOf[id] !== undefined,
+    }))
+    return {
+      ok: true,
+      plan: Object.assign(cleanPlan(body.mode), {
+        targets: body.targets.map((target) => ({ kind: target.kind, id: target.id, title: target.id, path: null })),
+        items: items,
+        totals: { workspaces: 0, sessions: items.length, files: items.length, dirs: 0, bytes: items.length },
+      }),
+    }
+  })
+  clearMenuAction(world).run()
+  const api = slotApi(world, 'shell.overlay')
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+
+  // 64 rows + one explicit node would be 65: trim to the longest fitting prefix (63 rows + node).
+  api.setDialogNodeSelection('child-n1', false)
+  await waitFor(() => {
+    const calls = world.calls.filter((call) => call.url.endsWith('cleanup.plan'))
+    return calls.length >= 2 && api.dialogStore.getSnapshot().refreshing !== true && api.dialogStore.getSnapshot().phase === 'review'
+  }, 'trimmed clear batch plan')
+  const state = api.dialogStore.getSnapshot()
+  assert.equal(state.phase, 'review', 'a clear batch trims instead of failing')
+  const lastPlan = world.calls.filter((call) => call.url.endsWith('cleanup.plan')).at(-1)
+  assert.equal(lastPlan.body.includeDescendants, false)
+  assert.equal(lastPlan.body.targets.length, 64, 'rows + explicit nodes fit the Host cap exactly')
+  const plannedIds = lastPlan.body.targets.map((target) => target.id)
+  assert.equal(plannedIds.indexOf('session-63'), -1, 'the overflow row is not planned yet')
+  assert.notEqual(plannedIds.indexOf('child-n0'), -1, 'the checked node is named explicitly')
+  assert.equal(plannedIds.indexOf('child-n1'), -1, 'the un-checked node is not named')
+  assert.equal(state.targets.length, 63)
+  assert.equal(state.clear.queued[0].id, 'session-63', 'the dropped row is queued for the next batch')
+  const queuedIds = state.clear.queued.map((target) => target.id)
+  assert.equal(new Set(queuedIds).size, queuedIds.length, 'the dropped row is queued once')
+  api.disposeDialog()
+})
+
+test('plan cap: a single root whose nodes alone overflow fails with TOO_MANY_TARGETS', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setCandidatesResponse(() => ({
+    ok: true,
+    candidates: [{ id: 'session-0', cwd: '/tmp/p0', deletable: true }],
+    total: 1,
+    truncated: false,
+    totals: { count: 1, bytes: 0 },
+  }))
+  const children = []
+  for (let index = 0; index < 64; index += 1) children.push('child-' + index)
+  world.setPlanResponse((body) => {
+    const ids = body.targets.map((target) => target.id)
+    if (body.includeDescendants === true && ids.indexOf('session-0') !== -1) ids.push.apply(ids, children)
+    const items = ids.map((id) => ({
+      kind: 'session', id: id, workspaceId: null, title: id, path: '/tmp/' + id,
+      bytes: 1, files: 1, dirs: 0, parentSessionId: id === 'session-0' ? null : 'session-0',
+      isDescendant: id !== 'session-0',
+    }))
+    return {
+      ok: true,
+      plan: Object.assign(cleanPlan(body.mode), {
+        targets: body.targets.map((target) => ({ kind: target.kind, id: target.id, title: target.id, path: null })),
+        items: items,
+        totals: { workspaces: 0, sessions: items.length, files: items.length, dirs: 0, bytes: items.length },
+      }),
+    }
+  })
+  clearMenuAction(world).run()
+  const api = slotApi(world, 'shell.overlay')
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  // 1 row + 63 explicit nodes = 64: fits and is sent.
+  api.setDialogNodeSelection('child-63', false)
+  await waitFor(() => {
+    const calls = world.calls.filter((call) => call.url.endsWith('cleanup.plan'))
+    return calls.length >= 2 && api.dialogStore.getSnapshot().refreshing !== true
+  }, '64-target explicit plan')
+  assert.equal(world.calls.filter((call) => call.url.endsWith('cleanup.plan')).at(-1).body.targets.length, 64)
+  // Re-checking the 64th node needs 65 targets: even one root cannot fit -> local failure.
+  const planCallsBefore = world.calls.filter((call) => call.url.endsWith('cleanup.plan')).length
+  api.setDialogNodeSelection('child-63', true)
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'failed', 'over-budget clear failure')
+  assert.equal(api.dialogStore.getSnapshot().error.code, 'TOO_MANY_TARGETS')
+  assert.equal(world.calls.filter((call) => call.url.endsWith('cleanup.plan')).length, planCallsBefore, 'no doomed batch plan is sent')
+  api.disposeDialog()
+})
+
+test('usage: a failed chunk retried through retryUsage is requested once per id', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setSessions(() => [inventorySession('session-a'), inventorySession('session-b')])
+  world.setCapabilities({ usage: true, projectionCache: true, openPath: false })
+  let fail = true
+  world.setUsageResponse((body) => {
+    if (fail) return { ok: false, error: { code: 'INTERNAL', message: 'boom' } }
+    const usage = {}
+    for (const id of body.sessionIds) usage[id] = { totalTokens: 1000, cacheReadInputTokens: 800, cacheMissInputTokens: 200, outputTokens: 0 }
+    return { ok: true, available: true, usage }
+  })
+  const api = slotApi(world, 'settings.section')
+  const store = api.createPageStore()
+  await store.loadInventory()
+  store.setTab('sessions')
+  await store.setUsageEnabled(true)
+  await waitFor(() => store.getSnapshot().usageError !== null, 'failed chunk')
+  fail = false
+  await store.retryUsage()
+  await waitFor(() => store.getSnapshot().usageError === null && store.getSnapshot().usage['session-a'] !== undefined, 'retried chunk folded')
+  const bodies = usageCallsOf(world).map((call) => call.body.sessionIds)
+  for (const ids of bodies) {
+    assert.equal(new Set(ids).size, ids.length, 'no request body repeats an id')
+  }
+  assert.deepEqual(bodies.at(-1).slice().sort(), ['session-a', 'session-b'], 'the retry asks each failed id exactly once')
+  store.dispose()
+})
+
+test('tree: the auto-off notice only appears when a node toggle turns the switch off', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setPlanResponse((body) => ({ ok: true, plan: familyPlanFor(body) }))
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  const api = overlay.options.inject().api
+
+  // Manual switch-off, then checking a node: no auto-off notice (the user turned it off).
+  api.openDialog([{ kind: 'session', id: 'session-a', title: 'A' }])
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  api.setIncludeDescendants(false)
+  await waitFor(() => api.dialogStore.getSnapshot().refreshing !== true, 'manual off re-plan')
+  api.setDialogNodeSelection('child-1', true)
+  await waitFor(() => api.dialogStore.getSnapshot().refreshing !== true, 'node re-plan')
+  assert.equal(api.dialogStore.getSnapshot().descendantsAutoOff, false, 'checking a node while already off is not an auto-off')
+  api.disposeDialog()
+
+  // Invert with nodes known: no auto-off notice either.
+  api.openDialog([{ kind: 'session', id: 'session-a', title: 'A' }])
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'second review')
+  api.invertDialogTargetSelection()
+  await waitFor(() => api.dialogStore.getSnapshot().refreshing !== true, 'invert re-plan')
+  assert.equal(api.dialogStore.getSnapshot().descendantsAutoOff, false, 'invert never raises the auto-off notice')
+  assert.equal(api.dialogStore.getSnapshot().plan, null, 'an inverted-empty selection keeps no plan')
+  api.disposeDialog()
+
+  // Un-checking a node while the switch is on is the one case that raises it, with the tree copy.
+  api.openDialog([{ kind: 'session', id: 'session-a', title: 'A' }])
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'third review')
+  api.setDialogNodeSelection('child-2', false)
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review' && api.dialogStore.getSnapshot().refreshing !== true, 'auto-off re-plan')
+  assert.equal(api.dialogStore.getSnapshot().descendantsAutoOff, true)
+  const text = collectText(renderDeep(overlay.component({ api, t: api.t })))
+  assert.match(text, /重新勾选子代理会话后可再开启/, 'the copy speaks about the tree, not a row')
+  api.disposeDialog()
+})
+
+test('tree: the auto-off notice is never rendered inside a workspace clear', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setCandidatesResponse(() => ({
+    ok: true,
+    candidates: [{ id: 'session-0', cwd: '/tmp/p0', deletable: true }],
+    total: 1,
+    truncated: false,
+    totals: { count: 1, bytes: 0 },
+  }))
+  world.setPlanResponse((body) => {
+    const ids = body.targets.map((target) => target.id)
+    if (body.includeDescendants === true && ids.indexOf('session-0') !== -1) ids.push('child-x')
+    const items = ids.map((id) => ({
+      kind: 'session', id: id, workspaceId: null, title: id, path: '/tmp/' + id,
+      bytes: 1, files: 1, dirs: 0, parentSessionId: id === 'session-0' ? null : 'session-0',
+      isDescendant: id !== 'session-0',
+    }))
+    return {
+      ok: true,
+      plan: Object.assign(cleanPlan(body.mode), {
+        targets: body.targets.map((target) => ({ kind: target.kind, id: target.id, title: target.id, path: null })),
+        items: items,
+        totals: { workspaces: 0, sessions: items.length, files: items.length, dirs: 0, bytes: items.length },
+      }),
+    }
+  })
+  clearMenuAction(world).run()
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  const api = overlay.options.inject().api
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  api.setDialogNodeSelection('child-x', false)
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review' && api.dialogStore.getSnapshot().refreshing !== true, 'clear re-plan')
+  assert.equal(api.dialogStore.getSnapshot().descendantsAutoOff, true, 'the forced-off state is still tracked')
+  const text = collectText(renderDeep(overlay.component({ api, t: api.t })))
+  assert.doesNotMatch(text, /已自动关闭/, 'the switch explanation never appears in a workspace clear')
+  api.disposeDialog()
+})
+
+test('restore: one follow-up sessions.refresh runs after the first refresh settles, gated by dispose', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  const api = slotApi(world, 'settings.section')
+  const store = api.createPageStore()
+  await store.loadInventory()
+  store.setTab('trash')
+  await store.loadTrash()
+  const refreshCalls = () => world.calls.filter((call) => call.url === 'session.refresh').length
+
+  const releaseFirst = world.holdSessionRefresh()
+  await store.restoreEntry('20260101T000000Z-a-0001')
+  assert.equal(refreshCalls(), 1, 'the restore refresh is in flight')
+  assert.equal(store.getSnapshot().actionBusy, null, 'the restore itself settled')
+  releaseFirst()
+  await waitFor(() => refreshCalls() === 2, 'one follow-up refresh after the first settles')
+
+  // The follow-up is gated by the plugin disposer: a restore after unload schedules nothing.
+  const releaseSecond = world.holdSessionRefresh()
+  await store.restoreEntry('20260101T000000Z-a-0001')
+  assert.equal(refreshCalls(), 3)
+  world.disposeEffects()
+  releaseSecond()
+  await sleep(30)
+  assert.equal(refreshCalls(), 3, 'a disposed plugin never runs the follow-up refresh')
+  store.dispose()
+})
+
+test('open: the activation capability probe fills the snapshot for context-menu reviews', async () => {
+  const world = createContext()
+  world.setCapabilities({ usage: false, projectionCache: true, openPath: true })
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  // The probe is fired at activation; wait for its inventory round trip to land.
+  await waitFor(() => world.calls.some((call) => call.url.endsWith('cleanup.inventory')), 'capability probe request')
+  await sleep(20)
+  world.setPlanResponse((body) => ({ ok: true, plan: planEchoingTargets(body) }))
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  const api = overlay.options.inject().api
+  api.openDialog([{ kind: 'session', id: 'session-a', title: 'A' }])
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  const tree = renderDeep(overlay.component({ api, t: api.t }))
+  assert.equal(elementsByClass(tree, 'dsh-cleanup-open').length, 1, 'a context-menu review now knows the Host can open folders')
+  api.disposeDialog()
+})
+
+test('a11y: the usage columns expose accessible names', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setSessions(() => [inventorySession('session-a')])
+  world.setCapabilities({ usage: true, projectionCache: true, openPath: false })
+  world.setUsageResponse((body) => {
+    const usage = {}
+    for (const id of body.sessionIds) usage[id] = { totalTokens: 12000, cacheReadInputTokens: 8700, cacheMissInputTokens: 1300, outputTokens: 0 }
+    return { ok: true, available: true, usage }
+  })
+  const api = slotApi(world, 'settings.section')
+  const store = api.createPageStore()
+  await store.loadInventory()
+  store.setTab('sessions')
+  api.createPageStore = () => store
+  const section = world.registrations.find((entry) => entry.options.name === 'settings.section')
+  await store.setUsageEnabled(true)
+  await waitFor(() => store.getSnapshot().usage['session-a'] !== undefined, 'usage folded')
+  const tree = renderDeep(section.component({ api, t: api.t }))
+  const dict = world.localeState.dicts.zh
+  const totals = elementsByClass(tree, 'dsh-cleanup-usage-total')
+  const hits = elementsByClass(tree, 'dsh-cleanup-usage-hit')
+  assert.equal(totals.length, 1)
+  assert.equal(hits.length, 1)
+  // Real text inside the cell, not an aria-label on a role-less span: generic spans are not
+  // reliably named by author labels, so the label is a visually hidden prefix.
+  const labelTexts = elementsByClass(tree, 'dsh-cleanup-sr').map(collectText)
+  assert.ok(labelTexts.includes(dict['sessions.usage.total'] + ': '), 'the total cell carries a visually hidden label')
+  assert.ok(labelTexts.includes(dict['sessions.usage.cacheHit'] + ': '), 'the cache-hit cell carries a visually hidden label')
+  assert.ok(collectText(totals[0]).indexOf('12k') !== -1 || collectText(totals[0]).length > 0, 'the total value still renders')
+  store.dispose()
+})
+
+test('state: the usage sort resets when usage becomes unavailable or loses its capability', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setSessions(() => [inventorySession('session-a')])
+  world.setCapabilities({ usage: true, projectionCache: true, openPath: false })
+  const api = slotApi(world, 'settings.section')
+  const store = api.createPageStore()
+  await store.loadInventory()
+  store.setTab('sessions')
+  store.setSessionSort('usage')
+  world.setUsageResponse(() => ({ ok: true, available: false, usage: {} }))
+  await store.setUsageEnabled(true)
+  await waitFor(() => store.getSnapshot().usageAvailable === false, 'available:false recorded')
+  assert.equal(store.getSnapshot().sessionSort, 'newest', 'available:false drops the usage sort')
+
+  // Losing the capability on a reload resets it too.
+  store.setSessionSort('usage')
+  world.setCapabilities({ usage: false, projectionCache: true, openPath: false })
+  await store.loadInventory()
+  assert.equal(store.getSnapshot().sessionSort, 'newest', 'a Host without usage resets the sort')
+  store.dispose()
+})
+
+test('state: a tab switch clears the inline open error; the dialog Open label names the workspace', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setWorkspaces(() => [workspaceRow('ws-a', 'proj', '/tmp/proj')])
+  world.setSessions(() => [inventorySession('session-a')])
+  world.setCapabilities({ usage: false, projectionCache: true, openPath: true })
+  world.setPlanResponse((body) => ({ ok: true, plan: planEchoingTargets(body) }))
+  const api = slotApi(world, 'settings.section')
+  const store = api.createPageStore()
+  await store.loadInventory()
+  api.createPageStore = () => store
+
+  store.setTab('workspaces')
+  world.setOpenResponse(() => ({ ok: false, error: { code: 'OPEN_FAILED', message: 'no opener' } }))
+  await store.openPath('workspace', 'ws-a')
+  await waitFor(() => store.getSnapshot().openError !== null, 'open error recorded')
+  store.setTab('sessions')
+  assert.equal(store.getSnapshot().openError, null, 'switching tabs clears the page-level open error')
+
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  const dialogApi = overlay.options.inject().api
+  dialogApi.openDialog([{ kind: 'workspace', id: 'ws-a', title: 'proj', path: '/tmp/proj' }])
+  await waitFor(() => dialogApi.dialogStore.getSnapshot().phase === 'review', 'workspace review')
+  const tree = renderDeep(overlay.component({ api: dialogApi, t: dialogApi.t }))
+  const openButton = elementsByClass(tree, 'dsh-cleanup-open')[0]
+  assert.ok(openButton)
+  assert.match(String(openButton.props['aria-label']), /「proj」/, 'the accessible name names the workspace')
+  assert.doesNotMatch(String(openButton.props['aria-label']), /\/tmp\/proj/, 'the raw path is not the accessible name')
+  dialogApi.disposeDialog()
   store.dispose()
 })

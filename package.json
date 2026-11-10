@@ -36,7 +36,7 @@
     "docs/DETAIL.en.md"
   ],
   "scripts": {
-    "test": "node --test 'test/**/*.test.mjs'",
+    "test": "node scripts/run-tests.mjs",
     "check": "node scripts/check-contract.mjs",
     "sync-locale": "node scripts/sync-locale-mirrors.mjs"
   },

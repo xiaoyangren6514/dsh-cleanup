@@ -69,6 +69,13 @@ window.__ModuleLoader__.load({
      * exhausted, and stops after CLEAR_MAX_ROUNDS pages as a safety net.
      */
     const CLEAR_BATCH_TARGETS = 64
+    /**
+     * The Host refuses a plan naming more than 64 targets (lib/engine.js `MAX_PLAN_TARGETS`).
+     * The client checks the same bound before sending, so an oversized batch fails locally with
+     * an actionable `TOO_MANY_TARGETS` instead of a doomed round trip; a workspace clear instead
+     * trims the batch and keeps the rest queued.
+     */
+    const MAX_PLAN_TARGETS = 64
     const CLEAR_CANDIDATE_LIMIT = 500
     const CLEAR_MAX_ROUNDS = 40
     /**
@@ -429,7 +436,7 @@ window.__ModuleLoader__.load({
       'dialog.mode.permHint': '永久删除不进入回收站，无法撤销，请确认已经备份。',
       'dialog.includeSessions': '同时删除该目录内的会话记录',
       'dialog.includeDescendants': '同时删除子代理会话',
-      'dialog.descendants.autoOff': '已自动关闭「同时删除子代理会话」：取消勾选的子代理会话必须保留。重新勾选该行后可再开启。',
+      'dialog.descendants.autoOff': '已自动关闭「同时删除子代理会话」：取消勾选的子代理会话必须保留。重新勾选子代理会话后可再开启。',
       'dialog.confirm.label': '请输入文件夹名称“{name}”以确认永久删除',
       'dialog.confirm.placeholder': '文件夹名称',
       'dialog.confirm.mismatch': '输入的文件夹名称不匹配',
@@ -583,6 +590,7 @@ window.__ModuleLoader__.load({
       'dialog.tree.badge.derived': '派生',
       'dialog.tree.selected_one': '已选 {checked}/{total} 条日志',
       'dialog.tree.selected_other': '已选 {checked}/{total} 条日志',
+      'dialog.tree.rootOff': '该会话已取消勾选，它的子代理会话不会被删除。',
       // 0.6.0: permanent mode is irreversible; say so next to the mode selector.
       'dialog.mode.permIrreversible': '彻底删除会立即销毁数据，无法撤销，也不会进入回收站。',
       // 0.6.0: folder/cache opener (SPEC §4.11).
@@ -594,6 +602,7 @@ window.__ModuleLoader__.load({
       'open.retry': '重试打开',
       'error.OPEN_FAILED': '系统无法启动文件管理器来打开该目录。',
       'error.OPEN_UNAVAILABLE': '当前平台没有可用的文件管理器打开方式。',
+      'error.TOO_MANY_TARGETS': '一次最多复核 64 个目标；请分批删除或缩小范围后重试。',
     }
 
     const en = {
@@ -899,7 +908,7 @@ window.__ModuleLoader__.load({
       'dialog.mode.permHint': 'Permanent deletion skips the trash and cannot be undone; make sure the target is backed up.',
       'dialog.includeSessions': 'Also delete session logs inside this folder',
       'dialog.includeDescendants': 'Also delete its subagent sessions',
-      'dialog.descendants.autoOff': '“Also delete its subagent sessions” was turned off automatically: an un-checked subagent session must be kept. Re-check that row to enable it again.',
+      'dialog.descendants.autoOff': '“Also delete its subagent sessions” was turned off automatically: an un-checked subagent session must be kept. Re-check the subagent sessions to enable it again.',
       'dialog.confirm.label': 'Type the folder name "{name}" to confirm permanent deletion',
       'dialog.confirm.placeholder': 'Folder name',
       'dialog.confirm.mismatch': 'The folder name does not match',
@@ -1053,6 +1062,7 @@ window.__ModuleLoader__.load({
       'dialog.tree.badge.derived': 'Derived',
       'dialog.tree.selected_one': '{checked}/{total} log selected',
       'dialog.tree.selected_other': '{checked}/{total} logs selected',
+      'dialog.tree.rootOff': 'This session is not selected, so its subagent logs will not be deleted.',
       // 0.6.0: permanent mode is irreversible; say so next to the mode selector.
       'dialog.mode.permIrreversible': 'Permanent deletion destroys the data immediately, cannot be undone, and does not go to the trash.',
       // 0.6.0: folder/cache opener (SPEC §4.11).
@@ -1064,6 +1074,7 @@ window.__ModuleLoader__.load({
       'open.retry': 'Retry opening',
       'error.OPEN_FAILED': 'The system could not start a file manager to open that folder.',
       'error.OPEN_UNAVAILABLE': 'This platform has no file manager available to open folders.',
+      'error.TOO_MANY_TARGETS': 'A review can name at most 64 targets; delete in batches or narrow the selection and try again.',
     }
 
     /**
@@ -3064,6 +3075,7 @@ window.__ModuleLoader__.load({
       let expandedContent = null
       if (context.expanded) {
         if (treeRows.length > 0) {
+          const rootChecked = context.rootChecked !== false
           const summary = context.treeSummary || { checked: 0, total: treeRows.length }
           expandedContent = h('div', {
             className: 'dsh-cleanup-tree',
@@ -3072,9 +3084,12 @@ window.__ModuleLoader__.load({
           },
             h('div', { className: 'dsh-cleanup-tree-summary' },
               plural(t, 'dialog.tree.selected', summary.total, {
-                checked: formatNumber(summary.checked),
+                checked: formatNumber(rootChecked ? summary.checked : 0),
                 total: formatNumber(summary.total),
               })),
+            rootChecked
+              ? null
+              : h('div', { className: 'dsh-cleanup-tree-note dsh-cleanup-muted', role: 'note' }, t('dialog.tree.rootOff')),
             treeRows.map(function (row) {
               const nodeId = row.item && typeof row.item.id === 'string' ? row.item.id : ''
               return renderTreeRow({
@@ -3083,9 +3098,9 @@ window.__ModuleLoader__.load({
                 item: row.item,
                 depth: row.depth,
                 familySize: treeRows.length,
-                checked: context.nodeChecked(nodeId) === true,
-                mixed: context.nodeMixed(nodeId) === true,
-                disabled: context.disabled,
+                checked: rootChecked && context.nodeChecked(nodeId) === true,
+                mixed: rootChecked && context.nodeMixed(nodeId) === true,
+                disabled: context.disabled || rootChecked === false,
                 onToggleNode: context.onToggleNode,
               })
             }),
@@ -3251,11 +3266,16 @@ window.__ModuleLoader__.load({
           // so their control stays the `includeSessions` switch plus the row checkbox. A Session
           // target expands its known subagent logs as the family tree (SPEC §9).
           const treeRows = isWorkspace ? [] : flattenNodeTree(knownNodes, group.target.id)
+          const rootChecked = selectable ? selection[groupKey] === true : true
+          // `已选 n/m 条日志` only counts checked roots (SPEC §9): a node under an un-checked row
+          // is never deletable, so counting it would misstate the plan.
           let familyChecked = 0
-          let familyTotal = treeRows.length + (group.main === null ? 0 : 1)
-          if (group.main !== null && selection[groupKey] === true) familyChecked += 1
-          for (let i = 0; i < treeRows.length; i += 1) {
-            if (nodeIsChecked(treeRows[i].item.id) === true) familyChecked += 1
+          const familyTotal = treeRows.length + (group.main === null ? 0 : 1)
+          if (rootChecked) {
+            if (group.main !== null) familyChecked += 1
+            for (let i = 0; i < treeRows.length; i += 1) {
+              if (nodeIsChecked(treeRows[i].item.id) === true) familyChecked += 1
+            }
           }
           const rideAlong = isWorkspace
             ? (state.includeSessions === true ? group.swept : [])
@@ -3283,6 +3303,7 @@ window.__ModuleLoader__.load({
               summaryKey: isWorkspace ? 'dialog.groups.swept' : 'dialog.groups.descendants',
               expanded: context.expandedGroups[groupKey] === true,
               disabled: disabled,
+              rootChecked: rootChecked,
               nodeChecked: function (nodeId) { return nodeSelectionState(nodeId).checked },
               nodeMixed: function (nodeId) { return nodeSelectionState(nodeId).mixed },
               onToggleNode: context.onToggleNodeSelection,
@@ -3305,7 +3326,7 @@ window.__ModuleLoader__.load({
             h('span', null, t('dialog.includeDescendants')),
           )
           : null,
-        state.descendantsAutoOff === true
+        state.descendantsAutoOff === true && state.clear === null
           ? h('div', { className: 'dsh-cleanup-muted', key: 'descendants-auto-off' }, t('dialog.descendants.autoOff'))
           : null,
         state.refreshing === true
@@ -3777,6 +3798,31 @@ window.__ModuleLoader__.load({
       return shortId(target.id)
     }
 
+    /**
+     * Human name used by the review summary's Open control. Unlike the sub-text, this never falls
+     * back to the raw workspace path: the accessible name must name the target, not its location
+     * (SPEC §10 "Open (0.6.0)").
+     */
+    function dialogOpenTargetTitle(t, targets, state, catalog) {
+      if (!Array.isArray(targets) || targets.length !== 1) return ''
+      const target = targets[0]
+      if (target.kind === 'workspace') {
+        if (typeof target.title === 'string' && target.title !== '') return target.title
+        const plan = state && state.plan
+        if (plan && Array.isArray(plan.items)) {
+          for (let i = 0; i < plan.items.length; i += 1) {
+            const item = plan.items[i]
+            if (item && item.kind === 'workspace-dir' && item.id === target.id) {
+              return planItemTitle(t, item, catalog)
+            }
+          }
+        }
+        const base = baseName(typeof target.path === 'string' ? target.path : '')
+        return base !== '' ? base : shortId(target.id)
+      }
+      return dialogSubText(t, targets, state, catalog)
+    }
+
     // ------------------------------------------------------------------ dialog
 
     /**
@@ -4158,7 +4204,7 @@ window.__ModuleLoader__.load({
                 && dialogTargetList(state).length === 1
                 ? (function () {
                   const target = dialogTargetList(state)[0]
-                  const label = dialogSubText(t, [target], state, catalog)
+                  const label = dialogOpenTargetTitle(t, [target], state, catalog)
                   return h('button', {
                     type: 'button',
                     className: 'dsh-cleanup-open dsh-cleanup-btn dsh-cleanup-btn-ghost dsh-cleanup-btn-sm',
@@ -4623,6 +4669,24 @@ window.__ModuleLoader__.load({
         store.clearWizardFocusRequest()
       }, [state.wizardFocusRequest, store])
 
+      // Hooks may never run conditionally: every hook this panel owns stays above the loading
+      // early return, and the usage effect tolerates a null inventory (it simply has no rows to
+      // ask for until the store loads them).
+      const filtered = filteredSessionRows(state, catalog)
+      const visible = visibleSessionRows(state, catalog)
+      const usageSessionKey = visible.map(function (session) { return session.id }).join(',')
+      const usageCapable = !!(inventory && inventory.capabilities && inventory.capabilities.usage === true)
+      const usageOn = usageCapable && state.usageEnabled === true && state.usageAvailable !== false
+      const usageById = usageOn && state.usage && typeof state.usage === 'object' ? state.usage : {}
+      // "open folder" for a Session row (SPEC §4.11); the Host resolves the directory itself.
+      const openPath = !!(inventory && inventory.capabilities && inventory.capabilities.openPath === true)
+      // The page fetches usage only for the rows it shows (chunked inside the store).
+      useEffect(function () {
+        if (!usageOn) return
+        if (usageSessionKey === '') return
+        store.ensureUsageFor(usageSessionKey.split(','))
+      }, [usageOn, usageSessionKey, store])
+
       if (!inventory) {
         if (state.inventoryError) return renderErrorBlock(t, state.inventoryError, function () { store.loadInventory() })
         return h('div', { className: 'dsh-cleanup-list', 'aria-busy': 'true' },
@@ -4639,26 +4703,11 @@ window.__ModuleLoader__.load({
         : 'newest'
       const filter = state.sessionFilter === 'archived' || state.sessionFilter === 'active' ? state.sessionFilter : 'all'
       const workspaceFilter = typeof state.sessionWorkspace === 'string' ? state.sessionWorkspace : SESSION_WORKSPACE_ANY
-      const filtered = filteredSessionRows(state, catalog)
-      const visible = visibleSessionRows(state, catalog)
       const remaining = filtered.length - visible.length
       const selectedSessions = Array.isArray(state.selectedSessions) ? state.selectedSessions : []
       const selectedSet = {}
       for (let i = 0; i < selectedSessions.length; i += 1) selectedSet[selectedSessions[i]] = true
 
-      // 0.6.0 usage surfaces (SPEC §10 "Usage (0.6.0)"): opt-in, capability-gated, and hidden
-      // again when the Host answers `available: false`. A missing fold renders a muted dash,
-      // never a zero; an unknown hit rate is simply absent.
-      const usageCapable = !!(inventory.capabilities && inventory.capabilities.usage === true)
-      const usageOn = usageCapable && state.usageEnabled === true && state.usageAvailable !== false
-      const usageById = usageOn && state.usage && typeof state.usage === 'object' ? state.usage : {}
-      // "open folder" for a Session row (SPEC §4.11); the Host resolves the directory itself.
-      const openPath = !!(inventory.capabilities && inventory.capabilities.openPath === true)
-      // The page fetches usage only for the rows it shows (chunked inside the store).
-      useEffect(function () {
-        if (!usageOn) return
-        store.ensureUsageFor(visible.map(function (session) { return session.id }))
-      }, [usageOn, visible.map(function (session) { return session.id }).join(','), store])
       // Rows with descendants on the page show `own/family` (a parent counts only its own requests).
       const usageVisibleIds = Object.create(null)
       for (let i = 0; i < visible.length; i += 1) usageVisibleIds[visible[i].id] = true
@@ -4705,7 +4754,12 @@ window.__ModuleLoader__.load({
                 family: formatCompactTokens(family),
               }) : ''),
         },
-          h('span', { className: 'dsh-cleanup-usage-total' }, totalText),
+          h('span', { className: 'dsh-cleanup-usage-total' },
+            // A visually hidden prefix instead of `aria-label` on a role-less span: generic spans are
+            // not reliably named by author-provided labels, while real text always is.
+            h('span', { className: 'dsh-cleanup-sr', key: 'label' }, t('sessions.usage.total') + ': '),
+            totalText,
+          ),
           h('span', {
             className: 'dsh-cleanup-usage-hit',
             title: hitText !== null
@@ -4715,7 +4769,10 @@ window.__ModuleLoader__.load({
                 miss: formatNumber(row.cacheMissInputTokens || 0),
               })
               : t('sessions.usage.cacheHit'),
-          }, hitText !== null ? hitText : t('sessions.usage.unknown')),
+          },
+            h('span', { className: 'dsh-cleanup-sr', key: 'label' }, t('sessions.usage.cacheHit') + ': '),
+            hitText !== null ? hitText : t('sessions.usage.unknown'),
+          ),
         )
       }
       const sortId = ids + '-sort'
@@ -6487,14 +6544,78 @@ window.__ModuleLoader__.load({
      */
     function createMutationNotifier(ctx, mutations) {
       return function notifyMutation() {
+        let pending = null
         try {
           const sessions = typeof ctx.get === 'function' ? ctx.get('sessions') : undefined
           if (sessions && typeof sessions.refresh === 'function') {
-            const pending = sessions.refresh()
+            pending = sessions.refresh()
             if (pending && typeof pending.catch === 'function') pending.catch(function () { })
           }
         } catch (error) { /* refresh is best effort */ }
         mutations.bump()
+        // Returned so a caller can schedule ONE follow-up after this refresh settles; the
+        // single-flight refresh can otherwise swallow a row restored mid-flight (SPEC §9).
+        return pending
+      }
+    }
+
+    /**
+     * One best-effort inventory probe at activation (SPEC §3/§10 "Open"): fills the shared
+     * capability snapshot, so a review opened from a context menu offers the surfaces the Host
+     * supports even when the user never opened Settings. Failures degrade silently; the returned
+     * abort handle is owned by the plugin disposer.
+     * @param {object} ctx - client plugin context.
+     * @param {object} capabilities - shared mutable capability snapshot.
+     * @returns {{ dispose: Function }}
+     */
+    function createCapabilityProbe(ctx, capabilities) {
+      const controller = new AbortController()
+      const target = capabilities && typeof capabilities === 'object' ? capabilities : {}
+      request(ROUTE.inventory, {}, controller.signal).then(function (envelope) {
+        if (!envelope || envelope.transport || envelope.ok !== true) return
+        const inventory = normalizeInventory(envelope)
+        target.usage = inventory.capabilities.usage
+        target.projectionCache = inventory.capabilities.projectionCache
+        target.openPath = inventory.capabilities.openPath
+      }).catch(function () { /* probe is best effort */ })
+      return {
+        dispose: function () {
+          try { controller.abort() } catch (error) { /* ignore */ }
+        },
+      }
+    }
+
+    /**
+     * One follow-up `ctx.get('sessions')?.refresh?.()` after an in-flight refresh settles (SPEC §9
+     * restore): the catalog's single-flight refresh can swallow a Session restored mid-flight.
+     * `schedule` is gated by `dispose`, which the plugin disposer runs.
+     * @param {object} ctx - client plugin context.
+     * @returns {{ schedule: Function, dispose: Function }}
+     */
+    function createRestoreRefreshScheduler(ctx) {
+      let disposed = false
+      return {
+        schedule: function (previous) {
+          if (disposed) return
+          let sessions
+          try {
+            sessions = typeof ctx.get === 'function' ? ctx.get('sessions') : undefined
+          } catch (error) {
+            sessions = undefined
+          }
+          if (!sessions || typeof sessions.refresh !== 'function') return
+          const wait = previous && typeof previous.then === 'function'
+            ? previous.catch(function () { })
+            : Promise.resolve()
+          wait.then(function () {
+            if (disposed) return
+            try {
+              const pending = sessions.refresh()
+              if (pending && typeof pending.catch === 'function') pending.catch(function () { })
+            } catch (error) { /* refresh is best effort */ }
+          })
+        },
+        dispose: function () { disposed = true },
       }
     }
 
@@ -6653,35 +6774,63 @@ window.__ModuleLoader__.load({
         return state.nodeSelection.indexOf(nodeId) !== -1
       }
 
+      /** Ids of the checked reviewed Session rows; a tree node is only plannable under one. */
+      function checkedRootSessionIds(state) {
+        const roots = Object.create(null)
+        const planned = plannedTargets(state)
+        for (let i = 0; i < planned.length; i += 1) {
+          const target = planned[i]
+          if (target && target.kind === 'session' && typeof target.id === 'string') roots[target.id] = true
+        }
+        return roots
+      }
+
+      /** Is the reviewed Session row that owns this tree node still checked? */
+      function nodeRootChecked(state, nodeId) {
+        const nodes = state && state.knownNodes && typeof state.knownNodes === 'object' ? state.knownNodes : {}
+        const node = nodes[nodeId]
+        if (!node || typeof node.rootId !== 'string') return false
+        return checkedRootSessionIds(state)[node.rootId] === true
+      }
+
       /**
        * Explicit node ids for a plan body (SPEC §9): when the descendant switch is off, the checked
-       * nodes are named targets, so the Host plans exactly the selected logs.
+       * nodes under a checked root row are named targets, so the Host plans exactly the selected
+       * logs. A node whose root row was un-checked is never named.
        */
       function explicitNodeTargets(state) {
         if (state.includeDescendants === true) return []
         const nodes = state.knownNodes && typeof state.knownNodes === 'object' ? state.knownNodes : {}
+        const roots = checkedRootSessionIds(state)
         const ids = Array.isArray(state.nodeSelection) ? state.nodeSelection : []
         const targets = []
         const seen = Object.create(null)
         for (let i = 0; i < ids.length; i += 1) {
           const id = ids[i]
           if (typeof id !== 'string' || id === '' || seen[id] === true) continue
-          if (nodes[id] === undefined) continue
+          const node = nodes[id]
+          if (node === undefined) continue
+          if (typeof node.rootId !== 'string' || roots[node.rootId] !== true) continue
           seen[id] = true
           targets.push({ kind: 'session', id: id })
         }
         return targets
       }
 
-      /** Node ids that belong to one workspace-clear batch (their parent chain reaches a batch row). */
-      function explicitNodeTargetsForBatch(state) {
+      /**
+       * Explicit node targets whose parent chain reaches one of the given (checked) root targets.
+       * Used by the plan body and by the workspace-clear batch trim (SPEC §9).
+       */
+      function explicitNodeTargetsForRoots(state, roots) {
         if (state.includeDescendants === true) return []
         const nodes = state.knownNodes && typeof state.knownNodes === 'object' ? state.knownNodes : {}
         if (Object.keys(nodes).length === 0) return []
-        const batchRoots = Object.create(null)
-        for (let i = 0; i < state.targets.length; i += 1) {
-          const target = state.targets[i]
-          if (target && typeof target.id === 'string') batchRoots[target.id] = true
+        const rootSet = Object.create(null)
+        const rootList = Array.isArray(roots) ? roots : []
+        for (let i = 0; i < rootList.length; i += 1) {
+          const target = rootList[i]
+          if (!target || target.kind !== 'session' || typeof target.id !== 'string') continue
+          if (state.selection.indexOf(targetKey(target)) !== -1) rootSet[target.id] = true
         }
         const excluded = state.clear && state.clear.excluded && typeof state.clear.excluded === 'object'
           ? state.clear.excluded
@@ -6698,7 +6847,7 @@ window.__ModuleLoader__.load({
           while (cursor && typeof cursor === 'object') {
             const parentId = typeof cursor.parentSessionId === 'string' ? cursor.parentSessionId : ''
             if (parentId === '') break
-            if (batchRoots[parentId] === true) { reachable = true; break }
+            if (rootSet[parentId] === true) { reachable = true; break }
             if (seen[parentId] === true) break
             seen[parentId] = true
             cursor = nodes[parentId]
@@ -6782,9 +6931,10 @@ window.__ModuleLoader__.load({
           if (!item || item.kind !== 'session' || typeof item.id !== 'string') continue
           const key = 'session:' + item.id
           if (checked[key] === true) continue
-          // A named node is only allowed when the tree selection says it is checked.
+          // A named node is only allowed when the tree selection says it is checked AND the
+          // reviewed Session row that owns it is still checked (SPEC §9).
           if (nodes[item.id] !== undefined) {
-            if (nodeIsSelected(state, item.id) === true) continue
+            if (nodeIsSelected(state, item.id) === true && nodeRootChecked(state, item.id) === true) continue
             return true
           }
           for (let j = 0; j < state.targets.length; j += 1) {
@@ -6803,8 +6953,70 @@ window.__ModuleLoader__.load({
         return count
       }
 
+      /**
+       * Fit a workspace-clear batch under the Host's 64-target cap (SPEC §9): keep the longest
+       * prefix of checked rows whose rows + explicit node targets fit, and report the dropped
+       * tail so the caller can keep it queued for the next batch.
+       * @returns {{ rows: object[], nodeTargets: object[], dropped: object[] } | null} null when
+       *   even one root cannot fit.
+       */
+      function fitClearBatchTargets(state, rows, includeDescendants) {
+        const list = Array.isArray(rows) ? rows : []
+        let keep = Math.min(list.length, MAX_PLAN_TARGETS)
+        while (keep >= 1) {
+          const prefix = list.slice(0, keep)
+          const nodeTargets = includeDescendants === true ? [] : explicitNodeTargetsForRoots(state, prefix)
+          if (prefix.length + nodeTargets.length <= MAX_PLAN_TARGETS) {
+            return { rows: prefix, nodeTargets: nodeTargets, dropped: list.slice(keep) }
+          }
+          keep -= 1
+        }
+        if (list.length === 0) return { rows: [], nodeTargets: [], dropped: [] }
+        return null
+      }
+
+      /** Push a trimmed clear batch's dropped rows to the front of the remaining queue (deduped). */
+      function queueDroppedClearTargets(clear, dropped) {
+        if (clear === null || clear === undefined) return clear
+        const excluded = clear.excluded && typeof clear.excluded === 'object' ? clear.excluded : {}
+        const existing = Array.isArray(clear.queued) ? clear.queued : []
+        const seen = Object.create(null)
+        const queued = []
+        const tail = Array.isArray(dropped) ? dropped : []
+        for (let i = 0; i < tail.length; i += 1) {
+          const target = tail[i]
+          if (!target || typeof target.id !== 'string' || target.id === '') continue
+          const key = targetKey(target)
+          // Never re-add a row the user excluded, and never duplicate a queued row.
+          if (excluded[key] === true || seen[key] === true) continue
+          seen[key] = true
+          const queuedTarget = { kind: 'session', id: target.id }
+          if (typeof target.cwd === 'string' && target.cwd !== '') queuedTarget.cwd = target.cwd
+          queued.push(queuedTarget)
+        }
+        for (let i = 0; i < existing.length; i += 1) {
+          const target = existing[i]
+          if (!target) continue
+          const key = targetKey(target)
+          if (seen[key] === true) continue
+          seen[key] = true
+          queued.push(target)
+        }
+        return Object.assign({}, clear, { queued: queued })
+      }
+
+      /** Fail locally before the wire: the Host would refuse a plan naming more than 64 targets. */
+      function failPlanTooManyTargets() {
+        dialogStore.setState({
+          phase: 'failed',
+          refreshing: false,
+          failureStage: 'plan',
+          error: { code: 'TOO_MANY_TARGETS' },
+        })
+      }
+
       function startPlan() {
-        const state = dialogStore.getSnapshot()
+        let state = dialogStore.getSnapshot()
         if (state.phase === 'idle' || state.targets.length === 0) return
         const planned = plannedTargets(state)
         if (planned.length === 0) {
@@ -6821,19 +7033,45 @@ window.__ModuleLoader__.load({
           startPlan()
           return
         }
-        const handle = beginDialogFetch()
+        // SPEC §9: with the descendant switch off the checked nodes are named explicitly, so the
+        // Host plans exactly the selected logs; with it on the family is planned through
+        // `includeDescendants: true` and only the reviewed rows are targets. Both forms must fit
+        // the Host's 64-target plan cap (`MAX_PLAN_TARGETS`, SPEC §4.3); a workspace clear trims
+        // its batch instead of failing, keeping the overflow queued for the next round.
+        let planRows = planned
+        let explicit = explicitNodeTargets(state)
+        if (state.clear !== null) {
+          const fit = fitClearBatchTargets(state, planned, state.includeDescendants === true)
+          if (fit === null) {
+            failPlanTooManyTargets()
+            return
+          }
+          if (fit.dropped.length > 0) {
+            dialogStore.setState({
+              targets: fit.rows,
+              selection: fit.rows.map(targetKey),
+              clear: queueDroppedClearTargets(state.clear, fit.dropped),
+              plan: null,
+              refreshing: false,
+            })
+            state = dialogStore.getSnapshot()
+          }
+          planRows = fit.rows
+          explicit = fit.nodeTargets
+        }
+        if (planRows.length + explicit.length > MAX_PLAN_TARGETS) {
+          failPlanTooManyTargets()
+          return
+        }
         const hasPlan = state.plan !== null && state.plan !== undefined
+        const handle = beginDialogFetch()
         dialogStore.setState({
           phase: hasPlan ? 'review' : 'planning',
           refreshing: hasPlan,
           error: null,
           failureStage: null,
         })
-        // SPEC §9: with the descendant switch off the checked nodes are named explicitly, so the
-        // Host plans exactly the selected logs; with it on the family is planned through
-        // `includeDescendants: true` and only the reviewed rows are targets.
-        const planTargets = planned.map(function (target) { return { kind: target.kind, id: target.id } })
-        const explicit = explicitNodeTargets(state)
+        const planTargets = planRows.map(function (target) { return { kind: target.kind, id: target.id } })
         for (let i = 0; i < explicit.length; i += 1) planTargets.push(explicit[i])
         const body = {
           targets: planTargets,
@@ -7391,7 +7629,26 @@ window.__ModuleLoader__.load({
         if ((checked === true) === wasChecked) return
         if (checked === true) selected[key] = true
         else delete selected[key]
-        dialogStore.setState(selectionPatch(state, Object.keys(selected)))
+        const patch = selectionPatch(state, Object.keys(selected))
+        // Row/tree coherence (SPEC §9): an un-checked Session row must not leave its known
+        // subagent nodes checked, or an explicit re-plan could still name them.
+        if (checked !== true && key.indexOf('session:') === 0) {
+          const rootId = key.slice('session:'.length)
+          const nodes = state.knownNodes && typeof state.knownNodes === 'object' ? state.knownNodes : {}
+          const nodeChecked = checkedNodeSet(state)
+          const nodeIds = Object.keys(nodes)
+          for (let i = 0; i < nodeIds.length; i += 1) {
+            const node = nodes[nodeIds[i]]
+            if (node && node.rootId === rootId) delete nodeChecked[nodeIds[i]]
+          }
+          const nextNodes = []
+          for (let i = 0; i < nodeIds.length; i += 1) {
+            if (nodeChecked[nodeIds[i]] === true) nextNodes.push(nodeIds[i])
+          }
+          patch.nodeSelection = nextNodes
+          if (state.clear !== null) patch.clear = clearNodeExclusionPatch(patch.clear || state.clear, nodes, nodeChecked)
+        }
+        dialogStore.setState(patch)
         startPlan()
       }
 
@@ -7438,7 +7695,9 @@ window.__ModuleLoader__.load({
         const patch = selectionPatch(state, state.selection)
         patch.nodeSelection = nextSelection
         patch.includeDescendants = false
-        patch.descendantsAutoOff = true
+        // The auto-off explanation only applies when THIS toggle turned the switch off; a node
+        // edit while it was already off (or inside a workspace clear) must not raise it (§9).
+        patch.descendantsAutoOff = state.includeDescendants === true || state.descendantsAutoOff === true
         if (state.clear !== null) patch.clear = clearNodeExclusionPatch(patch.clear || state.clear, nodes, selected)
         dialogStore.setState(patch)
         startPlan()
@@ -7476,7 +7735,6 @@ window.__ModuleLoader__.load({
           }
           patch.nodeSelection = nextNodes
           patch.includeDescendants = false
-          patch.descendantsAutoOff = true
           if (state.clear !== null) {
             const checkedSet = Object.create(null)
             for (let i = 0; i < nextNodes.length; i += 1) checkedSet[nextNodes[i]] = true
@@ -7782,17 +8040,29 @@ window.__ModuleLoader__.load({
 
       /** @param {boolean} includeDescendants - ask the Host for the subagent closure. */
       function requestClearBatchPlan(includeDescendants) {
-        const state = dialogStore.getSnapshot()
+        let state = dialogStore.getSnapshot()
         if (state.clear === null || state.targets.length === 0) return
-        const handle = beginDialogFetch()
         // A batch normally asks for the descendant closure; when an un-checked node forced the
         // expansion off, the checked nodes of this batch are named explicitly so a refilled page
         // cannot re-add the excluded ones (SPEC §9).
-        const planTargets = state.targets.map(function (target) { return { kind: target.kind, id: target.id } })
-        if (includeDescendants !== true) {
-          const explicit = explicitNodeTargetsForBatch(state)
-          for (let i = 0; i < explicit.length; i += 1) planTargets.push(explicit[i])
+        // The Host caps a plan at 64 targets: an explicit batch that would overflow is trimmed
+        // here (longest fitting prefix) and the overflow is pushed back onto the clear queue.
+        const fit = fitClearBatchTargets(state, state.targets, includeDescendants)
+        if (fit === null) {
+          failPlanTooManyTargets()
+          return
         }
+        if (fit.dropped.length > 0) {
+          dialogStore.setState({
+            targets: fit.rows,
+            selection: fit.rows.map(targetKey),
+            clear: queueDroppedClearTargets(state.clear, fit.dropped),
+          })
+          state = dialogStore.getSnapshot()
+        }
+        const handle = beginDialogFetch()
+        const planTargets = fit.rows.map(function (target) { return { kind: target.kind, id: target.id } })
+        for (let i = 0; i < fit.nodeTargets.length; i += 1) planTargets.push(fit.nodeTargets[i])
         const body = {
           targets: planTargets,
           mode: state.mode,
@@ -8033,6 +8303,7 @@ window.__ModuleLoader__.load({
         ? deps.capabilities
         : { usage: false, projectionCache: false, openPath: false }
       const catalogApi = deps.catalog && typeof deps.catalog.getSnapshot === 'function' ? deps.catalog : null
+      const scheduleRestoreRefresh = typeof deps.scheduleRestoreRefresh === 'function' ? deps.scheduleRestoreRefresh : null
       const pageStore = createStore(initialPageState())
       // One tracker for every request family (inventory/trash/deferred/settings/...):
       // it owns the AbortController per family and drops superseded responses by token.
@@ -8159,6 +8430,9 @@ window.__ModuleLoader__.load({
               deferredConfirmAt: deferredConfirm === current.deferredConfirm ? current.deferredConfirmAt : 0,
               usageAvailable: inventory.capabilities.usage ? current.usageAvailable : null,
               usageError: inventory.capabilities.usage ? current.usageError : null,
+              sessionSort: !inventory.capabilities.usage && current.sessionSort === 'usage'
+                ? 'newest'
+                : current.sessionSort,
               usage: usage,
               usageSignatures: usageSignatures,
               usageFailed: usageFailed,
@@ -9054,13 +9328,18 @@ window.__ModuleLoader__.load({
             usageQueue = []
             usageQueued = Object.create(null)
             usageFailedIds = []
-            pageStore.setState({
-              usageLoading: false,
-              usageAvailable: false,
-              usage: {},
-              usageSignatures: {},
-              usageFailed: {},
-              usageError: null,
+            pageStore.setState(function (current) {
+              return Object.assign({}, current, {
+                usageLoading: false,
+                usageAvailable: false,
+                usage: {},
+                usageSignatures: {},
+                usageFailed: {},
+                usageError: null,
+                // The usage sort option disappears with the surfaces; never leave the select on a
+                // value it no longer offers (SPEC §10).
+                sessionSort: current.sessionSort === 'usage' ? 'newest' : current.sessionSort,
+              })
             })
             return
           }
@@ -9164,8 +9443,16 @@ window.__ModuleLoader__.load({
             usageFailed: usageFailed,
           })
         })
-        // The failed chunk is still marked as queued: release it before re-asking.
-        for (let i = 0; i < ids.length; i += 1) delete usageQueued[ids[i]]
+        // The failed chunk was put back on the queue by `requeueUsage`. Drain those exact entries
+        // (and their queued flags) before re-enqueuing, or the retry would ask for every id twice.
+        if (ids.length > 0) {
+          const retried = Object.create(null)
+          for (let i = 0; i < ids.length; i += 1) {
+            retried[ids[i]] = true
+            delete usageQueued[ids[i]]
+          }
+          usageQueue = usageQueue.filter(function (id) { return retried[id] !== true })
+        }
         if (ids.length > 0) {
           enqueueUsageFor(ids)
         } else {
@@ -9224,6 +9511,8 @@ window.__ModuleLoader__.load({
           confirmPurgeAt: 0,
           actionError: null,
           actionNotice: null,
+          // The inline open error belongs to the tab the user was on; leaving it clears the banner.
+          openError: null,
           deferredConfirm: null,
           deferredConfirmAt: 0,
           retainedConfirm: null,
@@ -9367,7 +9656,10 @@ window.__ModuleLoader__.load({
           // use the same refresh path a dialog delete uses. The mutation bump is
           // what reloads the mounted settings page (inventory + loaded trash), so
           // an extra explicit load here would double every request.
-          notifyMutation()
+          const refreshPending = notifyMutation()
+          // A restore can land while the catalog's single-flight refresh is already in flight; one
+          // follow-up refresh after it settles makes sure the restored row appears without reload.
+          if (kind === 'restore' && scheduleRestoreRefresh !== null) scheduleRestoreRefresh(refreshPending)
         }).catch(function (error) {
           requests.end(handle)
           if (isAbortError(error)) return
@@ -9664,6 +9956,10 @@ window.__ModuleLoader__.load({
         if (!menus || typeof menus.notify !== 'function') return
         try { menus.notify(text, false) } catch (error) { /* feedback is best effort */ }
       }
+      const capabilityProbe = createCapabilityProbe(ctx, capabilities)
+      ctx.effect(function () { return capabilityProbe.dispose }, 'dsh-cleanup: capability probe')
+      const restoreRefresh = createRestoreRefreshScheduler(ctx)
+      ctx.effect(function () { return restoreRefresh.dispose }, 'dsh-cleanup: session refresh follow-up')
       const dialog = createDialogController({
         ctx: ctx,
         t: t,
@@ -9673,7 +9969,13 @@ window.__ModuleLoader__.load({
         notifyContextMenu: notifyContextMenu,
       })
       const createPageStoreForMount = function () {
-        return createPageStore({ t: t, notifyMutation: notifyMutation, capabilities: capabilities, catalog: catalog })
+        return createPageStore({
+          t: t,
+          notifyMutation: notifyMutation,
+          capabilities: capabilities,
+          catalog: catalog,
+          scheduleRestoreRefresh: restoreRefresh.schedule,
+        })
       }
       const api = {
         t: t,

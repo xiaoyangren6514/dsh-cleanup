@@ -7,7 +7,49 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-_No changes yet._
+_Fixes for the 0.6.0 review; not published yet._
+
+### Fixed
+
+- **The Sessions tab no longer crashes while the inventory is loading.** The usage effect sat below
+  an early return, so the first render (inventory still null) and the loaded render ran a different
+  number of hooks; React threw and the storage-cleanup section blanked. All hooks now run
+  unconditionally, with a regression test that renders both phases.
+- **The usage fold cache actually works.** The reader required `eventCount` in the persistence
+  snapshot, which the shipped JSONL backend never emits, so every request re-read every named log.
+  The cache key now uses the snapshot's opaque `revision` (plus `sizeBytes` when present), falls back
+  to `(eventCount, sizeBytes)`, and is skipped when neither exists.
+- **Targets above 64 no longer dead-end a review.** Checked rows plus per-node tree logs are measured
+  before the plan request; an over-budget ordinary review fails locally with `TOO_MANY_TARGETS`
+  instead of sending a plan the Host would reject, and a workspace-clear batch shrinks itself and
+  re-queues the rest.
+- **Row and tree selection agree.** Un-checking a reviewed row clears its descendants from the
+  explicit node selection, its tree renders unchecked and disabled with an explanation, and the
+  family count covers only checked roots — the dialog can no longer delete logs under a row that
+  says "not selected".
+- **A restored Session reappears.** A trash restore schedules one follow-up session-list refresh so
+  a refresh already in flight cannot swallow the restored row.
+- **The opener cannot hang the route.** The Host answers once the launcher process is spawned
+  instead of waiting for it to exit; on macOS `.app`/`.bundle`/`.workflow`/`.pkg` paths are revealed
+  with `open -R` instead of being launched.
+- **Usage retries no longer duplicate a chunk.** A failed chunk is drained from the queue before the
+  retry re-enqueues it, so one retry means one request.
+- **Projection-cache cleanup reports honestly.** An absent record (a Session never checkpointed)
+  counts as dropped instead of reporting a failure it never had.
+- **Usage requests carry the caller's abort signal** and fold at most four cold reads concurrently;
+  `usage`/`failed` maps are prototype-less so an id such as `__proto__` appears as data.
+- **Contract and release hygiene.** The contract check now expands the `files` globs (a renamed
+  module can no longer silently drop out of the tarball), parses every plugin-manager locale file,
+  scans the opener module for undocumented wire codes, and checks the documented open-kind and
+  capability vocabulary. `npm test` runs `scripts/run-tests.mjs`, which expands the test glob itself
+  so Node 20 and 22 behave identically; CI runs `npm test`, the contract check and
+  `npm pack --dry-run`.
+
+### Changed
+
+- The review dialog's open-folder control is documented as single-target only and its accessible
+  name uses the target title instead of a raw workspace path; usage columns gained accessible names
+  and the usage sort falls back to newest-first when the Host cannot fold usage.
 
 ## [0.6.0] - 2026-11-09
 

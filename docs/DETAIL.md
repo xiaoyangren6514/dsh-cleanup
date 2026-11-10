@@ -74,7 +74,11 @@ Host 没有查询接口时（`inventory.capabilities.usage` 为 `false`），用
 
 Host 平台有目录打开器时（macOS、Windows、Linux；`inventory.capabilities.openPath`），这些位置会出现**打开文件夹**入口：工作区行、会话行、回收站条目、复核弹窗摘要，以及回收站页签头部的**打开缓存目录**。
 
-调用只传 `kind` 与 `id`——`workspace` / `session` / `trash` / `cache`——**从不传路径**：Host 用 `id` 自己解析目录（工作区目录、会话目录、回收站条目目录，或 `<DSH_HOME>/storages/session_projcache`），再交给平台打开器。因此界面无法要求打开任意路径，Host 也不会相信调用方给出的路径。失败按普通错误文案呈现：平台没有打开器（`OPEN_UNAVAILABLE`）、打开器无法启动（`OPEN_FAILED`）、目标已不存在或读不出（`IO_ERROR`）、回收站条目未知（`TRASH_ENTRY_UNKNOWN`）、工作区或会话已不存在（`UNKNOWN_WORKSPACE` / `UNKNOWN_SESSION`）。调用是 fire-and-forget：Host 只要解析出目录就返回成功，文件管理器最终是否聚焦不算失败。
+调用只传 `kind` 与 `id`——`workspace` / `session` / `trash` / `cache`——**从不传路径**：Host 用 `id` 自己解析目录（工作区目录、会话目录、回收站条目目录，或 `<DSH_HOME>/storages/session_projcache`），再交给平台打开器。因此界面无法要求打开任意路径，Host 也不会相信调用方给出的路径。失败按普通错误文案呈现：平台没有打开器（`OPEN_UNAVAILABLE`）、打开器无法启动（`OPEN_FAILED`）、目标已不存在或读不出（`IO_ERROR`）、回收站条目未知（`TRASH_ENTRY_UNKNOWN`）、工作区或会话已不存在（`UNKNOWN_WORKSPACE` / `UNKNOWN_SESSION`）。调用是 fire-and-forget：Host 在**启动器进程被创建后**就返回，不等它退出，所以常驻的启动器不会把请求挂住；文件管理器最终是否聚焦不算失败。复核弹窗摘要上的入口只在**单目标**复核里出现（多目标摘要无法唯一指名一个目录），其无障碍名使用目标标题而不是原始路径。macOS 上以 `.app` / `.bundle` / `.workflow` / `.pkg` 结尾的目录是应用包，朴素 `open` 会**执行**它，因此 Host 改用 `open -R` 在 Finder 中显示。
+
+### 家族树的目标上限
+
+一次复核的计划最多携带 64 个目标（Host 的安全预算）。当勾选的行 + 逐节点选择的日志超过预算时，弹窗会**在发出请求之前**以客户端错误 `TOO_MANY_TARGETS` 失败，并提示缩小选择或分批清理；「清空工作区」批次不会失败，而是自动缩小本批（行 + 节点 ≤ 64），把剩余行放回队列交给后续批次。单个家族本身就超过预算时同样给出该提示。
 
 ### 删除之后（0.6.0）
 

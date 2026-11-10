@@ -16,9 +16,13 @@ const UNSUPPORTED = ['freebsd', 'openbsd', 'netbsd', 'aix', 'sunos', 'android', 
 
 /**
  * A `child_process.spawn`-shaped fake. It records every call and lets the test script the child's
- * event sequence: by default it reports a clean `close`, unless the script says otherwise.
+ * event sequence: by default it reports a clean `spawn` followed by a `close`, unless the script says
+ * otherwise.
  *
- * @param {object} [script] - `{ exitCode, error, throwSync }`.
+ * `neverExit: true` models a launcher that stays alive after starting (a file manager window): it
+ * emits `spawn` and then nothing, which is exactly the case a fire-and-forget opener must resolve on.
+ *
+ * @param {object} [script] - `{ exitCode, error, throwSync, neverExit }`.
  * @returns {{ spawn: Function, calls: object[], children: EventEmitter[] }}
  */
 function makeFakeSpawn(script = {}) {
@@ -36,14 +40,14 @@ function makeFakeSpawn(script = {}) {
     }
     children.push(child)
     // Emit asynchronously like a real child process, after the implementation attached its
-    // listeners (a synchronous emit would make a resolve-on-close implementation look broken).
+    // listeners (a synchronous emit would make a resolve-on-spawn implementation look broken).
     process.nextTick(() => {
       if (script.error !== undefined) {
         child.emit('error', script.error)
         return
       }
       child.emit('spawn')
-      child.emit('close', script.exitCode ?? 0, null)
+      if (script.neverExit !== true) child.emit('close', script.exitCode ?? 0, null)
     })
     return child
   }
@@ -117,6 +121,39 @@ describe('openDirectory command table (SPEC §4.11)', () => {
     assert.equal(result, undefined)
     // No shell string anywhere: the second positional argument is the argv array, not a command line.
     assert.equal(typeof fake.calls[0].args, 'object')
+  })
+
+  test('resolves once the launcher spawned and never waits for it to exit', async () => {
+    // A long-lived launcher (open file-manager window) must not hang POST /api/cleanup.open.
+    const fake = makeFakeSpawn({ neverExit: true })
+    const result = await openDirectory(pathFor('linux'), { platform: 'linux', spawn: fake.spawn })
+    assert.equal(result, undefined)
+    assert.equal(fake.calls.length, 1)
+    assert.equal(fake.children[0].unrefCalled, true)
+  })
+
+  test('reveals macOS application bundles with "open -R" instead of launching them', async () => {
+    for (const suffix of ['.app', '.bundle', '.workflow', '.pkg']) {
+      const fake = makeFakeSpawn()
+      const target = `/Applications/Some Tool${suffix}`
+      await openDirectory(target, { platform: 'darwin', spawn: fake.spawn })
+      assert.equal(fake.calls.length, 1)
+      assert.equal(fake.calls[0].command, 'open')
+      assert.deepEqual(fake.calls[0].args, ['-R', target], `${suffix} must be revealed, not launched`)
+    }
+  })
+
+  test('keeps the plain argv for ordinary directories and for bundle-named paths off darwin', async () => {
+    const darwin = makeFakeSpawn()
+    await openDirectory('/Users/someone/.dsh', { platform: 'darwin', spawn: darwin.spawn })
+    assert.deepEqual(darwin.calls[0].args, ['/Users/someone/.dsh'])
+
+    for (const platform of ['linux', 'win32']) {
+      const fake = makeFakeSpawn()
+      const target = pathFor(platform) + '.app'
+      await openDirectory(target, { platform, spawn: fake.spawn })
+      assert.deepEqual(fake.calls[0].args, [target], `${platform} has no launchable-bundle special case`)
+    }
   })
 })
 

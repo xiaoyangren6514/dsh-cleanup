@@ -210,15 +210,23 @@ function makeToolsService(captured, disposers) {
 
 /**
  * A fake shipped `storageDomain` service (SPEC §3/§5.5): `get('session_projcache').table('sessions')`
- * exposes the record `delete(id)`. `dropped` records the ids actually asked for.
+ * exposes the record `delete(id)`/`get(id)` pair. `dropped` records the ids actually asked for.
+ *
+ * The real `KvTable.delete` resolves `false` when there is no row to delete, so `get` is the proof
+ * that an absent record is already gone. `options.deleteResult`/`options.getResult` model that
+ * already-absent record (`false` + `undefined`) and the defensive case where a record survived.
  * @param {string[]} dropped - ids the table delete was called with.
+ * @param {{ deleteResult?: boolean, getResult?: unknown }} [options] - fake table results.
  * @returns {object} service implementing `get(name)`.
  */
-function fakeStorageDomain(dropped) {
+function fakeStorageDomain(dropped, options = {}) {
   const table = {
     async delete(id) {
       dropped.push(id)
-      return true
+      return 'deleteResult' in options ? options.deleteResult : true
+    },
+    get() {
+      return options.getResult
     },
   }
   const domain = {
@@ -911,6 +919,41 @@ describe('usage route (SPEC §4.10)', () => {
     assert.equal(response.body.usage.s1.requestCount, 1)
     await dispose()
   })
+
+  test('forwards the request AbortSignal and answers CANCELLED before reading any log', async () => {
+    const world = await makeWorld()
+    let reads = 0
+    const sessionQuery = {
+      async readSession(id) {
+        reads += 1
+        return { session: { id }, inheritedEventCount: 0, events: [assistantUsageEvent('m1')] }
+      },
+    }
+    const { registrations, dispose } = startPlugin(world, { services: { sessionQuery } })
+    const controller = new AbortController()
+    controller.abort()
+    const response = await call(registrations, '/api/cleanup.usage', { sessionIds: ['s1'] }, { signal: controller.signal })
+    assert.equal(response.status, 200, 'an aborted usage request is a domain answer, not a transport failure')
+    assert.equal(response.body.ok, false)
+    assert.equal(response.body.error.code, 'CANCELLED')
+    assert.equal(reads, 0, 'no session log was read')
+    await dispose()
+  })
+
+  test('returns a prototype-key id as data, never as a prototype mutation', async () => {
+    const world = await makeWorld()
+    const observations = new Map([
+      ['__proto__', { session: { id: '__proto__' }, inheritedEventCount: 0, events: [assistantUsageEvent('m1', 7, 3)] }],
+    ])
+    const { registrations, dispose } = startPlugin(world, { services: { sessionQuery: fakeSessionQuery(observations) } })
+    const response = await call(registrations, '/api/cleanup.usage', { sessionIds: ['__proto__'] })
+    assert.equal(response.status, 200)
+    assert.equal(response.body.ok, true)
+    assert.ok(Object.prototype.hasOwnProperty.call(response.body.usage, '__proto__'), 'the id is an own data key')
+    assert.equal(response.body.usage['__proto__'].totalTokens, 7 + 3)
+    assert.equal({}.totalTokens, undefined, 'nothing leaked onto Object.prototype')
+    await dispose()
+  })
 })
 
 // #endregion
@@ -1014,6 +1057,38 @@ describe('delete route: projection-cache drop and api-session/removed', () => {
     assert.equal(deleted.body.ok, true)
     assert.equal(deleted.body.result.items[0].cacheDropped, false)
     assert.deepEqual(emits, [['api-session/removed', 's1']])
+    await dispose()
+  })
+
+  test('an already-absent projection-cache record still reports cacheDropped:true', async () => {
+    const world = await makeWorld()
+    const dropped = []
+    // The shipped KvTable.delete resolves false when there is no row; get proves the row is gone.
+    const { registrations, dispose } = startPlugin(world, {
+      services: { storageDomain: fakeStorageDomain(dropped, { deleteResult: false }) },
+    })
+    const planned = await call(registrations, '/api/cleanup.plan', { targets: [{ kind: 'session', id: 's1' }], mode: 'trash' })
+    assert.equal(planned.body.ok, true)
+    const deleted = await call(registrations, '/api/cleanup.delete', { planId: planned.body.plan.planId })
+    assert.equal(deleted.status, 200)
+    assert.equal(deleted.body.ok, true)
+    assert.equal(deleted.body.result.items[0].status, 'trashed')
+    assert.equal(deleted.body.result.items[0].cacheDropped, true, 'an absent record is the desired end state')
+    assert.deepEqual(dropped, ['s1'])
+    await dispose()
+  })
+
+  test('a record that survives the delete stays cacheDropped:false', async () => {
+    const world = await makeWorld()
+    const dropped = []
+    const { registrations, dispose } = startPlugin(world, {
+      services: { storageDomain: fakeStorageDomain(dropped, { deleteResult: false, getResult: { ver: 1 } }) },
+    })
+    const planned = await call(registrations, '/api/cleanup.plan', { targets: [{ kind: 'session', id: 's1' }], mode: 'trash' })
+    const deleted = await call(registrations, '/api/cleanup.delete', { planId: planned.body.plan.planId })
+    assert.equal(deleted.body.ok, true)
+    assert.equal(deleted.body.result.items[0].cacheDropped, false, 'the record is still there, so the drop failed')
+    assert.deepEqual(dropped, ['s1'])
     await dispose()
   })
 

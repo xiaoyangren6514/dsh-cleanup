@@ -290,7 +290,7 @@ describe('createUsageReader: snapshot-keyed cache (SPEC §5.11)', () => {
     assert.deepEqual(world.calls, ['s1'], 'one read per unchanged Session')
     assert.deepEqual(second, first)
     assert.equal(first.usage.s1.totalTokens, 11)
-    assert.deepEqual(first.failed, {})
+    assert.deepEqual(Object.keys(first.failed), [], 'no failed entries')
   })
 
   test('re-folds when the snapshot eventCount changes', async () => {
@@ -359,7 +359,11 @@ describe('createUsageReader: snapshot-keyed cache (SPEC §5.11)', () => {
   test('an empty id list answers empty maps without reading anything', async () => {
     const world = makeReaderWorld()
     const result = await world.reader.readMany([])
-    assert.deepEqual(result, { usage: {}, failed: {} })
+    assert.deepEqual(Object.keys(result).sort(), ['failed', 'usage'])
+    assert.deepEqual(Object.keys(result.usage), [])
+    assert.deepEqual(Object.keys(result.failed), [])
+    assert.equal(Object.getPrototypeOf(result.usage), null, 'the usage map is prototype-free')
+    assert.equal(Object.getPrototypeOf(result.failed), null, 'the failed map is prototype-free')
     assert.deepEqual(world.calls, [])
   })
 })
@@ -386,7 +390,7 @@ describe('createUsageReader: per-id failure classification (SPEC §4.10)', () =>
     const result = await world.reader.readMany(['ok', 'enoent', 'named', 'broken', 'headerless'])
     assert.deepEqual(Object.keys(result.usage), ['ok'], 'the healthy id still folds')
     assert.equal(result.usage.ok.totalTokens, 11)
-    assert.deepEqual(result.failed, {
+    assert.deepEqual({ ...result.failed }, {
       enoent: 'UNKNOWN_SESSION',
       named: 'UNKNOWN_SESSION',
       broken: 'READ_FAILED',
@@ -399,8 +403,8 @@ describe('createUsageReader: per-id failure classification (SPEC §4.10)', () =>
     world.sessions.set('broken', new Error('boom'))
     const result = await world.reader.readMany(['broken'])
     assert.deepEqual(Object.keys(result).sort(), ['failed', 'usage'])
-    assert.deepEqual(result.usage, {})
-    assert.deepEqual(result.failed, { broken: 'READ_FAILED' })
+    assert.deepEqual(Object.keys(result.usage), [])
+    assert.deepEqual({ ...result.failed }, { broken: 'READ_FAILED' })
     for (const value of Object.values(result.failed)) assert.equal(typeof value, 'string')
   })
 
@@ -416,5 +420,136 @@ describe('createUsageReader: per-id failure classification (SPEC §4.10)', () =>
     assert.equal(result.usage.fork.totalTokens, 4 + 0 + 1 + 2)
   })
 })
+
+describe('createUsageReader: real DSH JSONL snapshot identity (revision fallback)', () => {
+  /** The shipped JSONL backend's snapshot shape: no eventCount, an opaque revision. */
+  function realSnapshot(id, revision, sizeBytes = 128) {
+    return {
+      header: { id, createdAt: 1 },
+      formatStatus: 'current',
+      revision,
+      sizeBytes,
+      location: { path: `/sessions/--p--/${id}/log.jsonl` },
+    }
+  }
+
+  test('caches by the revision when the snapshot has no eventCount and re-folds when it changes', async () => {
+    const world = makeReaderWorld({ snapshots: [['s1', realSnapshot('s1', 'rev-1')]] })
+    world.sessions.set('s1', storedSession('s1', [assistantEvent(usageOf(10, 0, 0, 1), 'm1')]))
+    const first = await world.reader.readMany(['s1'])
+    const second = await world.reader.readMany(['s1'])
+    assert.deepEqual(world.calls, ['s1'], 'an unchanged revision is answered from memory')
+    assert.deepEqual(second.usage.s1, first.usage.s1)
+    assert.equal(first.usage.s1.totalTokens, 11)
+    // A changed revision is a changed log: it must be read again.
+    world.sessions.set('s1', storedSession('s1', [
+      assistantEvent(usageOf(10, 0, 0, 1), 'm1'),
+      assistantEvent(usageOf(5, 0, 0, 1), 'm2'),
+    ]))
+    world.snapshots.set('s1', realSnapshot('s1', 'rev-2'))
+    const refreshed = await world.reader.readMany(['s1'])
+    assert.deepEqual(world.calls, ['s1', 's1'], 'a changed revision re-reads the log')
+    assert.equal(refreshed.usage.s1.requestCount, 2)
+    assert.equal(refreshed.usage.s1.totalTokens, 10 + 1 + 5 + 1)
+  })
+
+  test('treats a size change under the same revision as a changed log too', async () => {
+    const world = makeReaderWorld({ snapshots: [['s1', realSnapshot('s1', 'rev-1', 10)]] })
+    world.sessions.set('s1', storedSession('s1', [assistantEvent(usageOf(10, 0, 0, 1), 'm1')]))
+    await world.reader.readMany(['s1'])
+    world.snapshots.set('s1', realSnapshot('s1', 'rev-1', 11))
+    await world.reader.readMany(['s1'])
+    assert.deepEqual(world.calls, ['s1', 's1'])
+  })
+
+  test('caches a revision-only snapshot and skips a snapshot with no change token', async () => {
+    const revisionOnly = makeReaderWorld({ snapshots: [['s1', { revision: 'rev-1' }]] })
+    revisionOnly.sessions.set('s1', storedSession('s1', [assistantEvent(usageOf(1, 0, 0, 1), 'm1')]))
+    await revisionOnly.reader.readMany(['s1'])
+    await revisionOnly.reader.readMany(['s1'])
+    assert.deepEqual(revisionOnly.calls, ['s1'], 'a revision alone is a usable change token')
+
+    const unusable = makeReaderWorld({ snapshots: [['s1', { header: { id: 's1' } }]] })
+    unusable.sessions.set('s1', storedSession('s1', [assistantEvent(usageOf(1, 0, 0, 1), 'm1')]))
+    await unusable.reader.readMany(['s1'])
+    await unusable.reader.readMany(['s1'])
+    assert.equal(unusable.calls.length, 2, 'no revision and no eventCount means no caching')
+  })
+})
+
+describe('createUsageReader: prototype-safe ids', () => {
+  test('keeps "__proto__" and "constructor" ids as ordinary data rows', async () => {
+    const world = makeReaderWorld({
+      snapshots: [
+        ['__proto__', { revision: 'rev-proto' }],
+        ['constructor', { revision: 'rev-ctor' }],
+      ],
+    })
+    world.sessions.set('__proto__', storedSession('__proto__', [assistantEvent(usageOf(10, 2, 3, 1), 'm1')]))
+    world.sessions.set('constructor', Object.assign(new Error('the log is corrupt')))
+    const result = await world.reader.readMany(['__proto__', 'constructor'])
+    assert.equal(Object.getPrototypeOf(result.usage), null, 'the usage map is null-prototype')
+    assert.equal(Object.getPrototypeOf(result.failed), null, 'the failed map is null-prototype')
+    assert.deepEqual(Object.keys(result.usage), ['__proto__'], 'the id is an own data property')
+    assert.deepEqual(Object.keys(result.failed), ['constructor'])
+    assert.equal(result.usage['__proto__'].totalTokens, 10 + 3 + 2 + 1)
+    assert.equal(result.failed['constructor'], 'READ_FAILED')
+    assert.equal(Object.prototype.polluted, undefined, 'nothing leaked onto Object.prototype')
+  })
+})
+
+describe('createUsageReader: bounded concurrency + cancellation (SPEC §4.10/§5.11)', () => {
+  test('reads at most four Sessions at once and assembles the maps in request order', async () => {
+    let inFlight = 0
+    let peak = 0
+    const ids = Array.from({ length: 12 }, (_, index) => `s${index}`)
+    const reader = createUsageReader({
+      async readSession(id) {
+        inFlight += 1
+        peak = Math.max(peak, inFlight)
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        inFlight -= 1
+        return { session: { id }, events: [] }
+      },
+      snapshotOf: (id) => ({ revision: `rev-${id}` }),
+    })
+    const result = await reader.readMany(ids)
+    assert.equal(result.usage.s0.totalTokens, 0)
+    assert.equal(peak, 4, 'the batch never exceeds four concurrent log reads')
+    assert.deepEqual(Object.keys(result.usage), ids, 'rows are assembled in request order')
+  })
+
+  test('stops starting new reads once the signal aborts and answers with what it has', async () => {
+    const controller = new AbortController()
+    const calls = []
+    const reader = createUsageReader({
+      async readSession(id) {
+        calls.push(id)
+        // Abort while the first (already started) read is in flight.
+        controller.abort()
+        return { session: { id }, events: [assistantEvent(usageOf(1, 0, 0, 1), `m-${id}`)] }
+      },
+      snapshotOf: (id) => ({ revision: `rev-${id}` }),
+    })
+    const result = await reader.readMany(['s1', 's2', 's3', 's4', 's5'], { signal: controller.signal })
+    assert.deepEqual(Object.keys(result.usage), ['s1'], 'the read that already started is kept')
+    assert.equal(result.usage.s1.totalTokens, 2)
+    assert.ok(!calls.includes('s5'), 'no read starts after the abort')
+    assert.ok(calls.length < 5)
+  })
+
+  test('an already-aborted signal starts no read at all', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const world = makeReaderWorld()
+    world.sessions.set('s1', storedSession('s1', [assistantEvent(usageOf(1, 0, 0, 1), 'm1')]))
+    const result = await world.reader.readMany(['s1'], { signal: controller.signal })
+    assert.deepEqual(Object.keys(result.usage), [])
+    assert.deepEqual(Object.keys(result.failed), [])
+    assert.deepEqual(world.calls, [])
+  })
+})
+
+// #endregion
 
 // #endregion

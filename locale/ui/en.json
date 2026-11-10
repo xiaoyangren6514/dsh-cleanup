@@ -301,7 +301,7 @@
   "dialog.mode.permHint": "Permanent deletion skips the trash and cannot be undone; make sure the target is backed up.",
   "dialog.includeSessions": "Also delete session logs inside this folder",
   "dialog.includeDescendants": "Also delete its subagent sessions",
-  "dialog.descendants.autoOff": "“Also delete its subagent sessions” was turned off automatically: an un-checked subagent session must be kept. Re-check that row to enable it again.",
+  "dialog.descendants.autoOff": "“Also delete its subagent sessions” was turned off automatically: an un-checked subagent session must be kept. Re-check the subagent sessions to enable it again.",
   "dialog.confirm.label": "Type the folder name \"{name}\" to confirm permanent deletion",
   "dialog.confirm.placeholder": "Folder name",
   "dialog.confirm.mismatch": "The folder name does not match",
@@ -453,6 +453,7 @@
   "dialog.tree.badge.derived": "Derived",
   "dialog.tree.selected_one": "{checked}/{total} log selected",
   "dialog.tree.selected_other": "{checked}/{total} logs selected",
+  "dialog.tree.rootOff": "This session is not selected, so its subagent logs will not be deleted.",
   "dialog.mode.permIrreversible": "Permanent deletion destroys the data immediately, cannot be undone, and does not go to the trash.",
   "open.folder": "Open folder",
   "open.cache": "Open cache folder",
@@ -461,5 +462,6 @@
   "open.errorTitle": "Could not open the folder",
   "open.retry": "Retry opening",
   "error.OPEN_FAILED": "The system could not start a file manager to open that folder.",
-  "error.OPEN_UNAVAILABLE": "This platform has no file manager available to open folders."
+  "error.OPEN_UNAVAILABLE": "This platform has no file manager available to open folders.",
+  "error.TOO_MANY_TARGETS": "A review can name at most 64 targets; delete in batches or narrow the selection and try again."
 }

@@ -203,6 +203,10 @@ async function makeWorld(spec = {}) {
     if (session.isSeeded === true) header.isSeeded = true
     const snapshot = { header }
     if (location !== undefined) snapshot.location = location
+    // The shipped JSONL backend's lightweight snapshot shape: an opaque `revision` (and usually
+    // `sizeBytes`) but no `eventCount`; both shapes must drive the usage cache identity.
+    if ('revision' in session) snapshot.revision = session.revision
+    if ('formatStatus' in session) snapshot.formatStatus = session.formatStatus
     if ('eventCount' in session) snapshot.eventCount = session.eventCount
     if ('sizeBytes' in session) snapshot.sizeBytes = session.sizeBytes
     snapshots.set(session.id, snapshot)
@@ -5014,7 +5018,7 @@ describe('usage (SPEC §4.10/§5.11)', () => {
     assert.equal(response.ok, true)
     assert.equal(response.available, true)
     assert.deepEqual(Object.keys(response.usage), ['ok'])
-    assert.deepEqual(response.failed, { ghost: 'UNKNOWN_SESSION', broken: 'READ_FAILED' })
+    assert.deepEqual({ ...response.failed }, { ghost: 'UNKNOWN_SESSION', broken: 'READ_FAILED' })
     assert.equal(response.usage.ok.totalTokens, 10 + 0 + 1 + 2)
   })
 
@@ -5026,6 +5030,73 @@ describe('usage (SPEC §4.10/§5.11)', () => {
     await engine.usage({ sessionIds: ['s1'] })
     await engine.usage({ sessionIds: ['s1'] })
     assert.deepEqual(sessionQuery.calls, ['s1'], 'one read per unchanged Session')
+  })
+
+  test('caches by the real JSONL snapshot revision (no eventCount) and re-folds when it changes', async () => {
+    // Real DSH `list()` snapshots carry { header, formatStatus, revision, sizeBytes, location } and no
+    // eventCount; a cache keyed only on eventCount would never hit on a real Host.
+    const world = await makeWorld({
+      sessions: [{ id: 's1', revision: 'rev-1', sizeBytes: 64, formatStatus: 'current' }],
+    })
+    const sessionQuery = makeSessionQuery()
+    sessionQuery.sessions.set('s1', readableSession('s1', [usageEvent('m1')]))
+    const engine = world.engine({ sessionQuery: sessionQuery.query })
+    await engine.usage({ sessionIds: ['s1'] })
+    await engine.usage({ sessionIds: ['s1'] })
+    assert.deepEqual(sessionQuery.calls, ['s1'], 'an unchanged revision answers from memory')
+    world.snapshots.get('s1').revision = 'rev-2'
+    await engine.usage({ sessionIds: ['s1'] })
+    assert.deepEqual(sessionQuery.calls, ['s1', 's1'], 'a changed revision re-folds')
+  })
+
+  test('answers CANCELLED when the request was aborted before it started, without reading a log', async () => {
+    const world = await makeWorld({ sessions: [{ id: 's1', revision: 'rev-1' }] })
+    const sessionQuery = makeSessionQuery()
+    sessionQuery.sessions.set('s1', readableSession('s1', [usageEvent('m1')]))
+    const engine = world.engine({ sessionQuery: sessionQuery.query })
+    const controller = new AbortController()
+    controller.abort()
+    const response = await engine.usage({ sessionIds: ['s1'] }, { signal: controller.signal })
+    assertFail(response, 'CANCELLED')
+    assert.deepEqual(sessionQuery.calls, [], 'nothing was read')
+    // The same request without a signal still folds: the CANCELLED answer is the abort, not a bug.
+    const okResponse = await engine.usage({ sessionIds: ['s1'] })
+    assert.equal(okResponse.ok, true)
+    assert.equal(okResponse.usage.s1.requestCount, 1)
+  })
+
+  test('stops starting reads when the request aborts mid-flight and keeps what it has', async () => {
+    const ids = ['s1', 's2', 's3', 's4', 's5', 's6']
+    const world = await makeWorld({ sessions: ids.map((id) => ({ id, revision: `rev-${id}` })) })
+    const controller = new AbortController()
+    /** @type {(() => void)[]} */
+    const releases = []
+    let started = 0
+    /** @type {() => void} */
+    let signalAllStarted
+    const allStarted = new Promise((resolve) => { signalAllStarted = resolve })
+    const sessionQuery = makeSessionQuery()
+    sessionQuery.query.readSession = async (id) => {
+      started += 1
+      if (started === 4) signalAllStarted()
+      await new Promise((resolve) => releases.push(resolve))
+      return readableSession(id, [usageEvent(`m-${id}`)])
+    }
+    const engine = world.engine({ sessionQuery: sessionQuery.query })
+    const pending = engine.usage({ sessionIds: ids }, { signal: controller.signal })
+    await allStarted
+    controller.abort()
+    for (const release of releases) release()
+    const response = await pending
+    assert.equal(response.ok, true)
+    assert.equal(response.available, true)
+    assert.deepEqual(
+      Object.keys(response.usage).sort(),
+      ['s1', 's2', 's3', 's4'],
+      'the four in-flight reads finish; no further read starts',
+    )
+    assert.equal(response.usage.s5, undefined)
+    assert.equal(response.usage.s6, undefined)
   })
 })
 

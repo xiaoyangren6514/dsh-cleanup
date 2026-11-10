@@ -316,9 +316,9 @@ directory was removed keeps `movedTo: null` (nowhere to recover from).
 
 A Session item that removed its artifact directory — or found it already missing, including a
 Session that never materialized on disk — additionally reports
-`"cacheDropped": true` when the shipped projection-cache record was dropped with it, `false` when the
-record could not be dropped (the storage service is absent, the domain is closed, or the delete
-threw). The field is absent for workspace items and for items that failed before touching the
+`"cacheDropped": true` when the shipped projection-cache record was dropped with it **or there was
+no record to drop** (a Session that was never checkpointed), `false` when an existing record could
+not be dropped (the storage service is absent, the domain is closed, or the delete threw). The field is absent for workspace items and for items that failed before touching the
 filesystem. After every Session item with status `trashed` or `deleted` the Host emits
 `api-session/removed` with that id (§5.5).
 
@@ -522,6 +522,11 @@ is `{}`, `failed` is omitted, and the client hides every usage surface. Folding 
 successful read is cached until that Session's log changes (§5.11), so repeated requests cost one
 read per changed Session.
 
+The route forwards the request's `AbortSignal`: an abort before any folding starts answers
+`CANCELLED`; an abort while ids are still being read stops starting new reads and answers whatever
+has been folded so far (a caller that cancelled ignores that body). Folding one id never blocks the
+others, and the reader keeps at most four cold reads in flight (§5.11).
+
 ### 4.11 `POST /api/cleanup.open`
 
 Request `{ "kind": "session" | "workspace" | "trash" | "cache", "id": "…" }`. `id` is required for
@@ -550,7 +555,14 @@ The Host resolves the directory itself and never accepts a path from the caller:
 `OPEN_UNAVAILABLE` answers when the platform has no opener (any `process.platform` outside
 `darwin`/`win32`/`linux`), `OPEN_FAILED` when the opener cannot be started. The call is
 fire-and-forget: the answer reports the resolved path whether or not a file manager ends up focused,
-and a launcher that exits non-zero on a success path (Windows `explorer.exe`) is not a failure.
+and a launcher that exits non-zero on a success path (Windows `explorer.exe`) is not a failure. The
+answer is produced as soon as the launcher process is **spawned** — never after it exits — so a
+launcher that stays alive cannot hold this route open.
+
+On macOS a directory whose path ends in `.app`, `.bundle`, `.workflow` or `.pkg` is an application
+bundle: plain `open <dir>` would **launch** it. The Host reveals such a path instead
+(`open -R <dir>`), so a registered Workspace that happens to be a bundle is never executed by the
+"open folder" control.
 
 ### 4.6 Error codes
 
@@ -874,9 +886,13 @@ and is only decodable through the Host's own persistence stack. `readSession` re
   `cacheWriteTokens = usage.cacheWriteTokens`, `outputTokens = usage.outputTokens`, and
   `totalTokens = miss + read + output`. This keeps the three-way share bar addable to 100 %: a
   provider that ever bills cache writes still has those tokens in the miss bucket exactly once.
-- **Cache until the log changes.** The reader keeps at most 200 folded Sessions keyed by
-  `(eventCount, sizeBytes)` from the persistence snapshot; a Session whose snapshot key changed is
-  re-folded, an unchanged one is answered from memory. The cache is never written to disk.
+- **Cache until the log changes.** The reader keeps at most 200 folded Sessions keyed by the
+  persistence snapshot's identity — its opaque `revision` (the JSONL backend's size+mtime token) plus
+  `sizeBytes` when the backend reports one — falling back to `(eventCount, sizeBytes)` for a backend
+  that reports that pair instead. A Session whose snapshot key changed is re-folded, an unchanged one
+  is answered from memory; a snapshot with neither identity is simply not cached. The cache is never
+  written to disk. At most four cold reads run concurrently and the request `AbortSignal` stops new
+  reads (§4.10).
 - **Read-only by construction.** Folding never opens a write handle, never makes a Session live, and
   never throws for one bad log: the failure is that id's entry in `failed` (§4.10).
 
@@ -1092,6 +1108,17 @@ counts:
   off adds that node and its subtree to the explicit set.
 - Checking a node checks its subtree; un-checking it un-checks its subtree. A node whose subtree is
   partially selected renders `aria-checked="mixed"`, and the group header reports `已选 n/m 条日志`.
+- Row and node selection are one coherent set: un-checking a reviewed row also clears that row's
+  known nodes from the explicit selection (the row means "delete nothing under it"), its tree renders
+  with every node unchecked and **disabled** plus a one-line explanation, and the group header counts
+  only checked roots. Un-checking a node never leaves an un-checked root's descendant in the explicit
+  target list.
+- **Target budget.** One plan accepts at most 64 targets (§4.3). Before sending a plan the dialog
+  adds up its checked rows and explicit node ids; over the budget it fails locally with the
+  client-only code `TOO_MANY_TARGETS` (no request is sent) and tells the user to narrow the selection
+  or clear in batches. A workspace-clear batch instead shrinks itself: it keeps a prefix of rows whose
+  rows+nodes still fit and re-queues the dropped rows for the next batch; a single family larger than
+  the budget fails the same way.
 - `全选` selects every row and node; `反选` inverts both.
 - The tree applies wherever the review renders Session ride-alongs, including a workspace-clear
   batch: a node un-checked there is recorded in `clear.excluded` exactly like an un-checked row, so a
@@ -1136,7 +1163,9 @@ frame element) instead of dropping focus to `<body>`.
 
 On success: refresh client data — call `ctx.get('sessions')?.refresh?.()` (guard the promise) — and
 let the Workspace follow stream update by itself. The same refresh runs after a trash restore/purge,
-so a restored session reappears in the sidebar.
+so a restored session reappears in the sidebar. A restore additionally schedules exactly one
+follow-up refresh after the first one settles: the client's session-list refresh is single-flight, so
+a refresh already in flight when the restore lands would otherwise answer without the restored row.
 
 ### Workspace clear
 
@@ -1260,15 +1289,24 @@ key, default off) and, while it is on and `inventory.capabilities.usage` is true
 columns: total tokens (compact, `12.3k`) and cache-hit rate (`87%`), a `按用量排序` option, and the
 family total for a row that has descendants (`own/family` — a parent row counts only the requests it
 made itself, never its children's). Usage comes from `/api/cleanup.usage` in chunks of at most 200
-ids, merged into a page-level map and discarded for a Session whose `eventCount`/`sizeBytes` changed.
+ids, merged into a page-level map and discarded for a Session whose observed usage signature changed
+(`eventCount` when the inventory reports one, otherwise `sizeBytes` — a real JSONL inventory row
+carries only the size).
 A Host that answers `available: false` hides the columns and says why; it never blocks the list. A
-row whose usage is not known yet renders a muted `—`, never a zero.
+row whose usage is not known yet renders a muted `—`, never a zero. Both metrics carry a visually
+hidden label prefix (`令牌` / `缓存命中` from the locale dictionary, with the full numbers in the
+hover title) rather than an `aria-label` on a role-less span, and a `按用量排序` selection falls back
+to newest-first when usage becomes unavailable.
 
 **Open (0.6.0).** While `inventory.capabilities.openPath` is true, Workspaces rows, Sessions rows,
 Trash entries, and the review dialog's summary carry a `打开文件夹` control, and the Trash tab header
 carries `打开缓存目录`. All of them call `/api/cleanup.open` with a kind and an id — never a path —
 and report `OPEN_FAILED`/`OPEN_UNAVAILABLE` through the ordinary error text. Each control's
-accessible name names its target (`打开「proj」所在文件夹`).
+accessible name names its target (`打开「proj」所在文件夹`); the dialog summary control exists only
+for a **single-target** review (a multi-target summary names no one folder) and uses the target's
+display title, never the raw workspace path. The dialog's capability snapshot is filled by one
+best-effort inventory probe at plugin activation, so a context-menu review shows the control without
+the user opening Settings first.
 
 Data: `inventory` on mount (and after every mutation), `measure` on demand from the page,
 `trashList` for the trash tab. The review dialog never measures separately: its plan already carries
@@ -1313,9 +1351,12 @@ polling. Re-render from the store with `useSyncExternalStore`.
 - Contract: `npm run check` must pass — it compares the SPEC route list with the implemented route
   table, the codes the engine can emit with the SPEC vocabulary and the client dictionary, and the
   zh/en dictionary shapes. Treat a failure as a real drift, not a warning.
-- Host: `node --test 'test/**/*.test.mjs'` (a bare positional directory is not expanded by this
-  Node build) once the tests exist; until then at least a scratch script that
-  imports `lib/engine.js` with fake deps and exercises plan → execute on a temp directory.
+- Host: `npm test` — it runs `scripts/run-tests.mjs`, which expands `test/**/*.test.mjs` itself and
+  spawns `node --test` with explicit paths, so the command works on every supported Node version
+  (Node 20 does not expand a quoted test glob). Run it before reporting; a bare positional directory
+  is not expanded by this Node build.
+- Packaging: `npm pack --dry-run` must include every shipped module and document; the contract check
+  also expands the `files` globs and fails when a shipped path disappears.
 - Client: `test/client.test.mjs` loads `client.js` through a fake `window.__ModuleLoader__` and a
   React shim and drives the exported component/store API. Add a case for every surface you add; keep
   the existing suite green. Prove the module still returns `{inject, apply}`, and that registration

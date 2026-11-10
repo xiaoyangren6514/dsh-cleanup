@@ -28,7 +28,7 @@ const ROUTE_DEFINITIONS = Object.freeze([
   ['/api/cleanup.inventory', (engine) => engine.inventory()],
   ['/api/cleanup.measure', (engine, body) => engine.measure(body)],
   // Per-Session token usage folded through the optional sessionQuery seam (SPEC §4.10/§5.11).
-  ['/api/cleanup.usage', (engine, body) => engine.usage(body)],
+  ['/api/cleanup.usage', (engine, body, request) => engine.usage(body, { signal: request?.signal })],
   // Read-only cleanup-wizard preview (SPEC §4.9): a projection of the inventory snapshot.
   ['/api/cleanup.candidates', (engine, body) => engine.candidates(body)],
   ['/api/cleanup.plan', (engine, body, request) => engine.plan(body, { signal: request?.signal })],
@@ -307,7 +307,12 @@ function lazyProjectionCacheView(ctx) {
       try {
         const table = resolveTable()
         if (typeof table?.delete !== 'function') return false
-        return (await table.delete(sessionId)) === true
+        if ((await table.delete(sessionId)) === true) return true
+        // A delete that reports `false` means "there was no record to delete", which is the
+        // desired end state, not a failure: an already-absent (or never-written) projection-cache
+        // row must still let the Session item report `cacheDropped: true` (SPEC §5.5 step 7).
+        if (typeof table.get !== 'function') return false
+        return table.get(sessionId) === undefined
       } catch {
         // A closed domain or a throwing delete is a per-item `cacheDropped: false` (SPEC §5.5).
         return false

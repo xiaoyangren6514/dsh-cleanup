@@ -301,7 +301,7 @@
   "dialog.mode.permHint": "永久删除不进入回收站，无法撤销，请确认已经备份。",
   "dialog.includeSessions": "同时删除该目录内的会话记录",
   "dialog.includeDescendants": "同时删除子代理会话",
-  "dialog.descendants.autoOff": "已自动关闭「同时删除子代理会话」：取消勾选的子代理会话必须保留。重新勾选该行后可再开启。",
+  "dialog.descendants.autoOff": "已自动关闭「同时删除子代理会话」：取消勾选的子代理会话必须保留。重新勾选子代理会话后可再开启。",
   "dialog.confirm.label": "请输入文件夹名称“{name}”以确认永久删除",
   "dialog.confirm.placeholder": "文件夹名称",
   "dialog.confirm.mismatch": "输入的文件夹名称不匹配",
@@ -453,6 +453,7 @@
   "dialog.tree.badge.derived": "派生",
   "dialog.tree.selected_one": "已选 {checked}/{total} 条日志",
   "dialog.tree.selected_other": "已选 {checked}/{total} 条日志",
+  "dialog.tree.rootOff": "该会话已取消勾选，它的子代理会话不会被删除。",
   "dialog.mode.permIrreversible": "彻底删除会立即销毁数据，无法撤销，也不会进入回收站。",
   "open.folder": "打开文件夹",
   "open.cache": "打开缓存目录",
@@ -461,5 +462,6 @@
   "open.errorTitle": "无法打开文件夹",
   "open.retry": "重试打开",
   "error.OPEN_FAILED": "系统无法启动文件管理器来打开该目录。",
-  "error.OPEN_UNAVAILABLE": "当前平台没有可用的文件管理器打开方式。"
+  "error.OPEN_UNAVAILABLE": "当前平台没有可用的文件管理器打开方式。",
+  "error.TOO_MANY_TARGETS": "一次最多复核 64 个目标；请分批删除或缩小范围后重试。"
 }
