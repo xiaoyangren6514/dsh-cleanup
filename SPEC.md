@@ -194,16 +194,31 @@ Request: `{}`.
   "deferred": { "count": 0, "retained": 0, "lastRun": null },   // queued deletions, see §4.7
   "audit": {
     "enabled": true,
+    "healthy": true,                 // false when the last write failed (0.6.4)
+    "writeFailures": 0,
+    "lastWriteAt": 1730000000000,    // or null
+    "lastError": null,               // last append failure message, or null
+    "lastRotationError": null,       // last rotation trouble, or null
     "lastStartup": { "at": 0, "applied": 0, "skipped": 0, "failed": 0 },   // or null
     "recent": [ { "at": 0, "source": "immediate", "action": "delete", "mode": "trash",
                   "targets": [ { "kind": "session", "id": "session-…" } ],
-                  "status": "trashed", "code": null, "bytes": 0 } ]        // newest first, max 10
+                  "status": "trashed", "code": null, "bytes": 0,
+                  "items": [ { "kind": "session", "id": "session-…", "status": "trashed", "code": null } ],
+                  "entryIds": ["20261112T…-session-…"] } ]               // newest first, max 10
   }
 }
 ```
 
 `workspaces` comes from `ctx.workspaceRegistry.list()`; `sessions` from
 `ctx.sessionPersistence.list()`. The response must be pure JSON (no `undefined`, no `Date`).
+
+`audit.healthy` / `writeFailures` / `lastError` / `lastRotationError` are the running log's write
+health: auditing never blocks a deletion (§5.9), so this is how the UI can tell the user their audit
+trail stopped recording. `healthy` describes the **current** append state (a later success clears
+`lastError` and is healthy again); `writeFailures` is the cumulative count since start. A rotation
+failure leaves `lastRotationError` while appends continue — the file may stay above `auditMaxBytes`
+until a rotation succeeds. A record's `items` (≤64), `entries` (≤50, purge) and `entryIds` (≤200) are
+optional bounded detail; they are omitted when empty.
 
 ### 4.2 `POST /api/cleanup.measure`
 
@@ -260,7 +275,10 @@ Response `{ ok: true, plan: Plan }` where
 }
 ```
 
-Blocking and warning decisions are in §5. `totals.dirs` sums the nested directories the size walk
+Blocking and warning decisions are in §5. In `trash` mode a Session log directory whose device differs
+from the trash volume is reported as a `TRASH_CROSS_DEVICE` blocker at plan time (0.6.4), matching
+the workspace-directory check in §5.3: the user learns before confirming that the move cannot be
+atomic. `totals.dirs` sums the nested directories the size walk
 finds inside each target (a target directory itself is not counted, by the same rule for session and
 workspace items). `confirmation` is non-null exactly when the plan deletes one **workspace directory**
 that still exists and `mode === "permanent"`; `expected` is that directory's final path segment;
@@ -456,12 +474,19 @@ with `DEFERRED_FULL`.
   "status": "trashed" | "deleted" | "skipped" | "failed",
   "code": "SESSION_LIVE",        // present when skipped, failed, or executed with a failed item
   "reason": "…",                 // same conditions as `code`
-  "items": [{ "kind": "session", "id": "…", "status": "trashed" | "deleted" | "failed" }] }
+  "items": [{ "kind": "session", "id": "…", "status": "trashed" | "deleted" | "failed" }],
                                // `items` is present only when the entry executed
+  "retainedTargets": [{ "kind": "session", "id": "…" }],
+                               // 0.6.4: blocked roots left queued after a partial execution
+  "persistenceError": "…" }    // 0.6.4: the queue file could not record this result
 ```
 
 `status` describes what actually happened: any item moved to the trash is `trashed`, items that only
-removed files/registrations are `deleted`, every item failing is `failed`.
+removed files/registrations are `deleted`, every item failing is `failed`. When a queued entry names
+several roots and only some are blocked, the executable roots run and the blocked ones stay queued:
+`status` describes the executed part, `code`/`reason` name the first blocker and the leftover count, and
+`retainedTargets` lists what remains. A `persistenceError` means the deletion ran but the queue could not
+be updated; the entry is released for the next start instead of waiting out the stale claim window.
 
 `POST /api/cleanup.deferred.cancel` — request `{ "entryIds": ["…"] }` or `{ "all": true }` →
 `{ ok: true, cancelled }`. Idempotent: unknown ids are simply not counted. Cancelling an id that
@@ -907,9 +932,16 @@ Every destructive action appends one JSON line to `auditFile` when `auditEnabled
 (`action: "delete"`, source `immediate`), start-up entries (`action: "delete"`, source `startup`, with
 `entryId`), skips (`action: "skip"` with `code`), trash restore/purge, and queue defer/cancel/requeue.
 Records are owner-only; the log rotates to `audit.jsonl.1` past `auditMaxBytes` (one generation). A
-write failure is ignored by design (auditing is diagnostic) and never fails the action. One action
-writes exactly one record: the start-up run suppresses the interactive `immediate` record for the plans
-it executes and writes the `startup` record itself.
+write failure never fails the action (auditing is diagnostic), but it is **not silent** (0.6.4): the
+running log tracks `healthy`, `writeFailures`, `lastWriteAt`, `lastError` and `lastRotationError` and
+the inventory (§4.1) exposes them so the UI can warn that the trail stopped recording. Appends are
+serialized inside one log instance, so concurrent records cannot interleave with each other's
+rotation; rotation trouble is recorded separately and does not stop new records.
+One action writes exactly one record: the start-up run suppresses the interactive `immediate` record
+for the plans it executes and writes the `startup` record itself. A deletion record carries bounded
+per-item detail (`items`, ≤64) plus the trash `entryIds` of the items that really moved; a purge
+record carries the entries it actually removed (`entries`, ≤50 `{id,kind,title,originalPath}` plus
+their `entryIds`), so emptying the trash stays answerable afterwards.
 
 `trashRetentionDays` / `trashMaxBytes` are **warnings only**: the inventory reports
 `oldestMovedAt`/`overRetention`/`overCapacity` and `suggestedEntryIds` (oldest entries whose purge brings
@@ -925,6 +957,17 @@ queued **at or before the moment the run started** are applied: one queued while
 reconnecting) waits for the next start instead of being deleted by a run it was not reviewed for.
 Skipped and failed entries move to the bounded `retained` list (20) with their `code`/`reason`, from
 where the user can requeue or drop them.
+
+**Partial execution (0.6.4).** A queued entry may name several roots. When the freshly derived plan
+reports blockers, the run splits off the roots **a blocker attributes to** (an explicit queued session
+or workspace root) and plans the remainder again (at most two split rounds plus a final planning pass). The executable part runs;
+the blocked roots are written back into the same queue entry (with `lastAttemptAt` = this run) and are
+retried at the next start. A blocker on a swept-in item (a subagent log, a session pulled in by
+`includeSessions`, a cross-process write claim on a non-root item) cannot be isolated without changing
+what the user reviewed, so such an entry is not split at all: nothing runs and it is recorded
+`skipped`. `lastAttemptAt` also keeps the same run from claiming its own remainder again.
+A result whose queue write failed carries `persistenceError`: the entry's in-flight marker is cleared
+best-effort so the next start retries it instead of waiting out the 10-minute stale window.
 
 ### 5.10 Preview cache
 
@@ -1137,6 +1180,13 @@ inline cap notice (the Host would refuse the plan), and a review that still ends
 first 64 planned targets and re-plans -- the user never has to close the dialog, scroll back and
 re-select by hand.
 
+Changing the selection never blocks the review: the checkboxes update immediately, a plan request is
+coalesced behind a short debounce (350 ms) so several clicks cost one round trip, and while the plan is
+in flight only the confirm/queue buttons and the controls that change **deletion semantics** (mode,
+`includeSessions`, `includeDescendants`) are disabled — the rows, select-all/invert, tree toggles and
+the typed input stay interactive (0.6.4). The typed confirmation survives a re-plan when the plan's
+`confirmation.expected` did not change; when it did, the text is cleared and a notice explains why.
+
 Review shows, in order: title (`删除会话` / `删除工作区目录`), the **target rows** (below), warning
 list, blocker list (red, with the localized reason), mode
 selector (two radio-like buttons; permanent disabled when `allowPermanentDeletion` is false or
@@ -1288,7 +1338,9 @@ workspace in batches inside the same dialog:
   actually run.
 - **Confirmed walk.** Each executed batch folds its totals into the running `clear.done` and
   immediately plans and executes the next batch without a second review. Progress reads
-  `第 N 批 · 已清理 M 条`. After each batch, the ids that batch reports as `trashed`/`deleted` are
+  `已清理 M / 共 T 条（第 N 批）` when the pre-flight knows the total (0.6.4). While a clear is running the
+  footer offers **完成本批后停止**: it stops after the batch in flight (never mid-batch) and settles the
+  ordinary done state with a `stopped` reason and the remaining count. After each batch, the ids that batch reports as `trashed`/`deleted` are
   removed from the remaining queue, so a log an earlier batch already removed as a subagent
   descendant cannot make the next plan fail wholesale with `UNKNOWN_SESSION`. If a batch plan still
   answers `UNKNOWN_SESSION` (a target deleted outside this app run), the client re-reads the
@@ -1318,6 +1370,9 @@ A `settings.section` page titled "存储清理" with four tabs: **工作区**, *
 
 - Header row: section title, one-paragraph explanation, `刷新` button (spinner + `aria-busy`
   while a reload is in flight), and a size-measuring button when the active tab has unmeasured rows.
+  Measuring runs in bounded chunks (at most 200 ids per request, serially; 0.6.4), reports
+  `测量中… n/m`, offers **停止** and keeps every already-measured row when stopped or when one chunk
+  fails.
   Below the title, a summary line renders from the current inventory when it has landed: workspaces,
   sessions, trash entries with their byte total, scheduled deletions (only when non-zero), and
   `数据更新于 <generatedAt>`, so a stale page is visible instead of silently trusted. The trash tab
@@ -1386,6 +1441,15 @@ A `settings.section` page titled "存储清理" with four tabs: **工作区**, *
 - The deferred notice also lists `retained` (skipped/failed) entries with status/code/reason and
   two-step `重新安排` (`deferred.requeue`) / `忽略` (`deferred.cancel`) actions, and its collapsed head
   reports the retained count.
+- The audit view warns when the running log stopped recording (`audit.health.healthy === false`,
+  showing the last error), and each recent record shows its bounded detail when present (`items`:
+  `n 项 · m 失败`; `entries`: purge count). The deferred last-start summary shows a
+  `persistenceError` line when the queue could not record a run whose deletion already happened.
+- The page remembers its view across sheet re-mounts and reloads: active tab, session sort/archive/
+  workspace filters and the `显示更多` limit live in one plugin-owned `localStorage` key
+  (`dsh-cleanup.pagePrefs`); an invalid or hand-edited value falls back to the defaults, a
+  workspace filter naming a workspace this profile no longer has falls back to "all workspaces", and
+  the selection/search/settings draft are never persisted.
 - Empty/loading/error states for each tab; errors show the localized reason and a `重试`.
 - Footer note: the recovery window is not time-limited — trash is manual — and permanent deletion
   cannot be undone.

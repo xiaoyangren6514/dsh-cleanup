@@ -16,6 +16,7 @@ import path from 'node:path'
 import { execFile as execFileCallback } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createEngine } from '../lib/engine.js'
+import { createAuditLog } from '../lib/audit.js'
 
 const execFile = promisify(execFileCallback)
 
@@ -402,7 +403,10 @@ describe('inventory', () => {
       suggestedEntryIds: [],
     })
     assert.deepEqual(response.deferred, { count: 0, retained: 0, lastRun: null })
-    assert.deepEqual(response.audit, { enabled: true, lastStartup: null, recent: [] })
+    assert.deepEqual(response.audit, {
+      enabled: true, healthy: true, writeFailures: 0, lastWriteAt: null,
+      lastError: null, lastRotationError: null, lastStartup: null, recent: [],
+    })
     assert.equal(response.truncated, false)
     // SPEC §4.1: the cap is on the wire so consumers never hardcode it.
     assert.equal(response.sessionListCap, 2000)
@@ -1467,6 +1471,33 @@ describe('plan: workspace targets', () => {
 // #endregion
 
 // #region execute: trash mode (SPEC §4.4/§5.5) -------------------------------------------------
+
+describe('session trash cross-device precheck (0.6.4)', () => {
+  test('a session log directory on another device is refused at plan time', async () => {
+    const world = await makeWorld({ sessions: [{ id: 's1', content: 'x\n' }] })
+    const sessionDir = world.dirOfSession('s1')
+    const fsOps = {
+      lstat: async (target, ...rest) => {
+        const real = await nodeFs.lstat(target, ...rest)
+        if (path.resolve(String(target)) !== path.resolve(sessionDir)) return real
+        // Only the `dev` value differs: every other Stat operation stays the real one (the walk
+        // still needs isDirectory/readdir semantics).
+        return new Proxy(real, {
+          get(inner, property) {
+            if (property === 'dev') return 999_999_999
+            const value = Reflect.get(inner, property, inner)
+            return typeof value === 'function' ? value.bind(inner) : value
+          },
+        })
+      },
+    }
+    const engine = world.engine({ fsOps })
+    const trashPlan = planOf(await engine.plan({ targets: [{ kind: 'session', id: 's1' }], mode: 'trash' }))
+    assert.deepEqual(trashPlan.blockers.map((entry) => entry.code), ['TRASH_CROSS_DEVICE'])
+    const permanentPlan = planOf(await engine.plan({ targets: [{ kind: 'session', id: 's1' }], mode: 'permanent' }))
+    assert.deepEqual(permanentPlan.blockers, [], 'permanent deletion does not need the trash volume')
+  })
+})
 
 describe('execute: trash mode', () => {
   test('moves a workspace and its inside sessions into the trash with metadata', async () => {
@@ -3605,6 +3636,165 @@ async function writeQueueDocument(world, document) {
   )
 }
 
+describe('deferred partial execution (0.6.4)', () => {
+  beforeEach(resetDeferredMarker)
+
+  test('a blocked root stays queued while the rest of the entry is deleted', async () => {
+    const world = await makeWorld({
+      sessions: [{ id: 's1', content: 'a\n' }, { id: 's2', content: 'b\n' }],
+      live: ['s1'],
+    })
+    await writeQueueDocument(world, {
+      entries: [queueEntry({ targets: [{ kind: 'session', id: 's1' }, { kind: 'session', id: 's2' }] })],
+    })
+    const engine = world.engine()
+    const outcome = await engine.runDeferred()
+    assert.equal(outcome.ran, true)
+    assert.equal(outcome.results.length, 1, 'the partially executed entry is not retried in the same run')
+    const result = outcome.results[0]
+    assert.equal(result.status, 'trashed')
+    assert.equal(result.code, 'SESSION_LIVE')
+    assert.deepEqual(result.retainedTargets, [{ kind: 'session', id: 's1' }])
+    assert.match(result.reason, /still blocked/)
+    await assertGone(world.dirOfSession('s2'), 'the executable root was deleted')
+    await assertExists(world.dirOfSession('s1'), 'the blocked root is untouched')
+    const document = await readQueueFile(world.deferredFile)
+    assert.equal(document.entries.length, 1)
+    assert.deepEqual(document.entries[0].targets, [{ kind: 'session', id: 's1' }])
+    assert.equal(document.entries[0].inFlightAt, null)
+    assert.equal(typeof document.entries[0].lastAttemptAt, 'number')
+    assert.deepEqual(document.lastRun.results[0].retainedTargets, [{ kind: 'session', id: 's1' }])
+    const startupAudit = (await readAudit(world)).filter((record) => record.source === 'startup' && record.action === 'delete')
+    assert.equal(startupAudit.length, 1)
+    assert.deepEqual(startupAudit[0].items, [{ kind: 'session', id: 's2', status: 'trashed', code: null }])
+
+    // The next start retries only the blocked remainder, now that it is no longer live.
+    world.liveStore.delete('s1')
+    world.clock.advance(10)
+    resetDeferredMarker()
+    const second = await world.engine().runDeferred()
+    assert.equal(second.ran, true)
+    await assertGone(world.dirOfSession('s1'))
+    const after = await readQueueFile(world.deferredFile)
+    assert.deepEqual(after.entries, [])
+    assert.deepEqual(after.retained, [])
+  })
+
+  test('a queue write failure after execution is reported as persistenceError', { skip: process.platform === 'win32' }, async () => {
+    const world = await makeWorld({ sessions: [{ id: 's1', content: 'x\n' }] })
+    await writeQueueDocument(world, { entries: [queueEntry({ targets: [{ kind: 'session', id: 's1' }] })] })
+    // The queue document is written by lib/deferred.js directly (not through the engine's fsOps), so
+    // the failure is induced by making the queue directory read-only right after the payload moved —
+    // exactly the window where a real ENOSPC/EACCES would hit the finalization.
+    const fsOps = {
+      rename: async (...args) => {
+        const result = await nodeFs.rename(...args)
+        await fsp.chmod(world.stateDir, 0o500)
+        return result
+      },
+    }
+    try {
+      const outcome = await world.engine({ fsOps }).runDeferred()
+      assert.equal(outcome.ran, false, 'the last-run summary could not be written')
+      assert.equal(outcome.results.length, 1)
+      const result = outcome.results[0]
+      assert.equal(result.status, 'trashed')
+      assert.match(String(result.persistenceError), /could not be updated/)
+      await assertGone(world.dirOfSession('s1'), 'the deletion itself succeeded')
+    } finally {
+      await fsp.chmod(world.stateDir, 0o700)
+    }
+    const document = await readQueueFile(world.deferredFile)
+    assert.equal(document.entries.length, 1, 'the entry is kept for the next start')
+    assert.equal(typeof document.entries[0].inFlightAt, 'number', 'a failed release leaves the stale claim to be taken over next run')
+  })
+
+  test('a failed queued root is kept with the blocked remainder instead of being lost', async () => {
+    const world = await makeWorld({
+      sessions: [{ id: 's1', content: 'a\n' }, { id: 's2', content: 'b\n' }, { id: 's3', content: 'c\n' }],
+      live: ['s1'],
+    })
+    const failingS2 = {
+      rename: async (from, to) => {
+        if (String(from).includes(`${path.sep}s2`)) throw new Error('EIO: simulated failure')
+        return nodeFs.rename(from, to)
+      },
+    }
+    await writeQueueDocument(world, {
+      entries: [queueEntry({ targets: [{ kind: 'session', id: 's1' }, { kind: 'session', id: 's2' }, { kind: 'session', id: 's3' }] })],
+    })
+    const outcome = await world.engine({ fsOps: failingS2 }).runDeferred()
+    assert.equal(outcome.ran, true)
+    const result = outcome.results[0]
+    assert.equal(result.status, 'trashed')
+    assert.deepEqual(
+      result.retainedTargets.map((target) => target.id).sort(),
+      ['s1', 's2'],
+      'the blocked and the failed root both stay retryable',
+    )
+    const document = await readQueueFile(world.deferredFile)
+    assert.deepEqual(document.entries[0].targets.map((target) => target.id).sort(), ['s1', 's2'])
+    await assertGone(world.dirOfSession('s3'))
+  })
+
+  test('a requeued remainder drops the permanent typed-name anchor it no longer names', async () => {
+    const world = await makeWorld({
+      workspaces: [{ id: 'ws1', files: { 'a.txt': 'x' } }],
+      sessions: [{ id: 's1', content: 'log\n' }],
+      live: ['s1'],
+    })
+    await writeQueueDocument(world, {
+      entries: [queueEntry({
+        mode: 'permanent',
+        includeSessions: false,
+        targets: [{ kind: 'workspace', id: 'ws1' }, { kind: 'session', id: 's1' }],
+        confirmationText: 'ws1',
+        confirmedDirectory: { workspaceId: 'ws1', path: world.dirOf('ws1'), device: null, inode: null },
+      })],
+    })
+    const outcome = await world.engine().runDeferred()
+    assert.equal(outcome.ran, true)
+    assert.equal(outcome.results[0].status, 'deleted')
+    await assertGone(world.dirOf('ws1'))
+    const document = await readQueueFile(world.deferredFile)
+    assert.deepEqual(document.entries[0].targets, [{ kind: 'session', id: 's1' }])
+    assert.equal(document.entries[0].confirmedDirectory, null)
+    assert.equal(document.entries[0].confirmationText, null)
+    // The next start can retry the remainder without the stale "type the folder name" gate.
+    world.liveStore.delete('s1')
+    world.clock.advance(10)
+    resetDeferredMarker()
+    const second = await world.engine().runDeferred()
+    assert.equal(second.ran, true)
+    await assertGone(world.dirOfSession('s1'))
+    assert.deepEqual((await readQueueFile(world.deferredFile)).entries, [])
+  })
+
+  test('a blocker on a swept-in session keeps the whole entry untouched', async () => {
+    const world = await makeWorld({
+      workspaces: [{ id: 'ws1', files: { 'a.txt': 'x' } }],
+      sessions: [{ id: 's1', content: 'log\n' }],
+      live: ['s1'],
+    })
+    world.snapshot('s1').header.cwd = world.dirOf('ws1')
+    await writeQueueDocument(world, {
+      entries: [queueEntry({ targets: [{ kind: 'workspace', id: 'ws1' }], includeSessions: true })],
+    })
+    const outcome = await world.engine().runDeferred()
+    assert.equal(outcome.ran, true)
+    assert.equal(outcome.results[0].status, 'skipped')
+    // The workshop-level blocker attributes to the queued root, but the swept session's own
+    // SESSION_LIVE blocker cannot be isolated without changing what the user reviewed, so the entry
+    // is never split. The reported code is the first blocker in plan order.
+    assert.equal(outcome.results[0].code, 'WORKSPACE_HAS_LIVE_SESSIONS')
+    const document = await readQueueFile(world.deferredFile)
+    assert.deepEqual(document.entries, [], 'nothing was executed and the entry moved to retained')
+    assert.equal(document.retained.length, 1)
+    await assertExists(world.dirOf('ws1'), 'the workspace directory is untouched')
+    await assertExists(world.dirOfSession('s1'), 'the swept session log is untouched')
+  })
+})
+
 describe('audit log (SPEC §5.9)', () => {
   test('an immediate trash deletion appends one delete record and the inventory shows it newest-first', async () => {
     const world = await makeWorld({ sessions: [{ id: 's1' }, { id: 's2' }] })
@@ -3621,13 +3811,47 @@ describe('audit log (SPEC §5.9)', () => {
     const inventory = await engine.inventory()
     assert.equal(inventory.audit.enabled, true)
     assert.equal(inventory.audit.recent.length, 2)
-    assert.deepEqual(Object.keys(inventory.audit.recent[0]).sort(), ['action', 'at', 'bytes', 'code', 'mode', 'source', 'status', 'targets'])
+    assert.deepEqual(Object.keys(inventory.audit.recent[0]).sort(), ['action', 'at', 'bytes', 'code', 'entryIds', 'items', 'mode', 'source', 'status', 'targets'])
     assert.deepEqual(inventory.audit.recent[0].targets, [{ kind: 'session', id: 's2' }], 'newest record first')
     assert.equal(inventory.audit.recent[0].action, 'delete')
     assert.equal(inventory.audit.recent[0].source, 'immediate')
     assert.equal(inventory.audit.recent[0].mode, 'trash')
     assert.equal(inventory.audit.recent[0].status, 'trashed')
     assert.ok(inventory.audit.recent[0].bytes > 0)
+    // 0.6.4: per-item detail and the trash entry ids travel with the record.
+    assert.deepEqual(inventory.audit.recent[0].items, [{ kind: 'session', id: 's2', status: 'trashed', code: null }])
+    assert.equal(inventory.audit.recent[0].entryIds.length, 1)
+    assert.equal(typeof inventory.audit.recent[0].entryIds[0], 'string')
+    assert.equal(inventory.audit.healthy, true)
+    assert.equal(inventory.audit.writeFailures, 0)
+    assert.equal(typeof inventory.audit.lastWriteAt, 'number')
+  })
+
+  test('a trash purge records the entries it actually removed', async () => {
+    const world = await makeWorld({
+      workspaces: [{ id: 'ws1', files: { 'a.txt': 'hello' } }],
+      sessions: [{ id: 's1', content: 'log\n' }],
+    })
+    const engine = world.engine()
+    const planWs = planOf(await engine.plan({ targets: [{ kind: 'workspace', id: 'ws1' }], mode: 'trash', includeSessions: false }))
+    assert.equal((await engine.execute({ planId: planWs.planId })).ok, true)
+    const planS = planOf(await engine.plan({ targets: [{ kind: 'session', id: 's1' }], mode: 'trash' }))
+    assert.equal((await engine.execute({ planId: planS.planId })).ok, true)
+    const purged = await engine.trashPurge({ all: true })
+    assert.equal(purged.ok, true)
+    const records = await readAudit(world)
+    const purge = records.find((record) => record.action === 'purge')
+    assert.ok(purge)
+    assert.equal(purge.entryIds.length, 2, 'the actual removed entry ids are recorded')
+    assert.equal(purge.entries.length, 2)
+    const paths = purge.entries.map((entry) => entry.originalPath)
+    assert.ok(paths.some((target) => String(target).endsWith('s1')), 'session entry path recorded')
+    assert.ok(paths.some((target) => String(target).endsWith('ws1')), 'workspace entry path recorded')
+    assert.ok(purge.entries.every((entry) => typeof entry.title === 'string' && entry.title !== ''))
+    const inventory = await engine.inventory()
+    assert.equal(inventory.audit.recent[0].action, 'purge')
+    assert.equal(inventory.audit.recent[0].entryIds.length, 2)
+    assert.equal(inventory.audit.recent[0].entries.length, 2)
   })
 
   test('a start-up run records per-entry skip/delete records plus one startup-run summary', async () => {
@@ -3701,7 +3925,10 @@ describe('audit log (SPEC §5.9)', () => {
     assert.equal((await engine.execute({ planId: plan.planId })).ok, true)
     assert.equal(await exists(world.auditFile), false, 'a disabled audit writes no file')
     const inventory = await engine.inventory()
-    assert.deepEqual(inventory.audit, { enabled: false, lastStartup: null, recent: [] })
+    assert.deepEqual(inventory.audit, {
+      enabled: false, healthy: true, writeFailures: 0, lastWriteAt: null,
+      lastError: null, lastRotationError: null, lastStartup: null, recent: [],
+    })
   })
 
   test('the audit log rotates to one generation past auditMaxBytes', async () => {
@@ -3738,9 +3965,101 @@ describe('audit log (SPEC §5.9)', () => {
       assert.ok(Array.isArray(inventory.audit.recent), 'the overview stays total')
       // Nothing reached the unwritable file: the log is diagnostic and never persisted a torn state.
       assert.deepEqual(await readAudit(world), [])
+      // 0.6.4: the failure is visible instead of the page pretending an audit trail exists.
+      assert.equal(inventory.audit.healthy, false)
+      assert.ok(inventory.audit.writeFailures >= 1)
+      assert.equal(typeof inventory.audit.lastError, 'string')
     } finally {
       await fsp.chmod(world.stateDir, 0o700)
     }
+  })
+})
+
+describe('audit module serialization and health (0.6.4)', () => {
+  test('concurrent appends are serialized and health reports the last write', async () => {
+    const root = path.join(TMP, `audit-module-${++caseId}`)
+    await fsp.mkdir(root, { recursive: true })
+    const filePath = path.join(root, 'audit.jsonl')
+    const log = await createAuditLog({ filePath, maxBytes: 0, enabled: true, now: () => 1234 })
+    await Promise.all(Array.from({ length: 25 }, (_, index) => log.append({
+      source: 'immediate',
+      action: 'delete',
+      status: 'trashed',
+      targets: [{ kind: 'session', id: `s${index}` }],
+    })))
+    const text = await fsp.readFile(filePath, 'utf8')
+    assert.equal(text.split('\n').filter((line) => line.trim() !== '').length, 25, 'no lost or interleaved lines')
+    const health = log.health()
+    assert.deepEqual({ ...health, lastError: null, lastRotationError: null }, {
+      healthy: true,
+      writeFailures: 0,
+      lastWriteAt: 1234,
+      lastError: null,
+      lastRotationError: null,
+    })
+  })
+
+  test('a write failure is reported through health without throwing', { skip: process.platform === 'win32' }, async () => {
+    const root = path.join(TMP, `audit-failure-${++caseId}`)
+    await fsp.mkdir(root, { recursive: true })
+    const log = await createAuditLog({ filePath: path.join(root, 'audit.jsonl'), maxBytes: 0, enabled: true, now: () => 5 })
+    await fsp.chmod(root, 0o500)
+    try {
+      const appended = await log.append({ action: 'delete', status: 'trashed', targets: [] })
+      assert.equal(appended, false)
+      const health = log.health()
+      assert.equal(health.healthy, false)
+      assert.equal(health.writeFailures, 1)
+      assert.equal(typeof health.lastError, 'string')
+    } finally {
+      await fsp.chmod(root, 0o700)
+    }
+  })
+
+  test('a write failure that is followed by a success becomes healthy again', { skip: process.platform === 'win32' }, async () => {
+    const root = path.join(TMP, `audit-recovery-${++caseId}`)
+    await fsp.mkdir(root, { recursive: true })
+    const log = await createAuditLog({ filePath: path.join(root, 'audit.jsonl'), maxBytes: 0, enabled: true, now: () => 9 })
+    await fsp.chmod(root, 0o500)
+    try {
+      assert.equal(await log.append({ action: 'delete', status: 'trashed', targets: [] }), false)
+      assert.equal(log.health().healthy, false)
+    } finally {
+      await fsp.chmod(root, 0o700)
+    }
+    assert.equal(await log.append({ action: 'delete', status: 'trashed', targets: [] }), true)
+    const health = log.health()
+    assert.equal(health.healthy, true, 'the current state recovered')
+    assert.equal(health.lastError, null)
+    assert.equal(health.writeFailures, 1, 'the historical failure count is kept')
+  })
+
+  test('a rotation failure is reported separately and does not drop the record', async () => {
+    const root = path.join(TMP, `audit-rotation-${++caseId}`)
+    await fsp.mkdir(root, { recursive: true })
+    const filePath = path.join(root, 'audit.jsonl')
+    // A directory at the rotated path makes the rename fail while the current file stays writable.
+    await fsp.mkdir(`${filePath}.1`, { recursive: true })
+    await fsp.writeFile(filePath, 'x\n')
+    const log = await createAuditLog({ filePath, maxBytes: 1, enabled: true, now: () => 11 })
+    assert.equal(await log.append({ action: 'delete', status: 'trashed', targets: [] }), true)
+    const health = log.health()
+    assert.equal(health.healthy, true, 'appending still works')
+    assert.equal(typeof health.lastRotationError, 'string')
+    assert.ok((await fsp.readFile(filePath, 'utf8')).includes('"action":"delete"'), 'the record reached the file')
+  })
+
+  test('per-record item and entry detail is bounded', async () => {
+    const root = path.join(TMP, `audit-bounds-${++caseId}`)
+    await fsp.mkdir(root, { recursive: true })
+    const filePath = path.join(root, 'audit.jsonl')
+    const log = await createAuditLog({ filePath, maxBytes: 0, enabled: true, now: () => 7 })
+    const items = Array.from({ length: 100 }, (_, index) => ({ kind: 'session', id: `s${index}`, status: 'trashed', code: null }))
+    const entries = Array.from({ length: 80 }, (_, index) => ({ id: `e${index}`, kind: 'session', title: `t${index}`, originalPath: `/p/${index}` }))
+    assert.equal(await log.append({ action: 'delete', status: 'trashed', targets: [], items, entries }), true)
+    const record = JSON.parse((await fsp.readFile(filePath, 'utf8')).trim())
+    assert.equal(record.items.length, 64)
+    assert.equal(record.entries.length, 50)
   })
 })
 

@@ -15,7 +15,7 @@ kind: "package-bundle"
 
 DSH 本身对工作区只做「移除注册」——目录、文件与会话历史都留在磁盘上；对会话只有「归档」，没有删除。`dsh-cleanup` 补上这一段，同时把破坏面收窄：目标只能用 DSH 的身份指定、绝不用任意路径；每次删除都经过计划、复核与确认；默认结果是可恢复的回收站。
 
-- 包名：`dsh-cleanup` 0.6.3
+- 包名：`dsh-cleanup` 0.6.4
 - 仓库：<https://github.com/xiaoyangren6514/dsh-cleanup>
 - 许可证：MIT © 2026 fly
 - 验证环境：DSH 0.2.2-rc.1 / 0.2.2-rc.2
@@ -97,6 +97,14 @@ Host 平台有目录打开器时（macOS、Windows、Linux；`inventory.capabili
 - **恢复不再只是搬文件。** v2 回收站元数据记录工作区标题与会话的置顶/归档状态：恢复工作区会重新注册（`reRegistered`），恢复会话会把置顶/归档放回去（`stateRestored`）；两者都是尽力而为，失败只作为 `warnings` 报告，文件仍然恢复。原路径被占用时，工作区条目可以「恢复为副本」（`<原名> (restored)`），会话日志目录不能改名因此仍要求先移走占用项；0.6.2 及更早的 v1 条目照常可列出、恢复、清空。
 - **执行前会再读一次安全开关。** 永久删除开关在计划时与执行时各查一次；计划生成后关闭开关，执行以 `PERMANENT_DISABLED` 拒绝，而不是沿用计划里的旧值。
 
+### 可观测性与长任务体验（0.6.4）
+
+- **审计更诚实。** 删除记录带每项结果（≤64 条 `{kind,id,status,code}`）与实际入回收站的 `entryIds`；清空回收站记录真正删掉的条目（id/kind/title/originalPath，≤50）。审计写入健康（`healthy/writeFailures/lastWriteAt/lastError/lastRotationError`）随盘点返回，「最近删除」在日志停止写入时显示警告；同一实例的追加写串行化，轮转不会再和并发记录互相踩踏。
+- **延迟队列部分执行。** 一次排队的多个目标里，被阻塞且能归因到排队根目标的会留在队列（`lastAttemptAt` 防止同一次启动重复尝试），其余照常删除；被阻塞的是扫入的子代理日志等不可拆目标时，整条保持不动。删除已执行但队列写失败时结果带 `persistenceError`，条目留到下次启动。
+- **会话跨卷预检。** 回收站模式在计划时比较会话日志目录与回收站卷，不同卷直接 `TRASH_CROSS_DEVICE`，不用等确认后逐项失败。
+- **长任务更可控。** 复核勾选合并为 350ms 一次重规划，重规划期间只禁确认按钮与改变删除语义的开关（模式/同时删除会话/子代理展开），行与输入保持可交互；`typed` 目录名在目标未变时保留。清空工作区支持「完成本批后停止」并显示已清理/总数；「测量大小」每 200 个 id 一批、显示进度并可停止，已测结果保留。
+- **记忆视图。** 页签、排序、归档/工作区筛选与「显示更多」上限写入插件自有 `localStorage`，非法值回落默认；选择、搜索和设置草稿不持久化。
+
 ## 安全模型
 
 从一次点击到一个字节被删除，中间有五道闸。
@@ -138,10 +146,10 @@ DSH 会让 Agent 及其会话写句柄存活到进程结束，并且没有公开
 
 ```sh
 # 从 npm 安装（包发布之后）
-dsh plugin --profile web add dsh-cleanup@0.6.3
+dsh plugin --profile web add dsh-cleanup@0.6.4
 
-# 从 GitHub 安装（v0.6.3 是 tag，指向固定提交；需要严格 pin 时用 `git rev-parse v0.6.3` 换成完整 sha）
-dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.3
+# 从 GitHub 安装（v0.6.4 是 tag，指向固定提交；需要严格 pin 时用 `git rev-parse v0.6.4` 换成完整 sha）
+dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.4
 
 # 从本地 checkout 安装
 git clone https://github.com/xiaoyangren6514/dsh-cleanup.git
@@ -183,6 +191,8 @@ DSH 0.2.2（rc.1 / rc.2）**没有官方插件市场或官方索引**。Discover
 
 下面这些是 DSH 或本版本插件的性质，不是待修的 bug：
 
+- **延迟队列的部分执行有边界。** 只有能明确归因到排队根目标的 blocker 才能拆分；扫入的子代理日志、跨进程写租约命中的非根目标会让整条保持原样。队列写失败时删除已经发生，结果带 `persistenceError`，无法回滚。
+- **审计健康是进程内状态。** `writeFailures/lastError` 由当前 Host 的审计实例统计，重启后归零；「最近删除」只能证明本进程的健康，不能证明历史每一次删除都被记录。
 - **撤销只在回收站模式、且整次复核全部成功时可用。** 永久删除或混合结果没有撤销；永久模式立即抹掉，结果页只给出摘要。
 - **恢复是「文件 + 尽力恢复状态」。** 文件总会还原；工作区重新注册、会话置顶/归档恢复依赖 Host 接口，失败时文件仍恢复成功并以 `warnings` 说明（`reRegistered: false`）。原路径被占用时工作区可恢复为副本，会话日志目录不能改名。
 - **活会话不能立即删除。** DSH 会把打开过的会话 Agent 及其日志写句柄保留到 Host 进程结束，而且没有释放接口；此时删日志会损坏它。复核弹窗提供**安排删除**，队列在下次 DSH 启动、任何会话恢复之前执行；共享同一个 `$DSH_HOME` 的另一个 Host 进程打开的会话同样会被拒绝。

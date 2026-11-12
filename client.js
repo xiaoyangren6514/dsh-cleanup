@@ -56,6 +56,11 @@ window.__ModuleLoader__.load({
     /** Ignore a confirming second activation for this long so a double click cannot purge. */
     const CONFIRM_COOLDOWN_MS = 400
     /**
+     * Review selection edits update the UI immediately and are coalesced into one plan request
+     * after this idle window (SPEC §9, 0.6.4 D). Rapid clicks must not queue one round trip each.
+     */
+    const PLAN_DEBOUNCE_MS = 350
+    /**
      * Per-request deadlines (SPEC §8). A Host that never answers used to leave the page spinning
      * forever; every `request` now carries one of these and reports `transport: 'timeout'`.
      * Page-level reads are quick; planning/folding may walk a large history; deletion and
@@ -122,8 +127,18 @@ window.__ModuleLoader__.load({
      * wrapped so a browser that blocks localStorage cannot break the page (default: off).
      */
     const USAGE_PREF_STORAGE_KEY = 'dsh-cleanup.usageEnabled'
+    /** Plugin-owned page-layout preferences (tab/sort/filter/limit); never selection or drafts. */
+    const PAGE_PREFS_STORAGE_KEY = 'dsh-cleanup.pagePrefs'
+    /** Values accepted when restoring `pagePrefs`; anything else falls back to the page defaults. */
+    const PAGE_PREFS_TABS = ['workspaces', 'sessions', 'trash', 'settings']
+    const PAGE_PREFS_SORTS = ['newest', 'oldest', 'largest', 'usage', 'inactive']
+    const PAGE_PREFS_FILTERS = ['all', 'archived', 'active']
+    const PAGE_PREFS_WORKSPACE_MAX = 200
+    const PAGE_PREFS_LIMIT_MAX = 2000
     /** Host limit for one `POST api/cleanup.usage` request (SPEC §4.10). */
     const USAGE_CHUNK_MAX = 200
+    /** Ids per `POST api/cleanup.measure` request while a page measures (0.6.4 F). */
+    const MEASURE_CHUNK_SIZE = 200
     /** Cache-hit rates are shown rounded to whole percent. */
     const USAGE_PERCENT_FORMAT = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 })
     /** Tokens below this are printed verbatim; above it the compact k/M form is used. */
@@ -248,6 +263,9 @@ window.__ModuleLoader__.load({
       'deferred.retained.forgotten_one': '已忽略 {count} 项',
       'deferred.retained.forgotten_other': '已忽略 {count} 项',
       'audit.title': '最近删除',
+      'audit.health.unhealthy': '审计日志写入异常，最近的错误：{error}',
+      'audit.items': '共 {count} 项 · {failed} 项失败',
+      'audit.entries': '回收站条目 {count} 项',
       'audit.empty': '还没有删除记录。',
       'audit.lastStartup': '上次启动处理（{time}）：已应用 {applied} · 跳过 {skipped} · 失败 {failed}',
       'audit.source.startup': '启动时',
@@ -278,6 +296,9 @@ window.__ModuleLoader__.load({
       'audit.notice.dismiss': '知道了',
       'measure.button': '测量',
       'measure.measuring': '测量中…',
+      'measure.progress': '测量中… {done}/{total}',
+      'measure.stop': '停止测量',
+      'measure.stopped': '已停止测量，已测得的大小已保留。',
       'measure.unmeasured': '未测量',
       'measure.truncated': '统计达到扫描上限，实际大小更大',
       'count.file_one': '{count} 个文件',
@@ -304,6 +325,9 @@ window.__ModuleLoader__.load({
       'action.undoDelete': '撤销删除',
       'action.openTrash': '打开回收站',
       'action.trimToLimit': '保留前 64 项并重新复核',
+      'action.stopAfterBatch': '完成本批后停止',
+      'dialog.clear.stopRequested': '将在本批完成后停止',
+      'dialog.clear.stopAfterBatch': '在当前批次结束后停止，不再继续下一批',
       'action.clearSearch': '清除搜索',
       'action.restoreSibling': '恢复为副本',
       'action.emptyTrash': '清空回收站',
@@ -364,6 +388,7 @@ window.__ModuleLoader__.load({
       'deferred.lastRunSkipped_other': '{count} 个安排被跳过',
       'deferred.lastRunFailed_one': '{count} 个安排失败',
       'deferred.lastRunFailed_other': '{count} 个安排失败',
+      'deferred.persistenceError': '队列写入失败：{error}',
       'deferred.showDetails': '查看未成功的记录',
       'deferred.hideDetails': '收起未成功的记录',
       'deferred.status.skipped': '已跳过',
@@ -488,6 +513,7 @@ window.__ModuleLoader__.load({
       'dialog.confirm.label': '请输入文件夹名称“{name}”以确认永久删除',
       'dialog.confirm.placeholder': '文件夹名称',
       'dialog.confirm.mismatch': '输入的文件夹名称不匹配',
+      'dialog.typedReset': '复核目标已变化，之前输入的文件夹名称已清空，请重新输入。',
       'dialog.footer.delete': '删除',
       'dialog.footer.clear': '清空会话',
       'dialog.items.workspace': '工作区目录',
@@ -538,6 +564,7 @@ window.__ModuleLoader__.load({
       'dialog.done.partial_one': '{count} 项删除失败，未自动关闭；请检查后重试。',
       'dialog.done.partial_other': '{count} 项删除失败，未自动关闭；请检查后重试。',
       'dialog.clear.title': '清空完成',
+      'dialog.clear.stoppedTitle': '已停止清空',
       'dialog.clear.emptyTitle': '没有可清理的会话',
       'dialog.clear.emptyNone': '这个工作区还没有会话记录。',
       'dialog.clear.emptyInUse_one': '{count} 条会话正在本次启动中打开或运行，无法立即删除；重启 DSH 后再试。',
@@ -558,6 +585,10 @@ window.__ModuleLoader__.load({
       'dialog.clear.excluded_other': '已取消 {count} 条，不会被清空。',
       'dialog.clear.progress_one': '第 {batch} 批 · 已清理 {done} 条',
       'dialog.clear.progress_other': '第 {batch} 批 · 已清理 {done} 条',
+      'dialog.clear.progressTotal_one': '已清理 {done} / 共 {total} 条（第 {batch} 批）',
+      'dialog.clear.progressTotal_other': '已清理 {done} / 共 {total} 条（第 {batch} 批）',
+      'dialog.clear.progressTotalAtLeast_one': '已清理 {done} / 至少 {total} 条（第 {batch} 批）',
+      'dialog.clear.progressTotalAtLeast_other': '已清理 {done} / 至少 {total} 条（第 {batch} 批）',
       'dialog.clear.done_summary_one': '已清理 {count} 条会话记录，共 {size}',
       'dialog.clear.done_summary_other': '已清理 {count} 条会话记录，共 {size}',
       'dialog.clear.stop.blocked_one': '还有 {count} 条在当前状态无法删除，可稍后重试。',
@@ -565,6 +596,8 @@ window.__ModuleLoader__.load({
       'dialog.clear.stop.failed_one': '还有 {count} 条未清理：删除请求失败。',
       'dialog.clear.stop.failed_other': '还有 {count} 条未清理：删除请求失败。',
       'dialog.clear.stop.limit': '已达单次清理的安全上限，请稍后再执行一次。',
+      'dialog.clear.stop.stopped_one': '已按要求在本批结束后停止，还有 {count} 条未清理，可再次执行清空。',
+      'dialog.clear.stop.stopped_other': '已按要求在本批结束后停止，还有 {count} 条未清理，可再次执行清空。',
       'dialog.clear.trashNote': '已清理的会话记录可在“存储清理 → 回收站”中恢复。',
       'dialog.clear.permNote': '永久删除的会话记录无法恢复。',
       'dialog.failed.planTitle': '无法准备删除计划',
@@ -762,6 +795,9 @@ window.__ModuleLoader__.load({
       'deferred.retained.forgotten_one': 'Forgot {count} entry',
       'deferred.retained.forgotten_other': 'Forgot {count} entries',
       'audit.title': 'Recent deletions',
+      'audit.health.unhealthy': 'The audit log could not be written; last error: {error}',
+      'audit.items': '{count} items · {failed} failed',
+      'audit.entries': '{count} trash entries',
       'audit.empty': 'No deletions recorded yet.',
       'audit.lastStartup': 'Last start ({time}): applied {applied} · skipped {skipped} · failed {failed}',
       'audit.source.startup': 'At startup',
@@ -792,6 +828,9 @@ window.__ModuleLoader__.load({
       'audit.notice.dismiss': 'Got it',
       'measure.button': 'Measure',
       'measure.measuring': 'Measuring…',
+      'measure.progress': 'Measuring… {done}/{total}',
+      'measure.stop': 'Stop measuring',
+      'measure.stopped': 'Measuring stopped; the sizes measured so far are kept.',
       'measure.unmeasured': 'Not measured',
       'measure.truncated': 'The scan budget was reached; the real size is larger',
       'count.file_one': '{count} file',
@@ -818,6 +857,9 @@ window.__ModuleLoader__.load({
       'action.undoDelete': 'Undo delete',
       'action.openTrash': 'Open trash',
       'action.trimToLimit': 'Keep first 64 and check again',
+      'action.stopAfterBatch': 'Stop after this batch',
+      'dialog.clear.stopRequested': 'Will stop after this batch completes',
+      'dialog.clear.stopAfterBatch': 'Stop when the current batch finishes; no further batches run',
       'action.clearSearch': 'Clear search',
       'action.restoreSibling': 'Restore as copy',
       'action.emptyTrash': 'Empty trash',
@@ -878,6 +920,7 @@ window.__ModuleLoader__.load({
       'deferred.lastRunSkipped_other': '{count} skipped',
       'deferred.lastRunFailed_one': '{count} failed',
       'deferred.lastRunFailed_other': '{count} failed',
+      'deferred.persistenceError': 'Could not persist the queue: {error}',
       'deferred.showDetails': 'Show non-successful entries',
       'deferred.hideDetails': 'Hide non-successful entries',
       'deferred.status.skipped': 'Skipped',
@@ -1002,6 +1045,7 @@ window.__ModuleLoader__.load({
       'dialog.confirm.label': 'Type the folder name "{name}" to confirm permanent deletion',
       'dialog.confirm.placeholder': 'Folder name',
       'dialog.confirm.mismatch': 'The folder name does not match',
+      'dialog.typedReset': 'The review changed, so the typed folder name was cleared; type it again.',
       'dialog.footer.delete': 'Delete',
       'dialog.footer.clear': 'Clear sessions',
       'dialog.items.workspace': 'Workspace folder',
@@ -1052,6 +1096,7 @@ window.__ModuleLoader__.load({
       'dialog.done.partial_one': '{count} item failed to delete; the window stays open so you can check it.',
       'dialog.done.partial_other': '{count} items failed to delete; the window stays open so you can check them.',
       'dialog.clear.title': 'Workspace sessions cleared',
+      'dialog.clear.stoppedTitle': 'Clearing stopped',
       'dialog.clear.emptyTitle': 'No sessions to clear',
       'dialog.clear.emptyNone': 'This workspace has no session logs yet.',
       'dialog.clear.emptyInUse_one': '{count} session log is open or running in this app run and cannot be deleted now; restart DSH and try again.',
@@ -1072,6 +1117,10 @@ window.__ModuleLoader__.load({
       'dialog.clear.excluded_other': '{count} were un-checked and will not be cleared.',
       'dialog.clear.progress_one': 'Batch {batch} · {done} cleared',
       'dialog.clear.progress_other': 'Batch {batch} · {done} cleared',
+      'dialog.clear.progressTotal_one': 'Cleared {done} of {total} · batch {batch}',
+      'dialog.clear.progressTotal_other': 'Cleared {done} of {total} · batch {batch}',
+      'dialog.clear.progressTotalAtLeast_one': 'Cleared {done} of at least {total} · batch {batch}',
+      'dialog.clear.progressTotalAtLeast_other': 'Cleared {done} of at least {total} · batch {batch}',
       'dialog.clear.done_summary_one': 'Cleared {count} session log, {size} in total',
       'dialog.clear.done_summary_other': 'Cleared {count} session logs, {size} in total',
       'dialog.clear.stop.blocked_one': '{count} more cannot be deleted in its current state; try again later.',
@@ -1079,6 +1128,8 @@ window.__ModuleLoader__.load({
       'dialog.clear.stop.failed_one': '{count} more was not cleared: the delete request failed.',
       'dialog.clear.stop.failed_other': '{count} more were not cleared: the delete request failed.',
       'dialog.clear.stop.limit': 'The per-run safety limit was reached; run the clear again to continue.',
+      'dialog.clear.stop.stopped_one': 'Stopped after this batch as requested; {count} more is not cleared. Run the clear again to continue.',
+      'dialog.clear.stop.stopped_other': 'Stopped after this batch as requested; {count} more are not cleared. Run the clear again to continue.',
       'dialog.clear.trashNote': 'Cleared session logs can be restored from Storage cleanup → Trash.',
       'dialog.clear.permNote': 'Permanently deleted session logs cannot be restored.',
       'dialog.failed.planTitle': 'Could not prepare the deletion plan',
@@ -1425,6 +1476,57 @@ window.__ModuleLoader__.load({
       try {
         if (typeof localStorage === 'undefined' || localStorage === null) return
         localStorage.setItem(key, value === true ? 'true' : 'false')
+      } catch (error) {
+        /* a blocked storage is not an error the page can act on */
+      }
+    }
+
+    /**
+     * Restore the page layout (`tab/sort/filter/limit`) from `PAGE_PREFS_STORAGE_KEY` (0.6.4 G).
+     *
+     * Every field is validated on its own: a corrupted blob, an unknown enum value or a nonsense
+     * limit simply keeps the page default for that field instead of failing the whole restore.
+     * Selection, search text and settings drafts are deliberately never persisted.
+     * @returns {object} a partial page-state patch (possibly empty).
+     */
+    function readPagePrefs() {
+      let raw = null
+      try {
+        if (typeof localStorage === 'undefined' || localStorage === null) return {}
+        raw = localStorage.getItem(PAGE_PREFS_STORAGE_KEY)
+      } catch (error) {
+        return {}
+      }
+      if (typeof raw !== 'string' || raw === '') return {}
+      let parsed = null
+      try { parsed = JSON.parse(raw) } catch (error) { return {} }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+      const prefs = {}
+      if (PAGE_PREFS_TABS.indexOf(parsed.tab) !== -1) prefs.tab = parsed.tab
+      if (PAGE_PREFS_SORTS.indexOf(parsed.sessionSort) !== -1) prefs.sessionSort = parsed.sessionSort
+      if (PAGE_PREFS_FILTERS.indexOf(parsed.sessionFilter) !== -1) prefs.sessionFilter = parsed.sessionFilter
+      if (typeof parsed.sessionWorkspace === 'string' && parsed.sessionWorkspace.length <= PAGE_PREFS_WORKSPACE_MAX) {
+        prefs.sessionWorkspace = parsed.sessionWorkspace
+      }
+      if (typeof parsed.sessionLimit === 'number' && isFinite(parsed.sessionLimit)) {
+        const limit = Math.floor(parsed.sessionLimit)
+        if (limit >= 1 && limit <= PAGE_PREFS_LIMIT_MAX) prefs.sessionLimit = limit
+      }
+      return prefs
+    }
+
+    /** Persist the page layout; guarded like every other plugin-owned localStorage access. */
+    function writePagePrefs(state) {
+      if (!state || typeof state !== 'object') return
+      try {
+        if (typeof localStorage === 'undefined' || localStorage === null) return
+        localStorage.setItem(PAGE_PREFS_STORAGE_KEY, JSON.stringify({
+          tab: state.tab,
+          sessionSort: state.sessionSort,
+          sessionFilter: state.sessionFilter,
+          sessionWorkspace: state.sessionWorkspace,
+          sessionLimit: state.sessionLimit,
+        }))
       } catch (error) {
         /* a blocked storage is not an error the page can act on */
       }
@@ -1927,6 +2029,10 @@ window.__ModuleLoader__.load({
       return String(eventCount === null ? '' : eventCount) + ':' + String(sizeBytes === null ? '' : sizeBytes)
     }
 
+    /** Max `items`/`entries` per audit record the Host writes (SPEC §5.9, 0.6.4 A1). */
+    const AUDIT_ITEMS_MAX = 64
+    const AUDIT_ENTRIES_MAX = 50
+
     /** One audit record from `inventory.audit.recent` (SPEC §4.1/§5.9). */
     function normalizeAuditRecord(value) {
       if (!value || typeof value !== 'object' || Array.isArray(value)) return null
@@ -1935,6 +2041,36 @@ window.__ModuleLoader__.load({
       for (let i = 0; i < rawTargets.length; i += 1) {
         const target = normalizeDeferredTarget(rawTargets[i])
         if (target !== null) targets.push(target)
+      }
+      // 0.6.4: a delete/purge record carries the per-item outcome, so "recent deletions" can say
+      // how many of them failed instead of only the aggregate status.
+      const items = []
+      const rawItems = Array.isArray(value.items) ? value.items : []
+      for (let i = 0; i < rawItems.length && items.length < AUDIT_ITEMS_MAX; i += 1) {
+        const item = rawItems[i]
+        if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+        if (typeof item.kind !== 'string' || item.kind === '') continue
+        if (typeof item.id !== 'string' || item.id === '') continue
+        if (typeof item.status !== 'string' || item.status === '') continue
+        items.push({
+          kind: item.kind,
+          id: item.id,
+          status: item.status,
+          code: typeof item.code === 'string' && item.code !== '' ? item.code : null,
+        })
+      }
+      const entries = []
+      const rawEntries = Array.isArray(value.entries) ? value.entries : []
+      for (let i = 0; i < rawEntries.length && entries.length < AUDIT_ENTRIES_MAX; i += 1) {
+        const entry = rawEntries[i]
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+        if (typeof entry.id !== 'string' || entry.id === '') continue
+        entries.push({
+          id: entry.id,
+          kind: typeof entry.kind === 'string' && entry.kind !== '' ? entry.kind : null,
+          title: typeof entry.title === 'string' && entry.title !== '' ? entry.title : null,
+          originalPath: typeof entry.originalPath === 'string' && entry.originalPath !== '' ? entry.originalPath : null,
+        })
       }
       return {
         at: typeof value.at === 'number' && isFinite(value.at) ? value.at : 0,
@@ -1945,13 +2081,15 @@ window.__ModuleLoader__.load({
         status: typeof value.status === 'string' && value.status !== '' ? value.status : 'unknown',
         code: typeof value.code === 'string' && value.code !== '' ? value.code : null,
         bytes: typeof value.bytes === 'number' && isFinite(value.bytes) && value.bytes > 0 ? value.bytes : 0,
+        items: items,
+        entries: entries,
       }
     }
 
     /** `inventory.audit` = `{ enabled, lastStartup, recent }` (newest first, max 10). */
     function normalizeAudit(value) {
       if (!value || typeof value !== 'object' || Array.isArray(value)) {
-        return { enabled: false, lastStartup: null, recent: [] }
+        return { enabled: false, lastStartup: null, recent: [], health: null }
       }
       const rawStartup = value.lastStartup
       const lastStartup = rawStartup && typeof rawStartup === 'object' && !Array.isArray(rawStartup)
@@ -1968,10 +2106,31 @@ window.__ModuleLoader__.load({
         const record = normalizeAuditRecord(rawRecent[i])
         if (record !== null) recent.push(record)
       }
+      // 0.6.4 A2/H: write health. A Host that could not read the log also reports healthy:false with
+      // `lastError`, so the section can explain an empty-looking history instead of hiding it.
+      const rawHealth = value.health && typeof value.health === 'object' && !Array.isArray(value.health)
+        ? value.health
+        : null
+      const health = rawHealth === null
+        ? null
+        : {
+          healthy: rawHealth.healthy === true,
+          writeFailures: boundedCount(rawHealth.writeFailures, 0),
+          lastWriteAt: typeof rawHealth.lastWriteAt === 'number' && isFinite(rawHealth.lastWriteAt) && rawHealth.lastWriteAt > 0
+            ? rawHealth.lastWriteAt
+            : null,
+          lastError: typeof rawHealth.lastError === 'string' && rawHealth.lastError !== ''
+            ? rawHealth.lastError.slice(0, 300)
+            : null,
+          lastRotationError: typeof rawHealth.lastRotationError === 'string' && rawHealth.lastRotationError !== ''
+            ? rawHealth.lastRotationError.slice(0, 300)
+            : null,
+        }
       return {
         enabled: value.enabled === true,
         lastStartup: lastStartup && lastStartup.at > 0 ? lastStartup : null,
         recent: recent,
+        health: health,
       }
     }
 
@@ -2307,29 +2466,17 @@ window.__ModuleLoader__.load({
     // ------------------------------------------------------------------- HTTP
 
     /**
-     * One deadline-guarded abort signal for a single `request` call (SPEC §8).
+     * One deadline-guarded abort signal for a single `request` call (SPEC §8, 0.6.4 H).
      *
-     * Uses `AbortSignal.timeout` + `AbortSignal.any` where the runtime has them, and a manual
-     * controller + timer otherwise (the guard then also has to forward the caller's abort). The
-     * returned `didTimeout()` distinguishes "our deadline fired" from "the caller aborted", which
-     * is the difference between a `timeout` transport and an abort that must stay silent.
+     * One manual `AbortController` + `setTimeout`, never `AbortSignal.timeout`/`any`: the timer
+     * handle and the forwarded listener have to be released deterministically when the call
+     * settles, or a page that keeps opening reviews leaks a timer per request. `dispose()` clears
+     * both; `didTimeout()` keeps the "our deadline fired" signal distinct from a caller abort.
      * @param {AbortSignal | undefined} signal - caller's abort signal (supersede/unmount).
      * @param {number} timeoutMs - deadline in milliseconds.
      * @returns {{ signal: AbortSignal, didTimeout: () => boolean, dispose: () => void }}
      */
     function requestTimeoutGuard(signal, timeoutMs) {
-      const canCombine = typeof AbortSignal !== 'undefined'
-        && typeof AbortSignal.timeout === 'function'
-        && typeof AbortSignal.any === 'function'
-      if (canCombine) {
-        const timeoutSignal = AbortSignal.timeout(timeoutMs)
-        const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
-        return {
-          signal: combined,
-          didTimeout: function () { return timeoutSignal.aborted === true },
-          dispose: function () { },
-        }
-      }
       const controller = new AbortController()
       let timedOut = false
       let forward = null
@@ -2337,6 +2484,7 @@ window.__ModuleLoader__.load({
         timedOut = true
         try { controller.abort() } catch (error) { /* abort is best effort */ }
       }, timeoutMs)
+      // Node keeps a pending deadline from holding the process open; browsers have no `unref`.
       if (timer && typeof timer.unref === 'function') timer.unref()
       if (signal) {
         if (signal.aborted === true) {
@@ -2365,7 +2513,7 @@ window.__ModuleLoader__.load({
      * transport value (SPEC §8: non-JSON body, network failure, deadline expiry and
      * `{ok:false}` are distinct failures). A caller abort is re-thrown untouched; our own
      * deadline is reported as `{ transport: 'timeout' }` so the UI can offer a retry instead of
-     * trusting a result that may never arrive.
+     * trusting a result that may never arrive. The deadline guard is always disposed in `finally`.
      * @param {string} path - document-relative API path.
      * @param {object} payload - request body.
      * @param {AbortSignal} [signal] - caller's abort signal.
@@ -2377,34 +2525,35 @@ window.__ModuleLoader__.load({
         ? timeoutMs
         : REQUEST_TIMEOUT_MS
       const guard = requestTimeoutGuard(signal, deadline)
-      let response
       try {
-        response = await fetch(path, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(payload === undefined ? {} : payload),
-          signal: guard.signal,
-        })
-      } catch (error) {
+        let response
+        try {
+          response = await fetch(path, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(payload === undefined ? {} : payload),
+            signal: guard.signal,
+          })
+        } catch (error) {
+          if (guard.didTimeout()) return { transport: 'timeout' }
+          if (isAbortError(error)) throw error
+          return { transport: 'network' }
+        }
+        let body
+        try {
+          body = await response.json()
+        } catch (error) {
+          if (guard.didTimeout()) return { transport: 'timeout' }
+          if (isAbortError(error)) throw error
+          return { transport: 'badResponse' }
+        }
+        if (body === null || typeof body !== 'object' || Array.isArray(body) || typeof body.ok !== 'boolean') {
+          return { transport: 'badResponse' }
+        }
+        return body
+      } finally {
         guard.dispose()
-        if (guard.didTimeout()) return { transport: 'timeout' }
-        if (isAbortError(error)) throw error
-        return { transport: 'network' }
       }
-      let body
-      try {
-        body = await response.json()
-      } catch (error) {
-        guard.dispose()
-        if (guard.didTimeout()) return { transport: 'timeout' }
-        if (isAbortError(error)) throw error
-        return { transport: 'badResponse' }
-      }
-      guard.dispose()
-      if (body === null || typeof body !== 'object' || Array.isArray(body) || typeof body.ok !== 'boolean') {
-        return { transport: 'badResponse' }
-      }
-      return body
     }
 
     function toApiError(envelope) {
@@ -2684,6 +2833,7 @@ window.__ModuleLoader__.load({
       '.dsh-cleanup-wizard-footer{display:flex;justify-content:flex-end;gap:8px}',
       '.dsh-cleanup-progress-items{font-variant-numeric:tabular-nums}',
       '.dsh-cleanup-progress-elapsed{font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary)}',
+      '.dsh-cleanup-measure-progress{display:inline-flex;align-items:center;gap:6px;font-variant-numeric:tabular-nums}',
       // 0.6.3 a11y: one visible focus ring for the controls that relied on the UA default (tabs and
       // inline text buttons were effectively invisible on the coloured cards).
       '.dsh-cleanup-tab:focus-visible,.dsh-cleanup-inline-action:focus-visible,.dsh-cleanup-target-more:focus-visible,.dsh-cleanup-open:focus-visible,.dsh-cleanup-usage-toggle input:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}',
@@ -3379,7 +3529,7 @@ window.__ModuleLoader__.load({
                 familySize: treeRows.length,
                 checked: rootChecked && context.nodeChecked(nodeId) === true,
                 mixed: rootChecked && context.nodeMixed(nodeId) === true,
-                disabled: context.disabled || rootChecked === false,
+                disabled: context.selectionDisabled === true || rootChecked === false,
                 onToggleNode: context.onToggleNode,
               })
             }),
@@ -3442,7 +3592,11 @@ window.__ModuleLoader__.load({
       const state = context.state
       const catalog = context.catalog
       const plan = state.plan && typeof state.plan === 'object' ? state.plan : null
-      const disabled = state.phase === 'deleting' || state.phase === 'deferring' || state.refreshing === true
+      // 0.6.4 D: a re-plan no longer freezes the whole review. `selectionLocked` is the destructive
+      // in-flight lock (deleting/deferring); `semanticsLocked` additionally covers a re-plan, because
+      // changing mode/include switches while the plan is being recomputed would race the request.
+      const selectionLocked = state.phase === 'deleting' || state.phase === 'deferring'
+      const semanticsLocked = selectionLocked || state.refreshing === true
       const items = (plan && Array.isArray(plan.items) ? plan.items : []).filter(function (item) { return item && typeof item === 'object' })
       const warnings = plan && Array.isArray(plan.warnings) ? plan.warnings : []
       const blockers = plan && Array.isArray(plan.blockers) ? plan.blockers : []
@@ -3520,13 +3674,13 @@ window.__ModuleLoader__.load({
               h('button', {
                 type: 'button',
                 className: 'dsh-cleanup-inline-action',
-                disabled: disabled || (checkedRows === state.targets.length && checkedNodes === knownNodeIds.length),
+                disabled: selectionLocked || (checkedRows === state.targets.length && checkedNodes === knownNodeIds.length),
                 onClick: context.onSelectAll,
               }, t('dialog.select.all')),
               h('button', {
                 type: 'button',
                 className: 'dsh-cleanup-inline-action',
-                disabled: disabled,
+                disabled: selectionLocked,
                 onClick: context.onInvert,
               }, t('dialog.select.invert')),
             )
@@ -3569,7 +3723,7 @@ window.__ModuleLoader__.load({
               // A row can be checked while the plan in flight still lacks its item: show a pending
               // state instead of the "not selected" copy that would contradict the checkbox.
               pending: state.refreshing === true && selection[groupKey] === true && group.main === null,
-              disabled: disabled,
+              disabled: selectionLocked,
               onToggle: context.onToggleSelection,
             }),
             renderTargetChildren({
@@ -3581,7 +3735,8 @@ window.__ModuleLoader__.load({
               listId: 'dsh-cleanup-target-kids-' + domIdSafe(groupKey),
               summaryKey: isWorkspace ? 'dialog.groups.swept' : 'dialog.groups.descendants',
               expanded: context.expandedGroups[groupKey] === true,
-              disabled: disabled,
+              disabled: selectionLocked,
+              selectionDisabled: selectionLocked,
               rootChecked: rootChecked,
               nodeChecked: function (nodeId) { return nodeSelectionState(nodeId).checked },
               nodeMixed: function (nodeId) { return nodeSelectionState(nodeId).mixed },
@@ -3599,7 +3754,7 @@ window.__ModuleLoader__.load({
               type: 'checkbox',
               className: 'dsh-cleanup-check',
               checked: state.includeDescendants === true,
-              disabled: disabled,
+              disabled: semanticsLocked,
               onChange: function (event) { context.onIncludeDescendants(event.target.checked) },
             }),
             h('span', null, t('dialog.includeDescendants')),
@@ -3679,7 +3834,7 @@ window.__ModuleLoader__.load({
             label: t('dialog.mode.trash'),
             active: state.mode === 'trash',
             blocked: false,
-            disabled: disabled,
+            disabled: semanticsLocked,
             groupName: context.modeGroupName,
             onChange: context.onMode,
           }),
@@ -3689,7 +3844,7 @@ window.__ModuleLoader__.load({
             active: state.mode === 'permanent',
             blocked: permanentBlocked,
             note: permanentNote,
-            disabled: disabled,
+            disabled: semanticsLocked,
             groupName: context.modeGroupName,
             onChange: context.onMode,
           }),
@@ -3709,6 +3864,11 @@ window.__ModuleLoader__.load({
             h('span', null, t('dialog.mode.permAutoTrash')),
           )
           : null,
+        // The typed confirmation can disappear with the new plan (permanent -> trash); explain the
+        // lost input here because the input itself is no longer rendered (0.6.4 D).
+        state.typedReset === true && confirmation === null
+          ? h('div', { className: 'dsh-cleanup-muted', key: 'typed-reset' }, t('dialog.typedReset'))
+          : null,
       ))
 
       if (hasWorkspaceTarget) {
@@ -3717,7 +3877,7 @@ window.__ModuleLoader__.load({
             type: 'checkbox',
             className: 'dsh-cleanup-check',
             checked: state.includeSessions === true,
-            disabled: disabled,
+            disabled: semanticsLocked,
             onChange: function (event) { context.onIncludeSessions(event.target.checked) },
           }),
           h('span', null, t('dialog.includeSessions')),
@@ -3731,7 +3891,7 @@ window.__ModuleLoader__.load({
             className: 'dsh-cleanup-input',
             type: 'text',
             value: typed,
-            disabled: disabled,
+            disabled: selectionLocked,
             placeholder: t('dialog.confirm.placeholder'),
             autoComplete: 'off',
             spellCheck: false,
@@ -3739,6 +3899,9 @@ window.__ModuleLoader__.load({
             onChange: function (event) { context.onTyped(event.target.value) },
           }),
           mismatch ? h('span', { className: 'dsh-cleanup-field-error', role: 'alert' }, t('dialog.confirm.mismatch')) : null,
+          state.typedReset === true
+            ? h('span', { className: 'dsh-cleanup-muted', key: 'typed-reset' }, t('dialog.typedReset'))
+            : null,
         ))
       }
 
@@ -3828,7 +3991,8 @@ window.__ModuleLoader__.load({
         children.push(h('div', { className: 'dsh-cleanup-failed-title', key: 'title' }, t('dialog.failed.deleteTitle')))
         children.push(h('div', { key: 'summary' }, plural(t, 'dialog.done.allFailedSummary', failed)))
       } else {
-        children.push(h('div', { className: 'dsh-cleanup-done-title', key: 'title' }, t('dialog.clear.title')))
+        children.push(h('div', { className: 'dsh-cleanup-done-title', key: 'title' },
+          t(stop !== null && stop.code === 'stopped' ? 'dialog.clear.stoppedTitle' : 'dialog.clear.title')))
         children.push(h('div', { key: 'summary' }, plural(t, 'dialog.clear.done_summary', count, { size: formatBytes(bytes) })))
       }
       if (skipped > 0) {
@@ -3843,7 +4007,9 @@ window.__ModuleLoader__.load({
       if (stop !== null) {
         const text = stop.code === 'limit'
           ? t('dialog.clear.stop.limit')
-          : plural(t, stop.code === 'failed' ? 'dialog.clear.stop.failed' : 'dialog.clear.stop.blocked', remaining)
+          : (stop.code === 'stopped'
+            ? plural(t, 'dialog.clear.stop.stopped', remaining)
+            : plural(t, stop.code === 'failed' ? 'dialog.clear.stop.failed' : 'dialog.clear.stop.blocked', remaining))
         children.push(h('div', { className: 'dsh-cleanup-notice dsh-cleanup-notice-warn', key: 'stop' },
           h('span', { className: 'dsh-cleanup-notice-mark', 'aria-hidden': 'true' }, '!'),
           h('span', null, text),
@@ -4332,7 +4498,7 @@ window.__ModuleLoader__.load({
         && !!state.error && state.error.code === 'TOO_MANY_TARGETS'
 
       let footer
-      if (phase === 'planning' || (phase === 'review' && state.refreshing === true)) {
+      if (phase === 'planning') {
         footer = [
           h('button', {
             key: 'cancel',
@@ -4380,12 +4546,19 @@ window.__ModuleLoader__.load({
               : null,
             // A workspace clear walks the workspace in batches; the batch number and the folded
             // count are the only honest progress facts (the Host does not stream per-item events).
+            // 0.6.4 E: when the pre-flight total is known it becomes the progress denominator.
             state.clear !== null
               ? h('span', { className: 'dsh-cleanup-progress-items' },
-                plural(t, 'dialog.clear.progress', state.clear.batches + 1, {
-                  batch: formatNumber(state.clear.batches + 1),
-                  done: formatNumber(state.clear.done.count),
-                }))
+                state.clear.total > 0
+                  ? plural(t, state.clear.truncated === true ? 'dialog.clear.progressTotalAtLeast' : 'dialog.clear.progressTotal', state.clear.batches + 1, {
+                    batch: formatNumber(state.clear.batches + 1),
+                    done: formatNumber(state.clear.done.count),
+                    total: formatNumber(state.clear.total),
+                  })
+                  : plural(t, 'dialog.clear.progress', state.clear.batches + 1, {
+                    batch: formatNumber(state.clear.batches + 1),
+                    done: formatNumber(state.clear.done.count),
+                  }))
               : null,
             h('span', {
               className: 'dsh-cleanup-progress-elapsed',
@@ -4395,6 +4568,19 @@ window.__ModuleLoader__.load({
             })),
           ),
           h('button', { key: 'cancel', type: 'button', className: 'dsh-cleanup-btn', disabled: true }, t('action.cancel')),
+          // 0.6.4 E: stop the walk between batches without cancelling the one in flight.
+          state.clear !== null && state.clear.stopRequested !== true
+            ? h('button', {
+              key: 'stop-after-batch',
+              type: 'button',
+              className: 'dsh-cleanup-btn',
+              title: t('dialog.clear.stopAfterBatch'),
+              onClick: api.requestClearStop,
+            }, t('action.stopAfterBatch'))
+            : null,
+          state.clear !== null && state.clear.stopRequested === true
+            ? h('span', { key: 'stop-pending', className: 'dsh-cleanup-muted' }, t('dialog.clear.stopRequested'))
+            : null,
           h('button', {
             key: 'delete',
             type: 'button',
@@ -5877,7 +6063,8 @@ window.__ModuleLoader__.load({
       for (let i = 0; i < results.length; i += 1) {
         const result = results[i]
         if (!result || typeof result !== 'object') continue
-        if (result.status === 'skipped' || result.status === 'failed' || (typeof result.code === 'string' && result.code !== '')) {
+        const persistenceFailed = typeof result.persistenceError === 'string' && result.persistenceError !== ''
+        if (persistenceFailed || result.status === 'skipped' || result.status === 'failed' || (typeof result.code === 'string' && result.code !== '')) {
           attention.push(result)
         }
       }
@@ -6080,6 +6267,10 @@ window.__ModuleLoader__.load({
         const blockChildren = [
           h('div', { className: 'dsh-cleanup-deferred-lastrun', role: 'status', key: 'line' }, lineChildren),
         ]
+        if (lastRun && typeof lastRun.persistenceError === 'string' && lastRun.persistenceError !== '') {
+          blockChildren.push(h('div', { className: 'dsh-cleanup-muted', key: 'persistence' },
+            t('deferred.persistenceError', { error: lastRun.persistenceError.slice(0, 160) })))
+        }
         if (attention.length > 0) {
           blockChildren.push(h('div', { className: 'dsh-cleanup-deferred-lastrun-actions', key: 'toggle' },
             h('button', {
@@ -6102,11 +6293,18 @@ window.__ModuleLoader__.load({
               const hiddenTargets = targets.length - shownTargets.length
               const detail = localizedCode(t, 'error', result.code, result.reason)
               const tone = status === 'failed' ? 'error' : 'warn'
+              const persistenceError = typeof result.persistenceError === 'string' && result.persistenceError !== ''
+                ? result.persistenceError.slice(0, 160)
+                : null
               return h('li', { className: 'dsh-cleanup-deferred-result', key: 'result-' + index },
                 h('div', { className: 'dsh-cleanup-deferred-result-head' },
                   h(Badge, { tone: tone }, statusText),
                   h('span', { className: 'dsh-cleanup-deferred-result-detail' }, detail),
                 ),
+                // 0.6.4 B2/H: the queue write failed, so the entry may run again next start.
+                persistenceError !== null
+                  ? h('div', { className: 'dsh-cleanup-muted' }, t('deferred.persistenceError', { error: persistenceError }))
+                  : null,
                 h('div', { className: 'dsh-cleanup-item-meta' },
                   h('span', null, t('deferred.mode', { mode: deferredModeText(t, result.mode) })),
                   shownTargets.length > 0 ? h(Sep, null) : null,
@@ -6385,6 +6583,17 @@ window.__ModuleLoader__.load({
       const children = [
         h('div', { className: 'dsh-cleanup-section-title', key: 'title' }, t('audit.title')),
       ]
+      // 0.6.4 H: a log that cannot be written is a silent data-loss mode; say so above the list.
+      if (audit.health && audit.health.healthy === false) {
+        const lastError = typeof audit.health.lastError === 'string' && audit.health.lastError !== ''
+          ? audit.health.lastError.slice(0, 120)
+          : t('common.none')
+        children.push(h('div', {
+          className: 'dsh-cleanup-banner dsh-cleanup-banner-warn',
+          key: 'health',
+          role: 'status',
+        }, h('span', { className: 'dsh-cleanup-banner-text' }, t('audit.health.unhealthy', { error: lastError }))))
+      }
       if (startup) {
         children.push(h('div', { className: 'dsh-cleanup-muted', key: 'startup' }, t('audit.lastStartup', {
           time: formatTime(startup.at) || t('common.none'),
@@ -6422,6 +6631,24 @@ window.__ModuleLoader__.load({
           if (targetsText !== '') {
             metaChildren.push(h(Sep, { key: 'sep-targets' }))
             metaChildren.push(h('span', { key: 'targets', title: targetsText }, middleEllipsis(targetsText, 80)))
+          }
+          // 0.6.4 A1/H: per-item outcomes make a partial delete visible in the recent list.
+          if (Array.isArray(record.items) && record.items.length > 0) {
+            let itemFailures = 0
+            for (let i = 0; i < record.items.length; i += 1) {
+              if (record.items[i].status === 'failed') itemFailures += 1
+            }
+            metaChildren.push(h(Sep, { key: 'sep-items' }))
+            metaChildren.push(h('span', { key: 'items' }, t('audit.items', {
+              count: formatNumber(record.items.length),
+              failed: formatNumber(itemFailures),
+            })))
+          }
+          if (Array.isArray(record.entries) && record.entries.length > 0) {
+            metaChildren.push(h(Sep, { key: 'sep-entries' }))
+            metaChildren.push(h('span', { key: 'entries' }, t('audit.entries', {
+              count: formatNumber(record.entries.length),
+            })))
           }
           return h('li', { className: 'dsh-cleanup-item', key: 'audit-' + index },
             h('div', { className: 'dsh-cleanup-item-main' },
@@ -6896,17 +7123,43 @@ window.__ModuleLoader__.load({
               'aria-busy': state.inventoryLoading === true ? 'true' : undefined,
               onClick: function () { store.refresh() },
             }, state.inventoryLoading === true ? h(Spinner, null) : null, t('page.refresh')),
-            unmeasured > 0
+            // 0.6.4 F: chunked measuring shows progress and can be stopped between chunks.
+            state.measuring
+              ? h('span', {
+                key: 'measure-progress',
+                className: 'dsh-cleanup-muted dsh-cleanup-measure-progress',
+                role: 'status',
+                'aria-live': 'polite',
+              },
+                h(Spinner, null),
+                t('measure.progress', {
+                  done: formatNumber(state.measureProgress ? state.measureProgress.done : 0),
+                  total: formatNumber(state.measureProgress ? state.measureProgress.total : 0),
+                }))
+              : null,
+            state.measuring
               ? h('button', {
+                key: 'measure-stop',
                 type: 'button',
                 className: 'dsh-cleanup-btn',
-                disabled: state.measuring || state.inventoryLoading,
+                onClick: function () { store.stopMeasure() },
+              }, t('measure.stop'))
+              : null,
+            !state.measuring && unmeasured > 0
+              ? h('button', {
+                key: 'measure',
+                type: 'button',
+                className: 'dsh-cleanup-btn',
+                disabled: state.inventoryLoading,
                 onClick: function () { store.measureUnmeasured() },
-              }, state.measuring ? t('measure.measuring') : t('page.measure'))
+              }, t('page.measure'))
               : null,
           ),
         ),
         summaryChips,
+        state.measureNotice === 'stopped'
+          ? h('div', { key: 'measure-stopped', className: 'dsh-cleanup-muted', role: 'status' }, t('measure.stopped'))
+          : null,
         showStartupNotice
           ? h('div', { className: 'dsh-cleanup-banner dsh-cleanup-banner-warn dsh-cleanup-deferred-banner', key: 'startup-notice' },
             h('span', { className: 'dsh-cleanup-banner-text' },
@@ -7249,6 +7502,8 @@ window.__ModuleLoader__.load({
       const dialogStore = createStore(initialDialogState())
       let dialogAbort = null
       let dialogToken = 0
+      /** Pending re-plan timer for coalesced selection edits (0.6.4 D). */
+      let planDebounceTimer = null
       let doneTimer = null
       /**
        * True when the settled result is eligible to dismiss itself (fully successful, nothing left
@@ -7334,6 +7589,32 @@ window.__ModuleLoader__.load({
         if (handle.token !== dialogToken) return false
         if (dialogAbort === handle.controller) dialogAbort = null
         return true
+      }
+
+      /** Drop a queued (not yet sent) re-plan; every teardown/open path calls this. */
+      function clearPlanDebounce() {
+        if (planDebounceTimer !== null) {
+          clearTimeout(planDebounceTimer)
+          planDebounceTimer = null
+        }
+      }
+
+      /**
+       * Coalesce rapid review-selection edits into one plan request (SPEC §9, 0.6.4 D).
+       *
+       * The checkbox/selection UI updates immediately; the in-flight plan is cancelled at once (its
+       * response is dropped by the token) and a fresh plan is sent once the edits stop for
+       * `PLAN_DEBOUNCE_MS`. While the review no longer matches its plan the destructive controls
+       * stay disabled, but the selection controls remain interactive.
+       */
+      function scheduleReviewPlan() {
+        clearPlanDebounce()
+        abortDialogFetch()
+        if (dialogStore.getSnapshot().phase === 'review') dialogStore.setState({ refreshing: true, typedReset: false })
+        planDebounceTimer = setTimeout(function () {
+          planDebounceTimer = null
+          startPlan()
+        }, PLAN_DEBOUNCE_MS)
       }
 
 
@@ -7626,6 +7907,7 @@ window.__ModuleLoader__.load({
           selection: keptRows.map(targetKey),
           nodeSelection: keptNodes.map(function (node) { return node.id }),
           typed: '',
+          typedReset: false,
           plan: null,
           error: null,
           failureStage: null,
@@ -7635,13 +7917,21 @@ window.__ModuleLoader__.load({
       }
 
       function startPlan() {
+        clearPlanDebounce()
         let state = dialogStore.getSnapshot()
         if (state.phase === 'idle' || state.targets.length === 0) return
         const planned = plannedTargets(state)
         if (planned.length === 0) {
           // Every row is un-checked: drop the stale plan so the review renders the empty selection
           // (with its "select at least one" hint) instead of numbers for targets the user removed.
-          dialogStore.setState({ plan: null, refreshing: false, error: null, failureStage: null })
+          dialogStore.setState({
+            plan: null,
+            refreshing: false,
+            error: null,
+            failureStage: null,
+            typed: '',
+            typedReset: false,
+          })
           return
         }
         if (state.mode === 'permanent' && plannedWorkspaceTargets(planned) > 1) {
@@ -7731,6 +8021,19 @@ window.__ModuleLoader__.load({
             })
             return
           }
+          // 0.6.4 D: the typed folder name survives a re-plan while the expected name is the same;
+          // when the plan now asks for a different one (or none), clearing it is explained.
+          const current = dialogStore.getSnapshot()
+          const previousConfirmation = current.plan && isTypedConfirmation(current.plan.confirmation)
+            ? String(current.plan.confirmation.expected)
+            : null
+          const nextConfirmation = isTypedConfirmation(plan.confirmation)
+            ? String(plan.confirmation.expected)
+            : null
+          const keepTyped = previousConfirmation !== null
+            && nextConfirmation !== null
+            && previousConfirmation === nextConfirmation
+          const currentTyped = typeof current.typed === 'string' ? current.typed : ''
           dialogStore.setState({
             phase: 'review',
             refreshing: false,
@@ -7738,7 +8041,8 @@ window.__ModuleLoader__.load({
             error: null,
             plan: plan,
             mode: plan.mode === 'permanent' ? 'permanent' : 'trash',
-            typed: '',
+            typed: keepTyped ? currentTyped : '',
+            typedReset: keepTyped !== true && currentTyped !== '',
             knownNodes: mergeKnownNodes(state.knownNodes, plan, state.targets),
           })
         }).catch(function (error) {
@@ -7762,6 +8066,7 @@ window.__ModuleLoader__.load({
         const activeIsBody = typeof document !== 'undefined' && active === document.body
         returnFocus = active && !activeIsBody && typeof active.focus === 'function' ? active : null
         clearDoneTimer()
+        clearPlanDebounce()
         abortDialogFetch()
         abortUndoFetch()
         dialogStore.setState(Object.assign(initialDialogState(), {
@@ -7801,6 +8106,8 @@ window.__ModuleLoader__.load({
           batches: 0,
           done: { count: 0, bytes: 0, failed: 0 },
           stop: null,
+          /** The user asked to stop after the batch on the wire (0.6.4 E). */
+          stopRequested: false,
         }
       }
 
@@ -7896,6 +8203,7 @@ window.__ModuleLoader__.load({
         const activeIsBody = typeof document !== 'undefined' && active === document.body
         returnFocus = active && !activeIsBody && typeof active.focus === 'function' ? active : null
         clearDoneTimer()
+        clearPlanDebounce()
         abortDialogFetch()
         abortUndoFetch()
         const clear = initialClearState({ id: workspaceId, title: workspace.title })
@@ -8065,6 +8373,7 @@ window.__ModuleLoader__.load({
 
       function closeDialog() {
         clearDoneTimer()
+        clearPlanDebounce()
         doneAutoClose = false
         abortDialogFetch()
         abortOpenFetch()
@@ -8081,6 +8390,7 @@ window.__ModuleLoader__.load({
 
       function disposeDialog() {
         clearDoneTimer()
+        clearPlanDebounce()
         doneAutoClose = false
         abortDialogFetch()
         abortOpenFetch()
@@ -8185,7 +8495,7 @@ window.__ModuleLoader__.load({
           }
           if (workspaceTargets > 1) return
         }
-        dialogStore.setState({ mode: mode, typed: '', modeNotice: false })
+        dialogStore.setState({ mode: mode, typed: '', typedReset: false, modeNotice: false })
         startPlan()
       }
 
@@ -8193,7 +8503,7 @@ window.__ModuleLoader__.load({
         const state = dialogStore.getSnapshot()
         if (state.phase !== 'review' || state.refreshing === true) return
         if (state.includeSessions === (value === true)) return
-        dialogStore.setState({ includeSessions: value === true, typed: '' })
+        dialogStore.setState({ includeSessions: value === true, typed: '', typedReset: false })
         startPlan()
       }
 
@@ -8230,11 +8540,14 @@ window.__ModuleLoader__.load({
         return Object.assign({}, clear, { excluded: excluded })
       }
 
-      /** Store patch for a new selection: it also resets the typed confirmation and exclusions. */
+      /**
+       * Store patch for a new selection: exclusions are recorded immediately, while the typed
+       * confirmation is left alone — whether it survives is decided when the re-plan lands
+       * (0.6.4 D: same `confirmation.expected` keeps it, a different one clears it with a notice).
+       */
       function selectionPatch(state, selection) {
         return {
           selection: selection,
-          typed: '',
           clear: clearExclusionPatch(state.clear, state.targets, selection),
         }
       }
@@ -8246,7 +8559,8 @@ window.__ModuleLoader__.load({
        */
       function setDialogSelection(key, checked) {
         const state = dialogStore.getSnapshot()
-        if (state.phase !== 'review' || state.refreshing === true) return
+        // Selection stays editable while a re-plan is in flight; the edits are coalesced below.
+        if (state.phase !== 'review') return
         if (typeof key !== 'string' || key === '') return
         const selected = {}
         for (let i = 0; i < state.selection.length; i += 1) selected[state.selection[i]] = true
@@ -8274,7 +8588,7 @@ window.__ModuleLoader__.load({
           if (state.clear !== null) patch.clear = clearNodeExclusionPatch(patch.clear || state.clear, nodes, nodeChecked)
         }
         dialogStore.setState(patch)
-        startPlan()
+        scheduleReviewPlan()
       }
 
       /** Current node-checked set, materialized (`includeDescendants: true` means every node). */
@@ -8295,7 +8609,7 @@ window.__ModuleLoader__.load({
        */
       function setDialogNodeSelection(nodeId, checked) {
         const state = dialogStore.getSnapshot()
-        if (state.phase !== 'review' || state.refreshing === true) return
+        if (state.phase !== 'review') return
         if (typeof nodeId !== 'string' || nodeId === '') return
         const nodes = state.knownNodes && typeof state.knownNodes === 'object' ? state.knownNodes : {}
         if (nodes[nodeId] === undefined) return
@@ -8325,7 +8639,7 @@ window.__ModuleLoader__.load({
         patch.descendantsAutoOff = state.includeDescendants === true || state.descendantsAutoOff === true
         if (state.clear !== null) patch.clear = clearNodeExclusionPatch(patch.clear || state.clear, nodes, selected)
         dialogStore.setState(patch)
-        startPlan()
+        scheduleReviewPlan()
       }
 
       /** Expand/collapse one reviewed row's ride-along list; presentation only, never re-plans. */
@@ -8342,7 +8656,7 @@ window.__ModuleLoader__.load({
       /** Invert every reviewed row and tree node ("反选"), which may leave nothing checked. */
       function invertDialogTargetSelection() {
         const state = dialogStore.getSnapshot()
-        if (state.phase !== 'review' || state.refreshing === true) return
+        if (state.phase !== 'review') return
         const selected = {}
         for (let i = 0; i < state.selection.length; i += 1) selected[state.selection[i]] = true
         const next = []
@@ -8367,7 +8681,7 @@ window.__ModuleLoader__.load({
           }
         }
         dialogStore.setState(patch)
-        startPlan()
+        scheduleReviewPlan()
       }
 
       /** Include or exclude subagent descendants (SPEC §4.3 `includeDescendants`). */
@@ -8382,6 +8696,7 @@ window.__ModuleLoader__.load({
           includeDescendants: value === true,
           nodeSelection: [],
           typed: '',
+          typedReset: false,
           descendantsAutoOff: false,
         })
         startPlan()
@@ -8390,7 +8705,7 @@ window.__ModuleLoader__.load({
       /** Re-check every reviewed row and every tree node after the user narrowed the selection. */
       function selectAllDialogTargets() {
         const state = dialogStore.getSnapshot()
-        if (state.phase !== 'review' || state.refreshing === true) return
+        if (state.phase !== 'review') return
         const nodeIds = knownNodeIds(state)
         const allRows = state.selection.length === state.targets.length
         const allNodes = checkedNodeSet(state)
@@ -8407,13 +8722,13 @@ window.__ModuleLoader__.load({
           if (state.clear !== null) patch.clear = clearNodeExclusionPatch(patch.clear || state.clear, state.knownNodes, checkedSet)
         }
         dialogStore.setState(patch)
-        startPlan()
+        scheduleReviewPlan()
       }
 
       function setTypedText(value) {
         const state = dialogStore.getSnapshot()
-        if (state.phase !== 'review' || state.refreshing === true) return
-        dialogStore.setState({ typed: typeof value === 'string' ? value : '' })
+        if (state.phase !== 'review') return
+        dialogStore.setState({ typed: typeof value === 'string' ? value : '', typedReset: false })
       }
 
       /**
@@ -8619,6 +8934,20 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * Ask a running workspace clear to stop once the batch on the wire finishes (0.6.4 E).
+       *
+       * Only a flag is set: the current batch still completes (its result must be counted and the
+       * Host has already started mutating), and `advanceClear` settles with `stopped` instead of
+       * planning the next batch. Nothing else in the dialog is disabled by the request.
+       */
+      function requestClearStop() {
+        const state = dialogStore.getSnapshot()
+        if (state.phase !== 'deleting' || state.clear === null) return
+        if (state.clear.stopRequested === true) return
+        dialogStore.setState({ clear: Object.assign({}, state.clear, { stopRequested: true }) })
+      }
+
+      /**
        * Advance a workspace clear after one executed batch: fold its counts, then start the next
        * batch, refill from the Host when the page is drained, or settle. No batch is reviewed on
        * its own — the review the user confirmed covers the whole clear.
@@ -8644,6 +8973,21 @@ window.__ModuleLoader__.load({
           batches: clear.batches + 1,
         })
         notifyMutation()
+        // 0.6.4 E: a stop request takes effect between batches, never mid-batch. The remainder is
+        // the queue plus the unread part of a truncated pre-flight total (queued is 0 when only
+        // unread pages are left, so it would understate the work that remains).
+        if (next.stopRequested === true) {
+          const excludedCount = next.excluded && typeof next.excluded === 'object' ? Object.keys(next.excluded).length : 0
+          const unread = next.truncated === true && typeof next.total === 'number' && next.total > 0
+            ? Math.max(0, next.total - next.done.count - next.skipped - excludedCount)
+            : 0
+          const remaining = Math.max(next.queued.length, unread)
+          dialogStore.setState({ targets: [], plan: null, refreshing: false, clear: next })
+          // A stop that arrives with nothing left is not a stopped walk: everything was cleared, so
+          // settle as drained instead of telling the user 0 items remain "uncleared".
+          settleClear(remaining > 0 ? 'stopped' : null, remaining)
+          return
+        }
         if (next.queued.length > 0) {
           const nextBatch = next.queued.slice(0, CLEAR_BATCH_TARGETS)
           dialogStore.setState({
@@ -8924,6 +9268,7 @@ window.__ModuleLoader__.load({
         undoLastDelete: undoLastDelete,
         pauseDoneDismiss: pauseDoneDismiss,
         resumeDoneDismiss: resumeDoneDismiss,
+        requestClearStop: requestClearStop,
       }
     }
 
@@ -8988,7 +9333,9 @@ window.__ModuleLoader__.load({
         : { usage: false, projectionCache: false, openPath: false }
       const catalogApi = deps.catalog && typeof deps.catalog.getSnapshot === 'function' ? deps.catalog : null
       const scheduleRestoreRefresh = typeof deps.scheduleRestoreRefresh === 'function' ? deps.scheduleRestoreRefresh : null
-      const pageStore = createStore(initialPageState())
+      // 0.6.4 G: a reopened settings page returns to the last tab/sort/filter/limit; each stored
+      // field is validated independently (see readPagePrefs).
+      const pageStore = createStore(Object.assign(initialPageState(), readPagePrefs()))
       // One tracker for every request family (inventory/trash/deferred/settings/...):
       // it owns the AbortController per family and drops superseded responses by token.
       const requests = createRequestTracker()
@@ -9065,6 +9412,12 @@ window.__ModuleLoader__.load({
           pageStore.setState(function (current) {
             const workspaceIds = {}
             for (let i = 0; i < inventory.workspaces.length; i += 1) workspaceIds[inventory.workspaces[i].id] = true
+            // A persisted workspace filter can name a workspace this profile no longer has (deleted
+            // elsewhere, different profile, stale localStorage). Falling back to "all workspaces" is
+            // better than a select whose value matches no option and a list that can only be empty.
+            const workspaceFilterValid = current.sessionWorkspace === SESSION_WORKSPACE_ANY
+              || current.sessionWorkspace === SESSION_WORKSPACE_UNGROUPED
+              || workspaceIds[current.sessionWorkspace] === true
             const sessionIds = {}
             for (let i = 0; i < inventory.sessions.length; i += 1) sessionIds[inventory.sessions[i].id] = true
             const measured = current.measured || {}
@@ -9123,11 +9476,23 @@ window.__ModuleLoader__.load({
               sessionSort: !inventory.capabilities.usage && current.sessionSort === 'usage'
                 ? 'newest'
                 : current.sessionSort,
+              sessionWorkspace: workspaceFilterValid ? current.sessionWorkspace : SESSION_WORKSPACE_ANY,
               usage: usage,
               usageSignatures: usageSignatures,
               usageFailed: usageFailed,
             })
           })
+          // Do not leave a stale value in the persisted layout after the fallback above: the next
+          // mount must not restore it again.
+          writePagePrefs(pageStore.getSnapshot())
+          // A restored tab (0.6.4 G) has to load its own data: the setters do that on a user click,
+          // but the page can mount directly into Trash or Settings from `pagePrefs`.
+          const activeTab = pageStore.getSnapshot()
+          if (activeTab.tab === 'trash' && activeTab.trashLoaded !== true && activeTab.trashLoading !== true) {
+            loadTrash()
+          } else if (activeTab.tab === 'settings') {
+            ensureSettingsLoaded()
+          }
           // While usage is on, keep the visible rows fresh against the new inventory; the fold
           // cache above already dropped the rows whose signature changed.
           const snapshot = pageStore.getSnapshot()
@@ -9861,6 +10226,16 @@ window.__ModuleLoader__.load({
         pageStore.setState({ auditNoticeAck: at })
       }
 
+      /**
+       * Measure the requested workspaces/Sessions in serial chunks (SPEC §4.2, 0.6.4 F).
+       *
+       * One request per `MEASURE_CHUNK_SIZE` ids keeps a 2000-Session page from becoming a single
+       * minutes-long request: each finished chunk is merged into `measured` immediately and moves
+       * `measureProgress`, so the page can show `done/total`, stop between chunks, and keep the
+       * sizes it already has when a later chunk fails.
+       * @param {{ workspaceIds?: string[], sessionIds?: string[] }} ids - ids to measure.
+       * @returns {Promise<void>} resolves when the walk settles (complete, stopped or failed).
+       */
       function measure(ids) {
         const state = pageStore.getSnapshot()
         if (state.measuring) return Promise.resolve()
@@ -9868,34 +10243,93 @@ window.__ModuleLoader__.load({
         const workspaceIds = Array.isArray(requested.workspaceIds) ? requested.workspaceIds : []
         const sessionIds = Array.isArray(requested.sessionIds) ? requested.sessionIds : []
         if (workspaceIds.length === 0 && sessionIds.length === 0) return Promise.resolve()
+        // One queue for both kinds: workspaces first, then Sessions. A chunk only names its own ids.
+        const queue = []
+        for (let i = 0; i < workspaceIds.length; i += 1) {
+          if (typeof workspaceIds[i] === 'string' && workspaceIds[i] !== '') queue.push({ kind: 'workspace', id: workspaceIds[i] })
+        }
+        for (let i = 0; i < sessionIds.length; i += 1) {
+          if (typeof sessionIds[i] === 'string' && sessionIds[i] !== '') queue.push({ kind: 'session', id: sessionIds[i] })
+        }
+        const total = queue.length
+        if (total === 0) return Promise.resolve()
         const handle = requests.begin('measure')
         const controller = handle.controller
-        pageStore.setState({ measuring: true, measureError: null })
-        const payload = {}
-        if (workspaceIds.length > 0) payload.workspaceIds = workspaceIds
-        if (sessionIds.length > 0) payload.sessionIds = sessionIds
-        return request(ROUTE.measure, payload, controller.signal, LONG_REQUEST_TIMEOUT_MS).then(function (envelope) {
+        let done = 0
+        pageStore.setState({
+          measuring: true,
+          measureError: null,
+          measureNotice: null,
+          measureStopRequested: false,
+          measureProgress: { done: 0, total: total },
+        })
+
+        /** Settle the walk once; every terminal path funnels through here. */
+        function finish(patch) {
           if (requests.stale(handle)) return
           requests.end(handle)
-          if (envelope.transport || envelope.ok !== true) {
-            pageStore.setState({ measuring: false, measureError: toApiError(envelope) })
-            return
+          pageStore.setState(Object.assign({ measuring: false, measureProgress: { done: done, total: total } }, patch))
+        }
+
+        function measureNextChunk() {
+          if (requests.stale(handle)) return Promise.resolve()
+          // Nothing left means the walk is complete: a stop that arrives after the last chunk has
+          // nothing to stop and must not report a partial result.
+          if (queue.length === 0) {
+            finish({ measureNotice: null })
+            return Promise.resolve()
           }
-          pageStore.setState(function (current) {
-            return Object.assign({}, current, {
-              measuring: false,
-              measureError: null,
-              measured: {
-                workspaces: Object.assign({}, current.measured.workspaces, envelope.workspaces || {}),
-                sessions: Object.assign({}, current.measured.sessions, envelope.sessions || {}),
-              },
+          if (pageStore.getSnapshot().measureStopRequested === true) {
+            finish({ measureNotice: 'stopped' })
+            return Promise.resolve()
+          }
+          const chunk = queue.splice(0, MEASURE_CHUNK_SIZE)
+          const payload = {}
+          const chunkWorkspaces = []
+          const chunkSessions = []
+          for (let i = 0; i < chunk.length; i += 1) {
+            if (chunk[i].kind === 'workspace') chunkWorkspaces.push(chunk[i].id)
+            else chunkSessions.push(chunk[i].id)
+          }
+          if (chunkWorkspaces.length > 0) payload.workspaceIds = chunkWorkspaces
+          if (chunkSessions.length > 0) payload.sessionIds = chunkSessions
+          return request(ROUTE.measure, payload, controller.signal, LONG_REQUEST_TIMEOUT_MS).then(function (envelope) {
+            if (requests.stale(handle)) return undefined
+            if (envelope.transport || envelope.ok !== true) {
+              // Keep what earlier chunks measured; the error banner offers the retry.
+              finish({ measureError: toApiError(envelope), measureNotice: null })
+              return undefined
+            }
+            done += chunk.length
+            pageStore.setState(function (current) {
+              return Object.assign({}, current, {
+                measureProgress: { done: done, total: total },
+                measured: {
+                  workspaces: Object.assign({}, current.measured.workspaces, envelope.workspaces || {}),
+                  sessions: Object.assign({}, current.measured.sessions, envelope.sessions || {}),
+                },
+              })
             })
+            return measureNextChunk()
+          }).catch(function (error) {
+            if (isAbortError(error) || requests.stale(handle)) return undefined
+            finish({ measureError: { transport: 'network' }, measureNotice: null })
+            return undefined
           })
-        }).catch(function (error) {
-          if (isAbortError(error) || requests.stale(handle)) return
-          requests.end(handle)
-          pageStore.setState({ measuring: false, measureError: { transport: 'network' } })
-        })
+        }
+
+        return measureNextChunk()
+      }
+
+      /**
+       * Stop the running measure walk between chunks (0.6.4 F). The chunk on the wire still lands
+       * (its sizes are merged); the notice explains why the remaining rows stay unmeasured.
+       */
+      function stopMeasure() {
+        const state = pageStore.getSnapshot()
+        if (state.measuring !== true) return
+        if (state.measureStopRequested === true) return
+        pageStore.setState({ measureStopRequested: true })
       }
 
       function measureUnmeasured() {
@@ -10189,6 +10623,11 @@ window.__ModuleLoader__.load({
         return openPath(lastOpenTarget.kind, lastOpenTarget.id)
       }
 
+      /** Persist the layout-only page preferences after a setter changed them (0.6.4 G). */
+      function persistPagePrefs() {
+        writePagePrefs(pageStore.getSnapshot())
+      }
+
       function setTab(tab) {
         if (tab !== 'workspaces' && tab !== 'sessions' && tab !== 'trash' && tab !== 'settings') return
         const state = pageStore.getSnapshot()
@@ -10214,6 +10653,7 @@ window.__ModuleLoader__.load({
           if (trashNeedsSettings(trashOf(next.inventory))) ensureSettingsLoaded()
         }
         if (tab === 'settings') ensureSettingsLoaded()
+        persistPagePrefs()
       }
 
       /**
@@ -10263,9 +10703,10 @@ window.__ModuleLoader__.load({
       }
 
       function setSessionSort(sort) {
-        if (sort !== 'newest' && sort !== 'oldest' && sort !== 'largest' && sort !== 'usage' && sort !== 'inactive') return
+        if (PAGE_PREFS_SORTS.indexOf(sort) === -1) return
         if (pageStore.getSnapshot().sessionSort === sort) return
         pageStore.setState({ sessionSort: sort })
+        persistPagePrefs()
       }
 
       function setSessionFilter(filter) {
@@ -10274,6 +10715,7 @@ window.__ModuleLoader__.load({
         // Rows hidden by the new filter must not stay selected for a batch deletion the user can no
         // longer see in the list; the review would show them, but clearing is the least surprising.
         pageStore.setState({ sessionFilter: filter, selectedSessions: [], selectionNotice: false })
+        persistPagePrefs()
       }
 
       /**
@@ -10300,6 +10742,7 @@ window.__ModuleLoader__.load({
         // A selection made under the previous workspace filter must not leak into a batch deletion
         // of the newly narrowed list (SPEC §10).
         pageStore.setState({ sessionWorkspace: value, sessionLimit: SESSION_PAGE_SIZE, selectedSessions: [], selectionNotice: false })
+        persistPagePrefs()
       }
 
       /** The "show more" limit lives in the store, so a tab switch keeps it. */
@@ -10310,6 +10753,7 @@ window.__ModuleLoader__.load({
             : SESSION_PAGE_SIZE
           return Object.assign({}, current, { sessionLimit: limit + SESSION_PAGE_SIZE })
         })
+        persistPagePrefs()
       }
 
       function setConfirmPurge(value) {
@@ -10510,6 +10954,7 @@ window.__ModuleLoader__.load({
         loadTrash: loadTrash,
         measure: measure,
         measureUnmeasured: measureUnmeasured,
+        stopMeasure: stopMeasure,
         setTab: setTab,
         toggleSelect: toggleSelect,
         clearSelection: clearSelection,
@@ -10770,6 +11215,7 @@ window.__ModuleLoader__.load({
         undoLastDelete: dialog.undoLastDelete,
         pauseDoneDismiss: dialog.pauseDoneDismiss,
         resumeDoneDismiss: dialog.resumeDoneDismiss,
+        requestClearStop: dialog.requestClearStop,
       }
 
       ctx.effect(function () {
@@ -10829,6 +11275,9 @@ window.__ModuleLoader__.load({
         plan: null,
         refreshing: false,
         typed: '',
+        // True when a re-plan cleared the typed confirmation because `confirmation.expected`
+        // changed; the review explains it instead of silently emptying the field (0.6.4 D).
+        typedReset: false,
         error: null,
         failureStage: null,
         result: null,
@@ -10869,6 +11318,10 @@ window.__ModuleLoader__.load({
         measured: { workspaces: {}, sessions: {} },
         measuring: false,
         measureError: null,
+        // 0.6.4 F: chunked measuring reports {done,total}, accepts a stop, and explains a stop.
+        measureProgress: null,
+        measureStopRequested: false,
+        measureNotice: null,
         selected: [],
         selectedSessions: [],
         // Set when a selection click was refused because one plan holds at most 64 targets; the

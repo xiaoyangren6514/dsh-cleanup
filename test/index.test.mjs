@@ -611,7 +611,10 @@ describe('route payloads', () => {
       suggestedEntryIds: [],
     })
     assert.deepEqual(response.body.deferred, { count: 0, retained: 0, lastRun: null })
-    assert.deepEqual(response.body.audit, { enabled: true, lastStartup: null, recent: [] })
+    assert.deepEqual(response.body.audit, {
+      enabled: true, healthy: true, writeFailures: 0, lastWriteAt: null,
+      lastError: null, lastRotationError: null, lastStartup: null, recent: [],
+    })
     // SPEC §3: all three optional-capability flags are reported as plain booleans.
     assert.deepEqual(response.body.capabilities, {
       usage: false,

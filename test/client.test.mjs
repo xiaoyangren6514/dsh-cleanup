@@ -41,6 +41,7 @@ function createContext() {
   let candidatesResponse = () => ({ ok: true, candidates: [], total: 0, truncated: false, totals: { count: 0, bytes: 0 } })
   let usageResponse = () => ({ ok: true, available: true, usage: {} })
   let openResponse = () => ({ ok: true, path: '/tmp/opened' })
+  let measureResponse = () => ({ ok: true, workspaces: {}, sessions: { 'session-a': { bytes: 2048, files: 3 } } })
   /** Settings payloads (0.6.3 tests): one live object, patchable per test. */
   const settingsDefaults = {
     allowPermanentDeletion: true,
@@ -168,9 +169,7 @@ function createContext() {
       if (deferredResponse) return deferredResponse.promise
       return respond({ ok: true, purged: 1, bytes: 10 })
     }
-    if (path.endsWith('cleanup.measure')) {
-      return respond({ ok: true, workspaces: {}, sessions: { 'session-a': { bytes: 2048, files: 3 } } })
-    }
+    if (path.endsWith('cleanup.measure')) return respond(measureResponse(body))
     if (path.endsWith('cleanup.plan')) return respond(await planResponse(body))
     if (path.endsWith('cleanup.defer')) return respond({ ok: true, deferred: { count: 1, entryIds: ['entry-1'], replaced: false } })
     if (path.endsWith('cleanup.candidates')) return respond(candidatesResponse(body))
@@ -227,6 +226,8 @@ function createContext() {
     setCapabilities(value) { inventory.capabilities = value },
     setUsageResponse(fn) { usageResponse = fn },
     setOpenResponse(fn) { openResponse = fn },
+    setMeasureResponse(fn) { measureResponse = fn },
+    setAudit(fn) { inventory.audit = fn() },
     /** Next settings.set envelope (e.g. one carrying warnings); `null` restores the echo behaviour. */
     setSettingsSetResponse(fn) { settingsSetResponse = fn },
     settingsValues() { return settingsValues },
@@ -683,10 +684,10 @@ test('dialog: un-checking a reviewed target re-plans without it, and the last ro
   // destructive button instead of sending a target set the Host would reject.
   const planCallsBefore = world.calls.filter((call) => call.url.endsWith('cleanup.plan')).length
   api.setDialogSelection('session:session-a', false)
-  await sleep(30)
+  // 0.6.4 D: the selection updates immediately, the plan is dropped after the debounce window.
+  await waitFor(() => api.dialogStore.getSnapshot().plan === null, 'empty selection drops the plan')
   const cleared = api.dialogStore.getSnapshot()
   assert.deepEqual(cleared.selection, [])
-  assert.equal(cleared.plan, null, 'no stale plan survives an empty selection')
   assert.equal(world.calls.filter((call) => call.url.endsWith('cleanup.plan')).length, planCallsBefore, 'an empty selection is never planned')
 
   // Re-checking one row produces a fresh plan again.
@@ -758,7 +759,7 @@ test('dialog: invert flips every row and select-all restores them', async () => 
 
   api.invertDialogTargetSelection()
   assert.deepEqual(api.dialogStore.getSnapshot().selection, [], 'inverting a full selection clears it')
-  assert.equal(api.dialogStore.getSnapshot().plan, null)
+  await waitFor(() => api.dialogStore.getSnapshot().plan === null, 'the inverted-away plan is dropped')
 
   api.invertDialogTargetSelection()
   await waitFor(() => api.dialogStore.getSnapshot().plan !== null, 'inverting back plans again')
@@ -3475,6 +3476,50 @@ function findButtonByText(tree, needle) {
   return findAll(tree, (element) => element && element.type === 'button' && collectText(element).indexOf(needle) !== -1)[0] || null
 }
 
+/**
+ * Force the next request deadline to fire immediately (0.6.4 H).
+ *
+ * The deadline guard is one manual `AbortController` + `setTimeout`; this stub intercepts that
+ * timer (delay >= 1s), fires it on the next macrotask, and makes the stalled fetch reject when the
+ * guard aborts it. Every other timer keeps running, and the patch is removed once `fn` settles.
+ */
+async function withImmediateRequestDeadline(fn) {
+  const realSetTimeout = globalThis.setTimeout
+  const realClearTimeout = globalThis.clearTimeout
+  const realFetch = globalThis.fetch
+  globalThis.setTimeout = function (callback, delay) {
+    if (typeof delay === 'number' && delay >= 1000) {
+      const handle = { cancelled: false }
+      // Fire on a macrotask so the fetch call (same tick) is already in flight.
+      realSetTimeout(function () { if (handle.cancelled !== true) callback() }, 0)
+      return handle
+    }
+    return realSetTimeout.apply(globalThis, arguments)
+  }
+  globalThis.clearTimeout = function (handle) {
+    if (handle && typeof handle === 'object' && typeof handle.cancelled === 'boolean') {
+      handle.cancelled = true
+      return
+    }
+    return realClearTimeout.apply(globalThis, arguments)
+  }
+  globalThis.fetch = function (url, init) {
+    return new Promise(function (resolve, reject) {
+      const signal = init && init.signal
+      const abort = function () { reject(new DOMException('aborted', 'AbortError')) }
+      if (signal && signal.aborted === true) { abort(); return }
+      if (signal && typeof signal.addEventListener === 'function') signal.addEventListener('abort', abort)
+    })
+  }
+  try {
+    return await fn()
+  } finally {
+    globalThis.setTimeout = realSetTimeout
+    globalThis.clearTimeout = realClearTimeout
+    globalThis.fetch = realFetch
+  }
+}
+
 /** Mount the settings page against a caller-owned store so a test can drive and render it. */
 function mountSettingsPage(world, store) {
   const api = slotApi(world, 'settings.section')
@@ -3494,6 +3539,12 @@ test('0.6.3 request deadline: a stalled Host reports transport timeout and the l
   assert.match(source, /request\(ROUTE\.delete, body, signal, LONG_REQUEST_TIMEOUT_MS\)/)
   assert.match(source, /request\(ROUTE\.measure, payload, controller\.signal, LONG_REQUEST_TIMEOUT_MS\)/)
   assert.match(source, /if \(error\.transport === 'timeout'\) return t\('error\.timeout'\)/)
+  // 0.6.4 H: one manual controller + setTimeout; the timer and listener are released in dispose().
+  assert.match(source, /function requestTimeoutGuard\(signal, timeoutMs\)/)
+  assert.equal(/AbortSignal\.timeout\(/.test(source), false, 'the guard must not depend on AbortSignal.timeout')
+  assert.equal(/AbortSignal\.any\(/.test(source), false, 'the guard must not depend on AbortSignal.any')
+  assert.match(source, /dispose: function \(\) \{\n          clearTimeout\(timer\)/)
+  assert.match(source, /\} finally \{\n        guard\.dispose\(\)/)
 
   const world = createContext()
   const { mod } = await loadClient()
@@ -3504,25 +3555,10 @@ test('0.6.3 request deadline: a stalled Host reports transport timeout and the l
   store.setTab('trash')
   await store.loadTrash()
 
-  // Make the deadline fire immediately: the guard sees an already-aborted timeout signal, so the
-  // request path must classify the abort as OUR deadline, not as a caller abort.
-  const realFetch = globalThis.fetch
-  const realTimeout = AbortSignal.timeout
-  const realAny = AbortSignal.any
-  let pending
-  try {
-    AbortSignal.timeout = () => AbortSignal.abort()
-    AbortSignal.any = (signals) => signals.find((signal) => signal.aborted === true) || signals[0]
-    globalThis.fetch = (url, init) => String(url).endsWith('cleanup.trash.restore')
-      ? Promise.reject(new DOMException('aborted', 'AbortError'))
-      : realFetch(url, init)
-    pending = store.restoreEntry('20260101T000000Z-a-0001')
-  } finally {
-    globalThis.fetch = realFetch
-    AbortSignal.timeout = realTimeout
-    AbortSignal.any = realAny
-  }
-  await pending
+  // Make the deadline fire immediately: the guard must report it as OUR deadline, not a caller abort.
+  await withImmediateRequestDeadline(async function () {
+    await store.restoreEntry('20260101T000000Z-a-0001')
+  })
   assert.equal(store.getSnapshot().actionError.transport, 'timeout', 'a deadline is its own transport value')
 
   const page = mountSettingsPage(world, store)
@@ -3827,23 +3863,9 @@ test('0.6.3 delete deadline: the failed view says the Host may still be executin
   api.openDialog([{ kind: 'session', id: 'session-a', title: 'session-a' }])
   await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
 
-  const realFetch = globalThis.fetch
-  const realTimeout = AbortSignal.timeout
-  const realAny = AbortSignal.any
-  let pending
-  try {
-    AbortSignal.timeout = () => AbortSignal.abort()
-    AbortSignal.any = (signals) => signals.find((signal) => signal.aborted === true) || signals[0]
-    globalThis.fetch = (url, init) => String(url).endsWith('cleanup.delete')
-      ? Promise.reject(new DOMException('aborted', 'AbortError'))
-      : realFetch(url, init)
-    pending = api.confirmDelete()
-  } finally {
-    globalThis.fetch = realFetch
-    AbortSignal.timeout = realTimeout
-    AbortSignal.any = realAny
-  }
-  await pending
+  await withImmediateRequestDeadline(async function () {
+    await api.confirmDelete()
+  })
   await waitFor(() => api.dialogStore.getSnapshot().phase === 'failed', 'failed phase')
   const state = api.dialogStore.getSnapshot()
   assert.equal(state.failureStage, 'delete')
@@ -3852,4 +3874,384 @@ test('0.6.3 delete deadline: the failed view says the Host may still be executin
   assert.match(text, /操作超时，请重试/)
   assert.match(text, /不要直接重复删除/, 'the delete-stage failed view adds the dedicated warning line')
   api.disposeDialog()
+})
+
+// =============================================================================================
+// 0.6.4 (docs/internal/0.6.4-plan.md §D–H): debounce, stop/measure progress, page prefs, audit.
+// =============================================================================================
+
+test('0.6.4 debounce: three edits send one plan and the selection stays interactive while it runs', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setPlanResponse((body) => ({ ok: true, plan: planEchoingTargets(body) }))
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  const api = overlay.options.inject().api
+  api.openDialog([
+    { kind: 'session', id: 'session-a', title: '会话 A' },
+    { kind: 'session', id: 'session-b', title: '会话 B' },
+    { kind: 'session', id: 'session-c', title: '会话 C' },
+  ])
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  const planCallsBefore = world.calls.filter((call) => call.url.endsWith('cleanup.plan')).length
+
+  // Hold the coalesced plan open so the "refreshing" render can be inspected.
+  let releasePlan = null
+  world.setPlanResponse((body) => new Promise(function (resolve) {
+    releasePlan = function () { resolve({ ok: true, plan: planEchoingTargets(body) }) }
+  }))
+
+  api.setDialogSelection('session:session-b', false)
+  assert.deepEqual(api.dialogStore.getSnapshot().selection, ['session:session-a', 'session:session-c'], 'the UI updates immediately')
+  api.setDialogSelection('session:session-c', false)
+  api.setDialogSelection('session:session-b', true)
+  assert.deepEqual(api.dialogStore.getSnapshot().selection, ['session:session-a', 'session:session-b'])
+  assert.equal(world.calls.filter((call) => call.url.endsWith('cleanup.plan')).length, planCallsBefore, 'rapid edits send no request yet')
+  await sleep(100)
+  assert.equal(world.calls.filter((call) => call.url.endsWith('cleanup.plan')).length, planCallsBefore, 'still inside the debounce window')
+
+  await waitFor(() => world.calls.filter((call) => call.url.endsWith('cleanup.plan')).length === planCallsBefore + 1, 'one coalesced plan', 3000)
+  await waitFor(() => api.dialogStore.getSnapshot().refreshing === true, 'refreshing state')
+
+  const tree = renderDeep(overlay.component({ api: api, t: api.t }))
+  const rowBoxes = elementsByClass(tree, 'dsh-cleanup-target').map((row) => findAll(row, (element) => element && element.type === 'input' && element.props && element.props.type === 'checkbox')[0])
+  assert.ok(rowBoxes.length >= 2)
+  assert.equal(rowBoxes[0].props.disabled, false, 'row checkboxes stay interactive while the plan is recomputed')
+  assert.equal(findButtonByText(tree, '删除').props.disabled, true, 'the destructive button waits for the fresh plan')
+  const modeRadios = findAll(tree, (element) => element && element.type === 'input' && element.props && element.props.type === 'radio')
+  assert.ok(modeRadios.length >= 1)
+  assert.equal(modeRadios[0].props.disabled, true, 'mode switches that change deletion semantics stay locked')
+
+  // The 4th edit during the in-flight plan is accepted and coalesced into one follow-up plan.
+  api.setDialogSelection('session:session-a', false)
+  assert.deepEqual(api.dialogStore.getSnapshot().selection, ['session:session-b'])
+  releasePlan()
+  await waitFor(() => world.calls.filter((call) => call.url.endsWith('cleanup.plan')).length === planCallsBefore + 2, 'the 4th edit re-plans once', 3000)
+  releasePlan()
+  await waitFor(() => api.dialogStore.getSnapshot().refreshing === false && api.dialogStore.getSnapshot().plan !== null, 'settled plan', 3000)
+  assert.deepEqual(world.calls.filter((call) => call.url.endsWith('cleanup.plan')).at(-1).body.targets, [{ kind: 'session', id: 'session-b' }])
+  api.disposeDialog()
+})
+
+test('0.6.4 typed confirmation: kept while the expected name is unchanged, cleared with a notice when it changes', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setPlanResponse((body) => ({
+    ok: true,
+    plan: Object.assign(planEchoingTargets(body), {
+      mode: 'permanent',
+      allowPermanentDeletion: true,
+      confirmation: { kind: 'typed-name', expected: body.targets[0].id, label: body.targets[0].id },
+    }),
+  }))
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  const api = overlay.options.inject().api
+  api.openDialog([
+    { kind: 'workspace', id: 'ws-a', title: 'A' },
+    { kind: 'workspace', id: 'ws-b', title: 'B' },
+  ])
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  api.setTypedText('ws-a')
+  assert.equal(api.dialogStore.getSnapshot().typed, 'ws-a')
+
+  // Narrowing to the same directory keeps the typed name.
+  api.setDialogSelection('workspace:ws-b', false)
+  await waitFor(() => {
+    const state = api.dialogStore.getSnapshot()
+    return state.refreshing !== true && state.plan !== null && state.plan.targets.length === 1
+  }, 'narrowed permanent plan')
+  assert.equal(api.dialogStore.getSnapshot().typed, 'ws-a', 'the same expected name keeps the input')
+  assert.equal(api.dialogStore.getSnapshot().typedReset, false)
+
+  // Switching which folder is reviewed changes `confirmation.expected`: clear and explain.
+  api.setDialogSelection('workspace:ws-a', false)
+  api.setDialogSelection('workspace:ws-b', true)
+  await waitFor(() => {
+    const state = api.dialogStore.getSnapshot()
+    return state.refreshing !== true && state.plan !== null && state.plan.targets.length === 1 && state.plan.targets[0].id === 'ws-b'
+  }, 'plan for the other folder')
+  assert.equal(api.dialogStore.getSnapshot().typed, '', 'a different expected name clears the input')
+  assert.equal(api.dialogStore.getSnapshot().typedReset, true)
+  assert.match(collectText(renderDeep(overlay.component({ api: api, t: api.t }))), /重新输入/, 'the review explains the reset')
+  api.disposeDialog()
+})
+
+test('0.6.4 clear: stop-after-batch ends the walk between batches and the result says so', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setCandidatesResponse(() => ({ ok: true, candidates: candidateRows(130), total: 130, truncated: false, totals: { count: 130, bytes: 0 } }))
+  let lastPlan = null
+  world.setPlanResponse((body) => { lastPlan = planEchoingTargets(body); return { ok: true, plan: lastPlan } })
+  let releaseDelete = null
+  world.setDeleteResponse(() => new Promise(function (resolve) {
+    releaseDelete = function () {
+      resolve({
+        ok: true,
+        result: {
+          items: lastPlan.items.map((item) => ({ kind: item.kind, id: item.id, status: 'trashed', error: null, movedTo: '/tmp/trash/' + item.id, bytes: item.bytes })),
+          totals: { trashed: lastPlan.items.length, deleted: 0, failed: 0, bytes: lastPlan.items.length },
+        },
+      })
+    }
+  }))
+  clearMenuAction(world).run()
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  const api = overlay.options.inject().api
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  api.confirmDelete()
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'deleting', 'deleting phase')
+
+  const deletingTree = renderDeep(overlay.component({ api: api, t: api.t }))
+  assert.match(collectText(deletingTree), /共 130 条/, 'progress uses the pre-flight total as its denominator')
+  assert.ok(findButtonByText(deletingTree, '完成本批后停止'), 'the stop control is offered while a clear runs')
+
+  api.requestClearStop()
+  assert.equal(api.dialogStore.getSnapshot().clear.stopRequested, true, 'the request only sets the flag')
+  api.requestClearStop()
+  assert.equal(api.dialogStore.getSnapshot().clear.stopRequested, true, 'a second click is a no-op')
+
+  releaseDelete()
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'done', 'done phase', 5000)
+  const state = api.dialogStore.getSnapshot()
+  assert.equal(state.clear.stop.code, 'stopped')
+  assert.equal(state.clear.stop.remaining, 66, 'the unexecuted queue is reported as remaining')
+  const plansAtDone = world.calls.filter((call) => call.url.endsWith('cleanup.plan')).length
+  await sleep(500)
+  assert.equal(world.calls.filter((call) => call.url.endsWith('cleanup.plan')).length, plansAtDone, 'no further batch is planned after the stop')
+  const doneText = collectText(renderDeep(overlay.component({ api: api, t: api.t })))
+  assert.match(doneText, /已停止清空/)
+  assert.match(doneText, /在本批结束后停止/)
+  api.disposeDialog()
+})
+
+test('0.6.4 measure: serial chunks of at most 200 ids, stop between chunks, results merge', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setSessions(() => Array.from({ length: 450 }, (_, index) => inventorySession('m-' + index)))
+  world.setMeasureResponse((body) => {
+    const sessions = {}
+    const workspaces = {}
+    for (const id of (body.sessionIds || [])) sessions[id] = { bytes: 1, files: 1 }
+    for (const id of (body.workspaceIds || [])) workspaces[id] = { bytes: 2, files: 1, dirs: 0, truncated: false }
+    return { ok: true, workspaces: workspaces, sessions: sessions }
+  })
+  const api = slotApi(world, 'settings.section')
+  const store = api.createPageStore()
+  await store.loadInventory()
+  store.setTab('sessions')
+  const page = mountSettingsPage(world, store)
+  const ids = Array.from({ length: 450 }, (_, index) => 'm-' + index)
+
+  // Stop while the first chunk is on the wire: it lands, no second chunk is sent.
+  const stopped = store.measure({ sessionIds: ids })
+  store.stopMeasure()
+  await stopped
+  let measureCalls = world.calls.filter((call) => call.url.endsWith('cleanup.measure'))
+  assert.equal(measureCalls.length, 1, 'stopping between chunks sends exactly one request')
+  assert.ok(measureCalls[0].body.sessionIds.length <= 200, 'a chunk never exceeds 200 ids')
+  let state = store.getSnapshot()
+  assert.deepEqual(state.measureProgress, { done: 200, total: 450 })
+  assert.equal(state.measureNotice, 'stopped')
+  assert.equal(state.measuring, false)
+  assert.equal(Object.keys(state.measured.sessions).length, 200, 'the finished chunk is kept')
+  assert.match(collectText(page.render()), /已停止测量/)
+
+  // A full run walks the remaining ids in serial chunks and merges them all.
+  await store.measure({ sessionIds: ids })
+  measureCalls = world.calls.filter((call) => call.url.endsWith('cleanup.measure'))
+  assert.equal(measureCalls.length, 4, 'one stopped chunk plus three serial chunks')
+  assert.deepEqual(measureCalls.slice(1).map((call) => call.body.sessionIds.length), [200, 200, 50])
+  state = store.getSnapshot()
+  assert.equal(state.measureNotice, null)
+  assert.deepEqual(state.measureProgress, { done: 450, total: 450 })
+  assert.equal(Object.keys(state.measured.sessions).length, 450)
+  store.dispose()
+})
+
+test('0.6.4 measure: a failed chunk keeps the earlier sizes and stops the walk', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setSessions(() => Array.from({ length: 400 }, (_, index) => inventorySession('f-' + index)))
+  let calls = 0
+  world.setMeasureResponse((body) => {
+    calls += 1
+    if (calls === 2) return { ok: false, error: { code: 'IO_ERROR', message: 'cannot read' } }
+    const sessions = {}
+    for (const id of (body.sessionIds || [])) sessions[id] = { bytes: 1, files: 1 }
+    return { ok: true, workspaces: {}, sessions: sessions }
+  })
+  const store = slotApi(world, 'settings.section').createPageStore()
+  await store.loadInventory()
+  await store.measure({ sessionIds: Array.from({ length: 400 }, (_, index) => 'f-' + index) })
+  const state = store.getSnapshot()
+  assert.equal(state.measuring, false)
+  assert.equal(state.measureError.code, 'IO_ERROR')
+  assert.equal(Object.keys(state.measured.sessions).length, 200, 'the first chunk is preserved')
+  assert.equal(world.calls.filter((call) => call.url.endsWith('cleanup.measure')).length, 2, 'the failing chunk ends the walk')
+  store.dispose()
+})
+
+test('0.6.4 page prefs: validated restore, corrupt fallback and setter persistence', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  const KEY = 'dsh-cleanup.pagePrefs'
+  const previousLocalStorage = globalThis.localStorage
+  const bag = new Map()
+  globalThis.localStorage = {
+    getItem: (key) => (bag.has(key) ? bag.get(key) : null),
+    setItem: (key, value) => { bag.set(key, String(value)) },
+    removeItem: (key) => { bag.delete(key) },
+  }
+  try {
+    // A stored layout restores field by field.
+    bag.set(KEY, JSON.stringify({
+      tab: 'trash',
+      sessionSort: 'inactive',
+      sessionFilter: 'archived',
+      sessionWorkspace: 'ws-a',
+      sessionLimit: 600,
+    }))
+    let store = slotApi(world, 'settings.section').createPageStore()
+    let state = store.getSnapshot()
+    assert.equal(state.tab, 'trash')
+    assert.equal(state.sessionSort, 'inactive')
+    assert.equal(state.sessionFilter, 'archived')
+    assert.equal(state.sessionWorkspace, 'ws-a')
+    assert.equal(state.sessionLimit, 600)
+    // A restored non-default tab must load its own data on mount instead of showing a skeleton.
+    await store.loadInventory()
+    await waitFor(() => world.calls.some((call) => call.url.endsWith('cleanup.trash.list')), 'restored tab loads the trash list')
+    // The default fake inventory has no workspaces: a stale workspace filter falls back and the
+    // corrected layout is written back.
+    assert.equal(store.getSnapshot().sessionWorkspace, '', 'unknown workspace filter falls back to all')
+    assert.equal(JSON.parse(bag.get(KEY)).sessionWorkspace, '', 'the fallback is persisted')
+
+    // Setters write the layout back (never selection/search/drafts).
+    store.setSessionSort('oldest')
+    store.showMoreSessions()
+    store.setTab('settings')
+    let stored = JSON.parse(bag.get(KEY))
+    assert.equal(stored.sessionSort, 'oldest')
+    assert.equal(stored.sessionLimit, 900)
+    assert.equal(stored.tab, 'settings')
+    assert.equal(Object.prototype.hasOwnProperty.call(stored, 'sessionSearch'), false, 'the search text is not persisted')
+    assert.equal(Object.prototype.hasOwnProperty.call(stored, 'selectedSessions'), false, 'selection is not persisted')
+    store.dispose()
+
+    // Corrupt JSON falls back to every default.
+    bag.set(KEY, '{not json')
+    store = slotApi(world, 'settings.section').createPageStore()
+    state = store.getSnapshot()
+    assert.equal(state.tab, 'workspaces')
+    assert.equal(state.sessionSort, 'newest')
+    assert.equal(state.sessionFilter, 'all')
+    assert.equal(state.sessionWorkspace, '')
+    assert.equal(state.sessionLimit, 300)
+    store.dispose()
+
+    // Illegal enum values / limits are ignored individually.
+    bag.set(KEY, JSON.stringify({ tab: 'bogus', sessionSort: 'bogus', sessionFilter: 'bogus', sessionWorkspace: 42, sessionLimit: 0 }))
+    store = slotApi(world, 'settings.section').createPageStore()
+    state = store.getSnapshot()
+    assert.equal(state.tab, 'workspaces')
+    assert.equal(state.sessionSort, 'newest')
+    assert.equal(state.sessionFilter, 'all')
+    assert.equal(state.sessionWorkspace, '')
+    assert.equal(state.sessionLimit, 300)
+    store.dispose()
+  } finally {
+    if (previousLocalStorage === undefined) delete globalThis.localStorage
+    else globalThis.localStorage = previousLocalStorage
+  }
+})
+
+test('0.6.4 audit: write health, per-item outcome and purged entries are shown', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  const longError = 'disk full: /home/.dsh/cleanup/audit.jsonl is not writable — ' + 'x'.repeat(200)
+  world.setAudit(() => ({
+    enabled: true,
+    health: { healthy: false, writeFailures: 3, lastWriteAt: 5, lastError: longError, lastRotationError: null },
+    recent: [
+      {
+        at: 2,
+        source: 'immediate',
+        action: 'delete',
+        mode: 'trash',
+        targets: [],
+        status: 'trashed',
+        code: null,
+        bytes: 10,
+        items: [
+          { kind: 'session', id: 'session-a', status: 'trashed', code: null },
+          { kind: 'session', id: 'session-b', status: 'failed', code: 'IO_ERROR' },
+        ],
+      },
+      {
+        at: 1,
+        source: 'immediate',
+        action: 'purge',
+        mode: null,
+        targets: [],
+        status: 'trashed',
+        code: null,
+        bytes: 0,
+        entries: [
+          { id: 'e-1', kind: 'workspace-dir', title: 'proj', originalPath: '/tmp/proj' },
+          { id: 'e-2', kind: 'session', title: null, originalPath: '/tmp/s.jsonl' },
+        ],
+      },
+    ],
+    lastStartup: null,
+  }))
+  const api = slotApi(world, 'settings.section')
+  const store = api.createPageStore()
+  await store.loadInventory()
+  store.setTab('settings')
+  await waitFor(() => store.getSnapshot().settingsLoaded === true, 'settings loaded')
+  const page = mountSettingsPage(world, store)
+  const text = collectText(page.render())
+  assert.match(text, /审计日志写入异常/, 'an unhealthy audit log is surfaced above the list')
+  assert.match(text, /disk full/, 'the last error is shown')
+  assert.equal(text.includes(longError.slice(150)), false, 'the long Host error is truncated')
+  assert.match(text, /共 2 项 · 1 项失败/, 'per-item outcomes are summarized')
+  assert.match(text, /回收站条目 2 项/, 'purged entries are summarized')
+  store.dispose()
+})
+
+test('0.6.4 deferred: a persistenceError is surfaced in the last-run details', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setDeferredSummary(() => ({
+    count: 0,
+    retained: 0,
+    lastRun: {
+      at: 5,
+      results: [
+        {
+          status: 'trashed',
+          code: null,
+          mode: 'trash',
+          targets: [{ kind: 'session', id: 'session-1' }],
+          items: [{ kind: 'session', id: 'session-1', status: 'trashed', code: null }],
+          persistenceError: 'EACCES: permission denied',
+        },
+      ],
+    },
+  }))
+  const api = slotApi(world, 'settings.section')
+  const store = api.createPageStore()
+  await store.loadInventory()
+  store.toggleDeferredLastRunExpanded()
+  const page = mountSettingsPage(world, store)
+  const text = collectText(page.render())
+  assert.match(text, /队列写入失败：EACCES/, 'the write failure is named instead of swallowed')
+  store.dispose()
 })

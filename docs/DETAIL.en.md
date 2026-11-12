@@ -15,7 +15,7 @@ kind: "package-bundle"
 
 DSH itself only unregisters a workspace — the folder, its files, and its Session history stay on disk — and Sessions can only be archived, never deleted. `dsh-cleanup` fills that gap while keeping the destructive surface narrow: targets are addressed by DSH identity, never by arbitrary path; every deletion is planned, reviewed, and confirmed; and the default outcome is a recoverable trash.
 
-- Package: `dsh-cleanup` 0.6.3
+- Package: `dsh-cleanup` 0.6.4
 - Repository: <https://github.com/xiaoyangren6514/dsh-cleanup>
 - License: MIT © 2026 fly
 - Tested with: DSH 0.2.2-rc.1 / 0.2.2-rc.2
@@ -97,6 +97,14 @@ One plan carries at most 64 targets (the Host's safety budget). When the checked
 - **Restore restores the files and, best effort, the DSH state.** v2 trash metadata records a workspace's display title and a Session's pin/archive state: restoring a workspace registers it again (`reRegistered`), restoring a Session puts its pin/archive set back (`stateRestored`). Both are best-effort and reported as `warnings` without failing the restore. When the original path is occupied, a workspace entry can be **restored as a copy** (`<name> (restored)`); a Session log directory cannot be renamed, so the occupying path must move first. v1 entries written by 0.6.2 and earlier remain listable, restorable and purgeable.
 - **The safety switch is re-read at execute.** The permanent-deletion switch is checked at plan time and again at execute: turning it off after a plan was produced refuses with `PERMANENT_DISABLED` instead of honoring the plan's stale copy.
 
+### Observability and long-running work (0.6.4)
+
+- **A more honest audit trail.** A deletion record carries per-item results (≤64 `{kind,id,status,code}`) and the `entryIds` of the items that actually moved; a purge records what it really removed (id/kind/title/originalPath, ≤50). The log's write health (`healthy/writeFailures/lastWriteAt/lastError/lastRotationError`) travels with the inventory, and Recent deletions warns when the log stopped recording; appends are serialized per instance so concurrent records cannot race a rotation.
+- **Deferred entries execute what they can.** When a queued entry names several roots, blocked roots that a blocker attributes to them stay queued (`lastAttemptAt` stops the same start from retrying them) while the rest is deleted. A blocker on a swept-in item (for example a subagent log) keeps the whole entry untouched. If the deletion ran but the queue could not be written, the result carries `persistenceError` and the entry stays for the next start.
+- **Session cross-volume precheck.** In trash mode the plan compares a Session log directory's device with the trash volume and answers `TRASH_CROSS_DEVICE` up front instead of failing item by item after confirmation.
+- **Long tasks are steerable.** Re-checking targets coalesces into one re-plan every 350 ms and only the confirm button plus the controls that change deletion semantics (mode, include-sessions, include-descendants) are disabled while it runs; the typed directory name survives when the target set did not change it. A workspace clear offers **stop after the current batch** and reports cleaned/total; **Measure sizes** runs in chunks of 200 with progress and a stop control, keeping what was already measured.
+- **The view is remembered.** Tab, sort, archive/workspace filter and the show-more limit live in one plugin-owned `localStorage` key with validated fallback; selection, search and settings drafts are never persisted.
+
 ## Safety model
 
 Five gates stand between a click and a deleted byte.
@@ -138,10 +146,10 @@ For Sessions opened in the current Host, the review dialog offers **Schedule del
 
 ```sh
 # From npm (after publication)
-dsh plugin --profile web add dsh-cleanup@0.6.3
+dsh plugin --profile web add dsh-cleanup@0.6.4
 
-# From GitHub, pinned to the v0.6.3 tag (a fixed commit; swap in `git rev-parse v0.6.3` for the raw sha)
-dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.3
+# From GitHub, pinned to the v0.6.4 tag (a fixed commit; swap in `git rev-parse v0.6.4` for the raw sha)
+dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.4
 
 # From a local checkout
 git clone https://github.com/xiaoyangren6514/dsh-cleanup.git
@@ -183,6 +191,8 @@ The plugin is fully local:
 
 These are properties of DSH or of this release, not bugs to report:
 
+- **Deferred partial execution has boundaries.** Only blockers attributable to a queued root can be split off; a swept-in subagent log or a cross-process claim on a non-root item keeps the whole entry untouched. A queue write failure after a completed deletion is reported as `persistenceError` and cannot be rolled back.
+- **Audit health is process-local.** `writeFailures`/`lastError` count the current Host's log instance and reset on restart; Recent deletions can prove this process's health, not that every historical deletion was recorded.
 - **Undo exists only for a fully successful trash-mode result.** Permanent deletion and mixed results have no undo; the result page only summarizes them.
 - **Restore restores the files, and best-effort the DSH state.** The payload always comes back; re-registering a workspace and restoring a Session's pin/archive set depend on Host APIs and are reported as `warnings` (with `reRegistered: false`) without failing the restore. An occupied original path can be restored as a copy for a workspace; a Session log directory cannot be renamed.
 - **The workspace cross-process probe only sees Sessions whose stored `cwd` is inside the folder** (first 32, at plan, admission and again before mutation). If another process moves a Session's runtime working directory in while its header `cwd` stays elsewhere, this process cannot see it — DSH has no cross-process directory lease.

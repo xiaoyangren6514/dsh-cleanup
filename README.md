@@ -16,7 +16,7 @@ Since 0.6.0 it also shows what it deletes: an opt-in **usage** view (per-Session
 | | |
 |---|---|
 | Package | `dsh-cleanup` (imports no `@deepseek-ai/*` package, zero runtime dependencies) |
-| Version | 0.6.3 |
+| Version | 0.6.4 |
 | Repository | <https://github.com/xiaoyangren6514/dsh-cleanup> |
 | Author | fly |
 | License | [MIT](LICENSE) |
@@ -35,6 +35,9 @@ Since 0.6.0 it also shows what it deletes: an opt-in **usage** view (per-Session
 | Filter the Sessions list by workspace, **search** by title / id / path, and see `shown / total` (plus matches) | Settings → Storage cleanup → Sessions |
 | Sort by created, most recent activity, **least recently active**, size, or usage | Settings → Storage cleanup → Sessions → sort |
 | **Undo a delete** (trash mode, fully successful result) or jump straight to the trash; the result stays 8 s and pauses while hovered/focused | Review dialog result |
+| Re-checking targets stays responsive: changes inside 350 ms coalesce into one re-plan, and the rows remain interactive while it runs | Review dialog |
+| A workspace clear can **stop after the current batch**, and reports `cleaned / total`; **Measure sizes** runs in chunks with progress and a stop control | Review dialog, storage-cleanup header |
+| **Recent deletions** warns when the audit log stopped recording; each record carries bounded detail (failed items; the entries a purge actually removed) | Cleanup settings → Recent deletions |
 | The 65th checked target is refused up front, and a review that still fails can **keep the first 64 and check again** | Workspaces / Sessions batch bars, review dialog |
 | A restored workspace is **registered again** and a Session gets its pin/archive state back; a workspace whose original path is occupied can be **restored as a copy** | Trash → Restore (workspace entries) |
 | Subagent logs fold under the Session they belong to | Settings → Storage cleanup → Sessions |
@@ -76,6 +79,9 @@ These are properties of DSH or of this release, not bugs to report:
 
 - **Open (live) Sessions cannot be deleted now.** DSH keeps a Session's Agent — and its log write handle — alive for the whole Host process and exposes no API to release it, so deleting the log would corrupt it. The review dialog offers **Schedule deletion**, applied at the next DSH start before any Session is restored; a Session opened by another Host process sharing the same `$DSH_HOME` is refused the same way. The workspace cross-process probe covers Sessions whose stored `cwd` lies inside the folder (first 32, at plan, admission and again before mutation); if another process moves a Session's *runtime* working directory into the folder while its header `cwd` stays elsewhere, this process cannot see it — DSH has no cross-process directory lease.
 - **Restore restores the files, and best-effort the DSH state.** The payload always comes back. Registering a workspace again and restoring a Session's pin/archive set are best-effort: when the Host lacks the API or the registration fails, the files are still restored and the response reports it (`reRegistered: false`, `warnings`). When the original path is occupied, a workspace can be restored as a copy (`<name> (restored)`); a Session log directory cannot be renamed, so move the occupying path first.
+- **The deferred queue deletes what it can.** When a queued entry names several roots, the roots a blocker attributes to stay queued for the next start while the rest runs; a blocker on a swept-in item (for example a subagent log) keeps the whole entry untouched. If the deletion ran but the queue file could not be written, the result says `persistenceError` and the entry stays for the next start.
+- **The trash cross-volume precheck covers what can be known early.** In trash mode a Session log directory on another volume is reported as `TRASH_CROSS_DEVICE` at plan time; an unreadable directory or unknown device is still reported at execution.
+- **A stopped audit log is visible, not silent.** Audit write failures never block a deletion, but the audit view warns with the last error; rotation trouble is reported separately while appends continue.
 - **Settings have explicit effect boundaries.** A `trashRoot` change invalidates all reviewed plans (generate a fresh one); the permanent-deletion switch is re-read at execute; the audit ceiling applies once the audit log is rebuilt; the remaining fields apply to the next plan/measure.
 - **Usage needs the Host's query seam.** The `Usage` view only appears when the Host exposes `sessionQuery.readSession(id)`; without it the columns are hidden (and `inventory.capabilities.usage` is `false`). Usage is folded from replay-validated logs, so a fork's inherited history is excluded from its own counts and a repeated request is counted once.
 - **Projection-cache cleanup needs the Host's storage-domain service.** A deleted Session's `session_projcache` record is dropped with its files only when the Host exposes that service; otherwise the drop is silently skipped (`inventory.capabilities.projectionCache` is `false`, `cacheDropped: false` on the result). The record is a disposable fold cache, never user data, and it is rebuilt on demand.
@@ -94,10 +100,10 @@ Install the bundle into a DSH profile, then refresh the Web page once. The Host 
 
 ```sh
 # From npm (after the package is published)
-dsh plugin --profile web add dsh-cleanup@0.6.3
+dsh plugin --profile web add dsh-cleanup@0.6.4
 
-# From GitHub, pinned to the v0.6.3 tag (a fixed commit; swap in `git rev-parse v0.6.3` for the raw sha)
-dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.3
+# From GitHub, pinned to the v0.6.4 tag (a fixed commit; swap in `git rev-parse v0.6.4` for the raw sha)
+dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.4
 
 # From a local checkout
 git clone https://github.com/xiaoyangren6514/dsh-cleanup.git

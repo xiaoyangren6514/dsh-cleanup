@@ -5,6 +5,67 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.4] - 2026-11-12
+
+### Added
+
+- **The audit trail now says what happened, and whether it is still recording.** A deletion record
+  carries bounded per-item detail (`items`, ≤64 `{kind,id,status,code}`) plus the trash `entryIds` of
+  the items that really moved; a purge records the entries it actually removed (`entries`, ≤50
+  `{id,kind,title,originalPath}` plus their ids) instead of an empty list for `{all:true}`. The
+  running log reports write health (`healthy/writeFailures/lastWriteAt/lastError/lastRotationError`)
+  through `inventory.audit`, and Recent deletions warns when the log stopped recording. Appends are
+  serialized inside one instance, so concurrent records cannot race a rotation.
+- **Deferred entries delete the part that is possible.** When a queued entry names several roots and a
+  blocker attributes to some of them, those blocked roots stay queued (with `lastAttemptAt` so the
+  same start cannot retry them) while the rest is deleted; the result reports `retainedTargets`. A
+  blocker on a swept-in item (a subagent log, a cross-process claim on a non-root item) keeps the
+  whole entry untouched. A queue write failure after the deletion ran is reported as
+  `persistenceError` and the claim is released best-effort so the next start retries.
+- **A session log on another volume is refused at plan time** in trash mode (`TRASH_CROSS_DEVICE`),
+  matching the existing workspace-directory precheck, instead of failing item by item after the user
+  confirmed.
+- **The review no longer blocks on every checkbox.** Selection changes coalesce into one plan request
+  behind a 350 ms debounce; while it is in flight only the confirm/queue buttons and the
+  semantics-changing controls (mode, include-sessions, include-descendants) are disabled, while the
+  rows, select-all/invert, tree toggles and the typed input stay interactive, and the typed directory
+  name survives a re-plan whose expected name did not change (it is cleared with an explanation when
+  it did).
+- **Long tasks are steerable.** A workspace clear offers **stop after the current batch**, settles with
+  a `stopped` result and the remaining count, and its progress reads `cleaned / total` when the
+  pre-flight knows the total. **Measure sizes** now runs in chunks of at most 200 ids, shows
+  `measuring n/m`, offers Stop, keeps every already-measured row when stopped or when a chunk fails,
+  and never sends the whole history in one request.
+- **The storage-cleanup page remembers its view.** Tab, session sort/archive/workspace filters and the
+  show-more limit persist in one plugin-owned `localStorage` key (`dsh-cleanup.pagePrefs`) with
+  per-field validation and a default fallback (a workspace filter for a workspace this profile no
+  longer has falls back to "all"); selection, search text and settings drafts are not persisted.
+
+### Fixed
+
+- **A failed queued root stays retryable after a partial execution**, and a requeued remainder drops
+  the permanent typed-name anchor when the workspace it named is no longer part of it; otherwise the
+  next start would wrongly answer `PATH_CHANGED`.
+- **Audit rotation failures and recovery are reported correctly.** A `rename` failure is no longer
+  swallowed (`lastRotationError` is set while appends continue), and a successful write after a failed
+  one makes `healthy` true again while `writeFailures` keeps the historical count.
+- **A failed queue write no longer aborts the whole start-up run.** `finalize`/`requeue`/claim helper
+  write failures are caught: the result is reported with `persistenceError`, the in-flight marker is
+  released when possible, and the remaining entries still run.
+- **The request deadline guard no longer leaves a timer behind.** It uses one `AbortController` plus a
+  cleared timer (forwarding the caller's abort), instead of `AbortSignal.timeout`/`any` whose deadline
+  signal lived until its deadline even after the request settled.
+- **The audit log can no longer claim records it did not persist.** `recent` is updated only after a
+  successful append; a failed append is counted in the health block instead.
+
+### Changed
+
+- SPEC (§4.1, §4.3, §4.7, §5.8, §5.9, §9, §10), README (both languages), DETAIL (both languages) and
+  the FAQ document the new audit/health shape, partial queue execution, cross-volume precheck, the
+  review debounce/stop/measure behavior and the persisted page preferences.
+- Test baseline grew from 515 to 535 passing tests; `npm run check` still passes (16 routes,
+  38 error + 28 warning codes, 525 locale keys, 29 shipped paths).
+
 ## [0.6.3] - 2026-11-12
 
 ### Added
