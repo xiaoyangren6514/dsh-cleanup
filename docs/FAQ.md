@@ -1,6 +1,6 @@
 # 常见问题（FAQ）
 
-> 适用版本：dsh-cleanup 0.6.1 · DSH 0.2.2-rc.1。
+> 适用版本：dsh-cleanup 0.6.2 · DSH 0.2.2-rc.1 / 0.2.2-rc.2。
 > 文中 `~/.dsh` 指当前 profile 的 DSH home；插件状态文件位于 `~/.dsh/cleanup/`，回收站位于 `~/.dsh/trash/dsh-cleanup/`（除非在清理设置里配置了专用的 `trashRoot`）。
 
 ## 安装、升级与卸载
@@ -10,10 +10,10 @@
 
 ```sh
 # npm（包发布之后）
-dsh plugin --profile web add dsh-cleanup@0.6.1
+dsh plugin --profile web add dsh-cleanup@0.6.2
 
-# GitHub，固定到 v0.6.1 tag（指向固定提交；需要严格 pin 时用 `git rev-parse v0.6.1` 换成完整 sha）
-dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.1
+# GitHub，固定到 v0.6.2 tag（指向固定提交；需要严格 pin 时用 `git rev-parse v0.6.2` 换成完整 sha）
+dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.2
 
 # 本地 checkout
 git clone https://github.com/xiaoyangren6514/dsh-cleanup.git
@@ -47,7 +47,10 @@ Windows 上的行为：
 不会。没有对外网络请求、遥测或远程同步；浏览器半部只调用同源的本地 Host API。插件只读写本机 Host 已管理的路径（工作区目录、会话日志、自己的回收站与状态文件）。详见 [DETAIL.md](DETAIL.md) 的「隐私」一节。
 
 ### 它和「插件市场」是什么关系？
-DSH 0.2.2-rc.1 没有官方插件市场或官方索引。Discover 页签由可选的实验性 plugin-market bundle 提供，默认不配置任何索引；社区索引（例如 awesome-dsh-plugin.com、dshopen.org）需要用户自己添加索引 URL。安装本身始终是上面那条 `dsh plugin ... add` 命令。
+DSH 0.2.2（rc.1 / rc.2）没有官方插件市场或官方索引。Discover 页签由可选的实验性 plugin-market bundle 提供，默认不配置任何索引；社区索引（例如 awesome-dsh-plugin.com、dshopen.org）需要用户自己添加索引 URL。安装本身始终是上面那条 `dsh plugin ... add` 命令。
+
+### dsh-cleanup 支持 DSH 0.2.2-rc.2 吗？
+支持。0.6.2 在 DSH 0.2.2-rc.1 与 0.2.2-rc.2 上都验证过：宿主侧全部接口（盘点与 capabilities、用量折叠与缓存、计划 → 回收站 → 恢复、打开目录的错误路径、64 目标边界）行为一致，浏览器侧加载无报错。`package.json` 的 `engines.dsh: >=0.2.2-alpha.3 <0.3.0` 表示可接受的版本区间，rc.2 落在区间内；rc.2 新增的"精确版本插件兼容检查"只禁用那些把 `@deepseek-ai/*` 依赖写死到精确版本的插件，本插件只声明区间，因此不受影响。升级：`dsh plugin --profile web add dsh-cleanup@0.6.2`，然后刷新页面。
 
 ## 删除与恢复
 

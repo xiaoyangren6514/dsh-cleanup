@@ -15,10 +15,10 @@ kind: "package-bundle"
 
 DSH itself only unregisters a workspace — the folder, its files, and its Session history stay on disk — and Sessions can only be archived, never deleted. `dsh-cleanup` fills that gap while keeping the destructive surface narrow: targets are addressed by DSH identity, never by arbitrary path; every deletion is planned, reviewed, and confirmed; and the default outcome is a recoverable trash.
 
-- Package: `dsh-cleanup` 0.6.1
+- Package: `dsh-cleanup` 0.6.2
 - Repository: <https://github.com/xiaoyangren6514/dsh-cleanup>
 - License: MIT © 2026 fly
-- Tested with: DSH 0.2.2-rc.1
+- Tested with: DSH 0.2.2-rc.1 / 0.2.2-rc.2
 
 ## What you get
 
@@ -124,10 +124,10 @@ For Sessions opened in the current Host, the review dialog offers **Schedule del
 
 ```sh
 # From npm (after publication)
-dsh plugin --profile web add dsh-cleanup@0.6.1
+dsh plugin --profile web add dsh-cleanup@0.6.2
 
-# From GitHub, pinned to the v0.6.1 tag (a fixed commit; swap in `git rev-parse v0.6.1` for the raw sha)
-dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.1
+# From GitHub, pinned to the v0.6.2 tag (a fixed commit; swap in `git rev-parse v0.6.2` for the raw sha)
+dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.2
 
 # From a local checkout
 git clone https://github.com/xiaoyangren6514/dsh-cleanup.git
@@ -140,11 +140,11 @@ A locally linked checkout must stay in place while installed, or the profile may
 
 ### Discover and community indexes
 
-DSH 0.2.2-rc.1 ships **no official plugin market or index**. The Discover tab is provided by the optional experimental plugin-market bundle, and no index is configured by default — users add an index URL themselves. Community-run catalogs that publish DSH plugin indexes include [awesome-dsh-plugin.com](https://awesome-dsh-plugin.com) (index at <https://cdn.jsdelivr.net/npm/dsh-plugin-catalog/index.json>) and [dshopen.org](https://dshopen.org). Once this package is published and listed in such an index, add the index URL and install from Discover, or use the CLI commands above.
+DSH 0.2.2 (rc.1 / rc.2) ships **no official plugin market or index**. The Discover tab is provided by the optional experimental plugin-market bundle, and no index is configured by default — users add an index URL themselves. Community-run catalogs that publish DSH plugin indexes include [awesome-dsh-plugin.com](https://awesome-dsh-plugin.com) (index at <https://cdn.jsdelivr.net/npm/dsh-plugin-catalog/index.json>) and [dshopen.org](https://dshopen.org). Once this package is published and listed in such an index, add the index URL and install from Discover, or use the CLI commands above.
 
 ## Requirements and compatibility
 
-- **DSH 0.2.2-rc.1** tested; `engines.dsh: ^0.2.2-alpha.3` is enforced before install/enable, and incompatible runtimes are refused rather than half-supported.
+- **DSH 0.2.2-rc.1 and 0.2.2-rc.2** tested; `engines.dsh: >=0.2.2-alpha.3 <0.3.0` is enforced before install/enable, and incompatible runtimes are refused rather than half-supported. rc.2 also added an exact-version plugin guard that disables plugins pinning exact `@deepseek-ai/*` peer requirements; this plugin declares only a semver range, so it stays enabled.
 - **Node.js ≥ 20** (Host half).
 - **Web GUI** — the browser half registers through the DSH client module loader and the `shell.overlay`, `settings.section`, and `contextMenu.*` extension points.
 - **macOS (`darwin`), Linux, and Windows (`win32`)** — `dsh.bundle.platforms: ["darwin", "linux", "win32"]`. On Windows the plugin works with drive roots and backslash paths: drive roots (`C:\`), the system directories (`C:\Windows`, `Program Files`, `ProgramData`), and the home directory's parent are protected, path comparison is case-insensitive, and directory depth is counted in segments below the drive root, so `C:\proj` is refused as a top-level directory just like `/proj`. Junctions, which appear as symlinks, are refused like symlinks. POSIX-only permission cases are skipped on Windows. These Windows semantics are implemented and unit-tested, but this release was validated on macOS only — see [Known limits](#known-limits).
@@ -152,7 +152,7 @@ DSH 0.2.2-rc.1 ships **no official plugin market or index**. The Discover tab is
 
 ## Languages
 
-Plugin UI copy (settings page, review dialog, menus, notifications) is shipped in **Simplified Chinese and English** only. DSH 0.2.2-rc.1 also ships Japanese, Spanish, French, German, Russian, and Brazilian Portuguese; on those UI languages this plugin falls back to English rather than showing untranslated or machine-translated claims. Plugin-manager display metadata in `locale/*.json` ships **eight languages**.
+Plugin UI copy (settings page, review dialog, menus, notifications) is shipped in **Simplified Chinese and English** only. DSH 0.2.2 also ships Japanese, Spanish, French, German, Russian, and Brazilian Portuguese; on those UI languages this plugin falls back to English rather than showing untranslated or machine-translated claims. Plugin-manager display metadata in `locale/*.json` ships **eight languages**.
 
 The long-form detail document uses **Chinese as its default** ([DETAIL.md](https://github.com/xiaoyangren6514/dsh-cleanup/blob/main/docs/DETAIL.md)); this file is the English edition. A Chinese UI reads the Chinese document, an English UI reads this file, and languages without their own edition read the Chinese default.
 

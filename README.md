@@ -16,11 +16,11 @@ Since 0.6.0 it also shows what it deletes: an opt-in **usage** view (per-Session
 | | |
 |---|---|
 | Package | `dsh-cleanup` (imports no `@deepseek-ai/*` package, zero runtime dependencies) |
-| Version | 0.6.1 |
+| Version | 0.6.2 |
 | Repository | <https://github.com/xiaoyangren6514/dsh-cleanup> |
 | Author | fly |
 | License | [MIT](LICENSE) |
-| Tested with | DSH 0.2.2-rc.1 |
+| Tested with | DSH 0.2.2-rc.1 / 0.2.2-rc.2 |
 | Host platforms | macOS (`darwin`), Linux, and Windows (`win32`) |
 
 ## Features
@@ -86,10 +86,10 @@ Install the bundle into a DSH profile, then refresh the Web page once. The Host 
 
 ```sh
 # From npm (after the package is published)
-dsh plugin --profile web add dsh-cleanup@0.6.1
+dsh plugin --profile web add dsh-cleanup@0.6.2
 
-# From GitHub, pinned to the v0.6.1 tag (a fixed commit; swap in `git rev-parse v0.6.1` for the raw sha)
-dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.1
+# From GitHub, pinned to the v0.6.2 tag (a fixed commit; swap in `git rev-parse v0.6.2` for the raw sha)
+dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.2
 
 # From a local checkout
 git clone https://github.com/xiaoyangren6514/dsh-cleanup.git
@@ -104,7 +104,7 @@ A local checkout is installed as a linked directory: do not move or delete it wh
 
 ### Discover
 
-DSH 0.2.2-rc.1 ships **no official plugin market or index**. The Discover tab comes from the optional experimental plugin-market bundle (shipped profiles keep it off), and no index source is configured by default — you add an index URL yourself in Discover or Settings → Plugins. Community-run catalogs that publish DSH plugin indexes include:
+DSH 0.2.2 (rc.1 / rc.2) ships **no official plugin market or index**. The Discover tab comes from the optional experimental plugin-market bundle (shipped profiles keep it off), and no index source is configured by default — you add an index URL yourself in Discover or Settings → Plugins. Community-run catalogs that publish DSH plugin indexes include:
 
 - [awesome-dsh-plugin.com](https://awesome-dsh-plugin.com) — index at <https://cdn.jsdelivr.net/npm/dsh-plugin-catalog/index.json>
 - [dshopen.org](https://dshopen.org)
@@ -113,7 +113,7 @@ Once `dsh-cleanup` is published and listed in one of those indexes, add that ind
 
 ## Requirements and compatibility
 
-- **DSH 0.2.2-rc.1** (tested). `package.json` declares `engines.dsh: ^0.2.2-alpha.3`; the plugin manager checks it before install/enable and refuses incompatible runtimes instead of running on a half-broken API.
+- **DSH 0.2.2-rc.1 and 0.2.2-rc.2** (tested). `package.json` declares `engines.dsh: >=0.2.2-alpha.3 <0.3.0`; the plugin manager checks it before install/enable and refuses incompatible runtimes instead of running on a half-broken API. rc.2 also added an exact-version plugin guard: it disables plugins that pin exact `@deepseek-ai/*` peer requirements, while this plugin declares only a semver range and therefore stays enabled.
 - **Node.js ≥ 20** for the Host half.
 - **Web GUI.** The browser half is a web client module, registered through `window.__ModuleLoader__` and the `shell.overlay` / `settings.section` / `contextMenu.*` slots.
 - **macOS (`darwin`), Linux, and Windows (`win32`).** The bundle declares `dsh.bundle.platforms: ["darwin", "linux", "win32"]`. On Windows the plugin works with drive roots and backslash paths: drive roots, the system directories (`C:\Windows`, `Program Files`, `ProgramData`), and the home directory's parent are protected, path comparison is case-insensitive, and depth is counted below the drive root, so `C:\proj` is refused as a top-level path just like `/proj`. Junctions are refused like symlinks. These Windows semantics are implemented and unit-tested, but this release was validated on macOS only — see [Known limits](#known-limits).
@@ -121,7 +121,7 @@ Once `dsh-cleanup` is published and listed in one of those indexes, add that ind
 
 ## UI language
 
-Plugin surfaces (settings page, review dialog, menus, notifications) are written in **Simplified Chinese and English** only. DSH 0.2.2-rc.1 also ships Japanese, Spanish, French, German, Russian, and Brazilian Portuguese; on those DSH UI languages this plugin's pages **fall back to English** rather than showing machine-translated text. There is no translation of the plugin UI into those six languages.
+Plugin surfaces (settings page, review dialog, menus, notifications) are written in **Simplified Chinese and English** only. DSH 0.2.2 also ships Japanese, Spanish, French, German, Russian, and Brazilian Portuguese; on those DSH UI languages this plugin's pages **fall back to English** rather than showing machine-translated text. There is no translation of the plugin UI into those six languages.
 
 The plugin-manager display metadata (`locale/*.json`) ships **eight languages**, so the plugin title and short description in Settings → Plugins render in the active language. The long-form detail document is Chinese by default: [docs/DETAIL.md](docs/DETAIL.md), with the English edition in [docs/DETAIL.en.md](docs/DETAIL.en.md). A Chinese UI reads the Chinese document, an English UI reads the English one, and the other built-in languages read the Chinese default.
 

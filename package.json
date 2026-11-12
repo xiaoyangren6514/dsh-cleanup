@@ -1,6 +1,6 @@
 {
   "name": "dsh-cleanup",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "type": "module",
   "description": "Workspace folder and Session log deletion with a recoverable trash, an explicit review step, token-usage insight, a selectable Session family tree, projection-cache cleanup, and a storage overview page",
   "license": "MIT",
@@ -79,7 +79,7 @@
     }
   },
   "engines": {
-    "dsh": "^0.2.2-alpha.3",
+    "dsh": ">=0.2.2-alpha.3 <0.3.0",
     "node": ">=20"
   }
 }

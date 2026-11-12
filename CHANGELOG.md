@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-11-12
+
+### Changed
+
+- **DSH 0.2.2-rc.2 verified.** The plugin was re-tested against DSH 0.2.2-rc.2 in an isolated
+  `DSH_HOME`: every Host route behaved as on rc.1 (`inventory` capabilities, usage folding and
+  the revision-keyed fold cache, plan -> trash -> restore, the open-folder error paths, and the
+  64-target boundary), and the browser half loaded with no console errors or exceptions. No code
+  change was needed: `engines.dsh: >=0.2.2-alpha.3 <0.3.0` already admits rc.2.
+- README, DETAIL (both languages) and the FAQ now name DSH 0.2.2-rc.1 **and** 0.2.2-rc.2 as tested
+  environments, and explain why rc.2's stricter exact-version plugin guard (which disables plugins
+  pinning exact `@deepseek-ai/*` peer requirements) does not affect this plugin.
+- `engines.dsh` is now written as the explicit range `>=0.2.2-alpha.3 <0.3.0` (semantically identical
+  to the previous caret range, which already meant exactly that): the 0.2.2 line and future 0.2.x
+  releases are accepted, while DSH 0.2.0/0.2.1 stay refused because the persistence snapshot's
+  `location` field this plugin needs only exists from the 0.2.2 line.
+
 ## [0.6.1] - 2026-11-10
 
 ### Fixed

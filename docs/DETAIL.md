@@ -15,10 +15,10 @@ kind: "package-bundle"
 
 DSH 本身对工作区只做「移除注册」——目录、文件与会话历史都留在磁盘上；对会话只有「归档」，没有删除。`dsh-cleanup` 补上这一段，同时把破坏面收窄：目标只能用 DSH 的身份指定、绝不用任意路径；每次删除都经过计划、复核与确认；默认结果是可恢复的回收站。
 
-- 包名：`dsh-cleanup` 0.6.1
+- 包名：`dsh-cleanup` 0.6.2
 - 仓库：<https://github.com/xiaoyangren6514/dsh-cleanup>
 - 许可证：MIT © 2026 fly
-- 验证环境：DSH 0.2.2-rc.1
+- 验证环境：DSH 0.2.2-rc.1 / 0.2.2-rc.2
 
 ## 能做什么
 
@@ -124,10 +124,10 @@ DSH 会让 Agent 及其会话写句柄存活到进程结束，并且没有公开
 
 ```sh
 # 从 npm 安装（包发布之后）
-dsh plugin --profile web add dsh-cleanup@0.6.1
+dsh plugin --profile web add dsh-cleanup@0.6.2
 
-# 从 GitHub 安装（v0.6.1 是 tag，指向固定提交；需要严格 pin 时用 `git rev-parse v0.6.1` 换成完整 sha）
-dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.1
+# 从 GitHub 安装（v0.6.2 是 tag，指向固定提交；需要严格 pin 时用 `git rev-parse v0.6.2` 换成完整 sha）
+dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.2
 
 # 从本地 checkout 安装
 git clone https://github.com/xiaoyangren6514/dsh-cleanup.git
@@ -140,11 +140,11 @@ dsh plugin --profile web add ./dsh-cleanup
 
 ### Discover 与社区索引
 
-DSH 0.2.2-rc.1 **没有官方插件市场或官方索引**。Discover 页签由可选的实验性 plugin-market bundle 提供，且默认不配置任何索引源——需要用户自己添加索引 URL。社区维护的 DSH 插件索引包括 [awesome-dsh-plugin.com](https://awesome-dsh-plugin.com)（索引 <https://cdn.jsdelivr.net/npm/dsh-plugin-catalog/index.json>）与 [dshopen.org](https://dshopen.org)。本包发布并出现在此类索引之后，添加索引 URL 即可从 Discover 安装，或继续使用上面的 CLI 命令。
+DSH 0.2.2（rc.1 / rc.2）**没有官方插件市场或官方索引**。Discover 页签由可选的实验性 plugin-market bundle 提供，且默认不配置任何索引源——需要用户自己添加索引 URL。社区维护的 DSH 插件索引包括 [awesome-dsh-plugin.com](https://awesome-dsh-plugin.com)（索引 <https://cdn.jsdelivr.net/npm/dsh-plugin-catalog/index.json>）与 [dshopen.org](https://dshopen.org)。本包发布并出现在此类索引之后，添加索引 URL 即可从 Discover 安装，或继续使用上面的 CLI 命令。
 
 ## 环境与兼容性
 
-- **DSH 0.2.2-rc.1** 已验证；`engines.dsh: ^0.2.2-alpha.3` 会在安装/启用前检查，不兼容的运行时被拒绝，而不是半支持运行。
+- **DSH 0.2.2-rc.1 与 0.2.2-rc.2** 已验证；`engines.dsh: >=0.2.2-alpha.3 <0.3.0` 会在安装/启用前检查，不兼容的运行时被拒绝，而不是半支持运行。rc.2 新增的精确版本插件兼容检查只影响把 `@deepseek-ai/*` 依赖写死到精确版本的插件，本插件声明的是版本区间，不受影响。
 - Host 半部需要 **Node.js ≥ 20**。
 - **Web 界面**——浏览器半部通过 DSH 客户端模块加载器与 `shell.overlay`、`settings.section`、`contextMenu.*` 扩展点注册。
 - **macOS（`darwin`）、Linux 与 Windows（`win32`）**——`dsh.bundle.platforms: ["darwin", "linux", "win32"]`。Windows 上使用盘符根与反斜杠路径：盘符根（`C:\`）、系统目录（`C:\Windows`、`Program Files`、`ProgramData`）与家目录的上级都受保护，路径比较按不区分大小写处理，目录层级按「相对盘符根的段数」计算，因此 `C:\proj` 与 `/proj` 一样被视为顶层目录而拒绝。映射为符号链接的 junction 与符号链接同等拒绝。POSIX 专属的权限用例在 Windows 上跳过。这些 Windows 语义已实现并有单元测试覆盖，但本版本只在 macOS 上做过完整验证（见[已知限制](#已知限制)）。
@@ -152,7 +152,7 @@ DSH 0.2.2-rc.1 **没有官方插件市场或官方索引**。Discover 页签由�
 
 ## 语言
 
-插件界面文案（设置页、复核弹窗、菜单、通知）只提供**简体中文与英文**。DSH 0.2.2-rc.1 另内置日语、西班牙语、法语、德语、俄语、巴西葡萄牙语；在这些界面语言下，本插件回落为英文，不会展示未翻译或机翻内容。插件管理器显示元数据（`locale/*.json`）保留**八种语言**。
+插件界面文案（设置页、复核弹窗、菜单、通知）只提供**简体中文与英文**。DSH 0.2.2 另内置日语、西班牙语、法语、德语、俄语、巴西葡萄牙语；在这些界面语言下，本插件回落为英文，不会展示未翻译或机翻内容。插件管理器显示元数据（`locale/*.json`）保留**八种语言**。
 
 长文详情以**中文为默认文档**（即本文），英文版见 [DETAIL.en.md](https://github.com/xiaoyangren6514/dsh-cleanup/blob/main/docs/DETAIL.en.md)：中文界面读本文，英文界面读英文版，未单独翻译的语言读中文默认文档。
 
