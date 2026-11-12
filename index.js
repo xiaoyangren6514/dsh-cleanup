@@ -26,7 +26,8 @@ export const inject = ['connection', 'workspaceRegistry', 'sessionPersistence']
 /** Every route is an authenticated exact POST route on the shared API channel. */
 const ROUTE_DEFINITIONS = Object.freeze([
   ['/api/cleanup.inventory', (engine) => engine.inventory()],
-  ['/api/cleanup.measure', (engine, body) => engine.measure(body)],
+  // Measuring can walk many trees; the request signal lets a closed review abort the scan.
+  ['/api/cleanup.measure', (engine, body, request) => engine.measure(body, { signal: request?.signal })],
   // Per-Session token usage folded through the optional sessionQuery seam (SPEC §4.10/§5.11).
   ['/api/cleanup.usage', (engine, body, request) => engine.usage(body, { signal: request?.signal })],
   // Read-only cleanup-wizard preview (SPEC §4.9): a projection of the inventory snapshot.

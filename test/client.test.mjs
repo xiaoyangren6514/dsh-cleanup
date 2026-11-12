@@ -41,6 +41,22 @@ function createContext() {
   let candidatesResponse = () => ({ ok: true, candidates: [], total: 0, truncated: false, totals: { count: 0, bytes: 0 } })
   let usageResponse = () => ({ ok: true, available: true, usage: {} })
   let openResponse = () => ({ ok: true, path: '/tmp/opened' })
+  /** Settings payloads (0.6.3 tests): one live object, patchable per test. */
+  const settingsDefaults = {
+    allowPermanentDeletion: true,
+    auditEnabled: true,
+    gitSafetyCheck: false,
+    maxScanEntries: 200000,
+    scanTimeoutMs: 10000,
+    planTtlMs: 300000,
+    maxPlans: 25,
+    auditMaxBytes: 0,
+    trashRetentionDays: 30,
+    trashMaxBytes: 0,
+    trashRoot: '/home/.dsh/trash/dsh-cleanup',
+  }
+  let settingsValues = Object.assign({}, settingsDefaults)
+  let settingsSetResponse = null
   const notices = []
   const inventory = {
     ok: true,
@@ -161,6 +177,14 @@ function createContext() {
     if (path.endsWith('cleanup.usage')) return respond(await usageResponse(body))
     if (path.endsWith('cleanup.open')) return respond(await openResponse(body))
     if (path.endsWith('cleanup.delete')) return respond(deleteResponse(body))
+    if (path.endsWith('cleanup.settings.get')) {
+      return respond({ ok: true, settings: settingsValues, defaults: settingsDefaults, persisted: true, warnings: [] })
+    }
+    if (path.endsWith('cleanup.settings.set')) {
+      if (settingsSetResponse !== null) return respond(settingsSetResponse(body))
+      settingsValues = Object.assign({}, settingsValues, body.patch || {})
+      return respond({ ok: true, settings: settingsValues, defaults: settingsDefaults, persisted: true, warnings: [] })
+    }
     throw new Error('unrouted fetch ' + path)
   }
 
@@ -196,11 +220,16 @@ function createContext() {
     },
     setSessions(fn) { inventory.sessions = fn() },
     setTrashEntries(fn) { trash.entries = fn() },
+    setTrashSummary(fn) { inventory.trash = fn() },
+    setDeferredSummary(fn) { inventory.deferred = fn() },
     setWorkspaces(fn) { inventory.workspaces = fn() },
     /** 0.6.0 capability flags (SPEC §4.1 `inventory.capabilities`). */
     setCapabilities(value) { inventory.capabilities = value },
     setUsageResponse(fn) { usageResponse = fn },
     setOpenResponse(fn) { openResponse = fn },
+    /** Next settings.set envelope (e.g. one carrying warnings); `null` restores the echo behaviour. */
+    setSettingsSetResponse(fn) { settingsSetResponse = fn },
+    settingsValues() { return settingsValues },
   }
 }
 
@@ -309,7 +338,7 @@ function spyDoneTimer() {
   const timers = []
   globalThis.setTimeout = function (callback, delay) {
     if (typeof delay === 'number' && delay >= 3000) {
-      const handle = { callback: callback, cancelled: false }
+      const handle = { callback: callback, cancelled: false, delay: delay }
       timers.push(handle)
       return handle
     }
@@ -329,6 +358,10 @@ function spyDoneTimer() {
     fire: function () {
       const timer = this.armed()[0]
       if (timer) timer.callback()
+    },
+    /** Delays of the still-armed dwell timers (0.6.3 asserts the 8s window). */
+    delays: function () {
+      return this.armed().map(function (timer) { return timer.delay })
     },
     restore: function () {
       globalThis.setTimeout = realSetTimeout
@@ -1283,7 +1316,9 @@ test('settings: the Sessions tab filters by workspace, ahead of the sort control
   const toolbars = elementsByClass(tree, 'dsh-cleanup-toolbar')
   const fields = elementsByClass(toolbars[0], 'dsh-cleanup-toolbar-field')
   assert.match(collectText(fields[0]), /工作区/, 'the workspace filter comes first')
-  assert.match(collectText(fields[1]), /排序/)
+  // 0.6.3: the free-text search sits between the workspace filter and the sort control.
+  assert.match(collectText(fields[1]), /搜索/, 'the search box follows the workspace filter')
+  assert.match(collectText(fields[2]), /排序/)
 
   store.showMoreSessions()
   assert.ok(store.getSnapshot().sessionLimit > 300, 'the page grew before filtering')
@@ -3429,4 +3464,392 @@ test('state: a tab switch clears the inline open error; the dialog Open label na
   assert.doesNotMatch(String(openButton.props['aria-label']), /\/tmp\/proj/, 'the raw path is not the accessible name')
   dialogApi.disposeDialog()
   store.dispose()
+})
+
+// =============================================================================================
+// 0.6.3 (docs/internal/0.6.3-plan.md §B): deadline, selection cap, result actions, search/sort.
+// =============================================================================================
+
+/** First button whose rendered text contains the needle. */
+function findButtonByText(tree, needle) {
+  return findAll(tree, (element) => element && element.type === 'button' && collectText(element).indexOf(needle) !== -1)[0] || null
+}
+
+/** Mount the settings page against a caller-owned store so a test can drive and render it. */
+function mountSettingsPage(world, store) {
+  const api = slotApi(world, 'settings.section')
+  api.createPageStore = () => store
+  const section = world.registrations.find((entry) => entry.options.name === 'settings.section')
+  return {
+    api,
+    render() { return renderDeep(section.component({ api: api, t: api.t })) },
+  }
+}
+
+test('0.6.3 request deadline: a stalled Host reports transport timeout and the localized retry copy', async () => {
+  // The mapping and the per-operation budgets are static contract; assert them before the behaviour.
+  assert.match(source, /const REQUEST_TIMEOUT_MS = 20000/, 'page reads default to 20s')
+  assert.match(source, /const PLAN_TIMEOUT_MS = 60000/, 'plan/candidates/usage/defer allow 60s')
+  assert.match(source, /const LONG_REQUEST_TIMEOUT_MS = 600000/, 'delete/measure allow 10 minutes')
+  assert.match(source, /request\(ROUTE\.delete, body, signal, LONG_REQUEST_TIMEOUT_MS\)/)
+  assert.match(source, /request\(ROUTE\.measure, payload, controller\.signal, LONG_REQUEST_TIMEOUT_MS\)/)
+  assert.match(source, /if \(error\.transport === 'timeout'\) return t\('error\.timeout'\)/)
+
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  const api = slotApi(world, 'settings.section')
+  const store = api.createPageStore()
+  await store.loadInventory()
+  store.setTab('trash')
+  await store.loadTrash()
+
+  // Make the deadline fire immediately: the guard sees an already-aborted timeout signal, so the
+  // request path must classify the abort as OUR deadline, not as a caller abort.
+  const realFetch = globalThis.fetch
+  const realTimeout = AbortSignal.timeout
+  const realAny = AbortSignal.any
+  let pending
+  try {
+    AbortSignal.timeout = () => AbortSignal.abort()
+    AbortSignal.any = (signals) => signals.find((signal) => signal.aborted === true) || signals[0]
+    globalThis.fetch = (url, init) => String(url).endsWith('cleanup.trash.restore')
+      ? Promise.reject(new DOMException('aborted', 'AbortError'))
+      : realFetch(url, init)
+    pending = store.restoreEntry('20260101T000000Z-a-0001')
+  } finally {
+    globalThis.fetch = realFetch
+    AbortSignal.timeout = realTimeout
+    AbortSignal.any = realAny
+  }
+  await pending
+  assert.equal(store.getSnapshot().actionError.transport, 'timeout', 'a deadline is its own transport value')
+
+  const page = mountSettingsPage(world, store)
+  const text = collectText(page.render())
+  assert.match(text, /操作超时，请重试/, 'the trash banner shows the localized timeout copy')
+  assert.match(text, /删除可能仍在后台执行/, 'the copy warns that the Host may still be executing')
+  store.dispose()
+})
+
+test('0.6.3 selection cap: the 65th row is refused with a notice, and removing one allows another', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setWorkspaces(() => Array.from({ length: 70 }, (_, index) => workspaceRow('ws-' + index, 'proj-' + index, '/tmp/proj-' + index)))
+  const api = slotApi(world, 'settings.section')
+  const store = api.createPageStore()
+  await store.loadInventory()
+
+  for (let index = 0; index < 64; index += 1) store.toggleSelect('ws-' + index)
+  assert.equal(store.getSnapshot().selected.length, 64)
+  assert.equal(store.getSnapshot().selectionNotice, false)
+  store.toggleSelect('ws-64')
+  assert.equal(store.getSnapshot().selected.length, 64, 'the 65th selection is refused, never queued')
+  assert.equal(store.getSnapshot().selectionNotice, true)
+
+  const page = mountSettingsPage(world, store)
+  assert.match(collectText(page.render()), /一次复核最多 64 项/, 'the batch bar explains the refused click')
+
+  store.toggleSelect('ws-0')
+  assert.equal(store.getSnapshot().selected.length, 63)
+  assert.equal(store.getSnapshot().selectionNotice, false, 'a successful add/remove clears the notice')
+  store.toggleSelect('ws-64')
+  assert.equal(store.getSnapshot().selected.length, 64, 'a free slot can be filled again')
+  assert.equal(store.getSnapshot().selectionNotice, false)
+
+  // The Sessions batch bar applies the same budget (one plan holds at most 64 targets).
+  world.setSessions(() => Array.from({ length: 70 }, (_, index) => inventorySession('session-' + index)))
+  await store.loadInventory()
+  for (let index = 0; index < 64; index += 1) store.toggleSessionSelect('session-' + index)
+  store.toggleSessionSelect('session-64')
+  assert.equal(store.getSnapshot().selectedSessions.length, 64, 'the 65th Session is refused too')
+  assert.equal(store.getSnapshot().selectionNotice, true)
+  store.setTab('sessions')
+  assert.match(collectText(page.render()), /一次复核最多 64 项/, 'the Sessions batch bar explains it as well')
+  store.clearSessionSelection()
+  assert.equal(store.getSnapshot().selectionNotice, false, 'clearing the batch clears the notice')
+  store.dispose()
+})
+
+test('0.6.3 trim: a TOO_MANY_TARGETS failure keeps the first 64 planned targets and re-plans', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setPlanResponse((body) => ({ ok: true, plan: planEchoingTargets(body) }))
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  const api = overlay.options.inject().api
+  const targets = Array.from({ length: 65 }, (_, index) => ({ kind: 'session', id: 'session-' + index, title: 'session-' + index }))
+  api.openDialog(targets)
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'failed', 'oversized review fails locally')
+  assert.equal(api.dialogStore.getSnapshot().error.code, 'TOO_MANY_TARGETS')
+  assert.equal(world.calls.some((call) => call.url.endsWith('cleanup.plan')), false, 'nothing is sent over the limit')
+
+  const trim = findButtonByText(renderDeep(overlay.component({ api: api, t: api.t })), '保留前 64 项并重新复核')
+  assert.ok(trim, 'the failed view offers the self-rescue control instead of a dead end')
+  await trim.props.onClick()
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'trimmed review')
+  assert.equal(api.dialogStore.getSnapshot().selection.length, 64)
+  const planCall = world.calls.filter((call) => call.url.endsWith('cleanup.plan')).at(-1)
+  assert.equal(planCall.body.targets.length, 64, 'the trimmed plan names exactly the budget')
+  assert.deepEqual(planCall.body.targets[0], { kind: 'session', id: 'session-0' })
+  assert.deepEqual(planCall.body.targets.at(-1), { kind: 'session', id: 'session-63' })
+  api.disposeDialog()
+})
+
+test('0.6.3 done: a trashed result offers Undo (one restore per entry) and Open trash; the dwell is 8s', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setDeleteResponse(() => ({
+    ok: true,
+    result: {
+      items: [
+        { kind: 'session', id: 'session-a', status: 'trashed', error: null, movedTo: '/tmp/trash/a', bytes: 10, entryId: 'entry-a' },
+        { kind: 'session', id: 'session-b', status: 'trashed', error: null, movedTo: '/tmp/trash/b', bytes: 10, entryId: 'entry-b' },
+      ],
+      totals: { trashed: 2, deleted: 0, failed: 0, bytes: 20 },
+    },
+  }))
+  world.setRestoreResponse(() => ({ ok: true, restoredTo: '/tmp/proj-a', reRegistered: false, stateRestored: null, warnings: [] }))
+  const api = slotApi(world, 'settings.section')
+  const store = api.createPageStore()
+  await store.loadInventory()
+  const page = mountSettingsPage(world, store)
+  const timer = spyDoneTimer()
+  try {
+    api.openDialog([
+      { kind: 'session', id: 'session-a', title: 'session-a' },
+      { kind: 'session', id: 'session-b', title: 'session-b' },
+    ], { surface: 'settings' })
+    await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+    api.confirmDelete()
+    await waitFor(() => api.dialogStore.getSnapshot().phase === 'done', 'done phase', 5000)
+    assert.deepEqual(timer.delays(), [8000], 'a clean result now dwells 8s before closing itself')
+    api.pauseDoneDismiss()
+    assert.equal(timer.armed().length, 0, 'hovering/focusing the summary pauses the dwell')
+    api.resumeDoneDismiss()
+    assert.deepEqual(timer.delays(), [8000], 'leaving the summary re-arms the same window')
+
+    const doneTree = page.render()
+    const undoButton = findButtonByText(doneTree, '撤销删除')
+    assert.ok(undoButton, 'the result offers Undo delete')
+    assert.ok(findButtonByText(doneTree, '打开回收站'), 'the settings surface also offers Open trash')
+
+    await undoButton.props.onClick()
+    const restoreCalls = world.calls.filter((call) => call.url.endsWith('cleanup.trash.restore'))
+    assert.equal(restoreCalls.length, 2, 'every trashed entry is restored once')
+    assert.deepEqual(restoreCalls.map((call) => call.body), [{ entryId: 'entry-a' }, { entryId: 'entry-b' }])
+    assert.deepEqual(api.dialogStore.getSnapshot().undoResult, { ok: 2, failed: 0 })
+    assert.equal(timer.armed().length, 0, 'undoing cancels the auto-dismiss timer')
+    const undoneText = collectText(page.render())
+    assert.match(undoneText, /已撤销删除/)
+    assert.match(undoneText, /已恢复 2 项到原位置/)
+    assert.equal(world.calls.some((call) => call.url === 'session.refresh'), true, 'undo refreshes the session catalog')
+
+    const openTrash = findButtonByText(page.render(), '打开回收站')
+    openTrash.props.onClick()
+    assert.equal(store.getSnapshot().tab, 'trash', 'Open trash switches the settings page to the Trash tab')
+    assert.equal(api.dialogStore.getSnapshot().phase, 'idle', 'and closes the review')
+  } finally {
+    timer.restore()
+  }
+  store.dispose()
+})
+
+test('0.6.3 search: the Sessions tab matches title/id/cwd, shows shown/total/matched and restores on clear', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  const api = slotApi(world, 'settings.section')
+  const store = api.createPageStore()
+  await store.loadInventory()
+  store.setTab('sessions')
+  const page = mountSettingsPage(world, store)
+
+  store.setSessionSearch('重构')
+  let tree = page.render()
+  assert.equal(elementsByClass(tree, 'dsh-cleanup-item').length, 1, 'the sidebar title matches')
+  assert.match(collectText(tree), /已显示 1 \/ 共 2 · 匹配 1/, 'the count line reports shown/total/matched')
+
+  store.setSessionSearch('session-b')
+  assert.equal(elementsByClass(page.render(), 'dsh-cleanup-item').length, 1, 'the raw id matches')
+
+  store.setSessionSearch('/tmp/proj-b')
+  assert.equal(elementsByClass(page.render(), 'dsh-cleanup-item').length, 1, 'the cwd matches')
+
+  // Changing the search restarts paging and drops a selection that the new list may not show.
+  store.toggleSessionSelect('session-a')
+  store.showMoreSessions()
+  assert.ok(store.getSnapshot().sessionLimit > 300)
+  store.setSessionSearch('proj')
+  assert.deepEqual(store.getSnapshot().selectedSessions, [], 'a new search drops the batch selection')
+  assert.equal(store.getSnapshot().sessionLimit, 300, 'a new search restarts paging')
+
+  store.setSessionSearch('nothing-matches-this')
+  tree = page.render()
+  assert.match(collectText(tree), /没有匹配的会话/)
+  assert.ok(findButtonByText(tree, '清除搜索'), 'the empty search state offers a clear action')
+
+  store.setSessionSearch('')
+  assert.equal(elementsByClass(page.render(), 'dsh-cleanup-item').length, 2, 'clearing the search restores every row')
+  store.dispose()
+})
+
+test('0.6.3 sort: inactive orders by last activity ascending and the row shows that same stamp', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  const api = slotApi(world, 'settings.section')
+  const store = api.createPageStore()
+  await store.loadInventory()
+  store.setTab('sessions')
+  const page = mountSettingsPage(world, store)
+
+  // The harness catalog stamps session-a at 300 and session-b at 100.
+  store.setSessionSort('inactive')
+  const titles = elementsByClass(page.render(), 'dsh-cleanup-item-title').map((element) => collectText(element))
+  assert.deepEqual(titles, ['旧会话', '重构登录流程'], 'the least recently active Session comes first')
+
+  const tree = page.render()
+  assert.match(collectText(tree), /最近活动 /, 'the row meta shows the last-activity stamp')
+  const activity = findAll(tree, (element) => element && element.type === 'span' && /最近活动 /.test(collectText(element)))[0]
+  assert.ok(activity)
+  assert.match(String(activity.props.title), /创建于 /, 'the created-at stamp stays available on hover')
+  store.dispose()
+})
+
+test('0.6.3 trash: RESTORE_ORIGINAL_EXISTS offers restore-as-copy and reports re-registration/state/warnings', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setWorkspaces(() => [workspaceRow('ws-a', 'proj', '/tmp/proj')])
+  world.setTrashEntries(() => [
+    { id: 'entry-1', kind: 'workspace-dir', title: 'proj', originalPath: '/tmp/proj', movedAt: 1, bytes: 10, files: 1, dirs: 0, restorable: false, restorableCode: 'RESTORE_ORIGINAL_EXISTS' },
+    { id: 'entry-2', kind: 'session', title: 'sess', originalPath: '/tmp/sessions/a.jsonl', movedAt: 1, bytes: 5, files: 1, dirs: 0, restorable: false, restorableCode: 'RESTORE_ORIGINAL_EXISTS' },
+  ])
+  world.setRestoreResponse(() => ({
+    ok: true,
+    restoredTo: '/tmp/proj (restored)',
+    reRegistered: true,
+    stateRestored: { pinned: true, archived: false },
+    warnings: ['registry unavailable'],
+  }))
+  const api = slotApi(world, 'settings.section')
+  const store = api.createPageStore()
+  await store.loadInventory()
+  await store.loadTrash()
+  store.setTab('trash')
+  const page = mountSettingsPage(world, store)
+
+  const siblingButtons = findAll(page.render(), (element) => element && element.type === 'button' && collectText(element) === '恢复为副本')
+  assert.equal(siblingButtons.length, 1, 'only the workspace entry offers restore-as-copy')
+  await siblingButtons[0].props.onClick()
+  await waitFor(() => store.getSnapshot().actionNotice !== null, 'restore notice')
+  const restoreCall = world.calls.filter((call) => call.url.endsWith('cleanup.trash.restore')).at(-1)
+  assert.deepEqual(restoreCall.body, { entryId: 'entry-1', restoreMode: 'sibling' }, 'the sibling mode is explicit on the wire')
+
+  const text = collectText(page.render())
+  assert.match(text, /已重新注册工作区/)
+  assert.match(text, /置顶状态已恢复/)
+  assert.match(text, /恢复到 /)
+  assert.match(text, /registry unavailable/, 'Host warnings are shown, not swallowed')
+  store.dispose()
+})
+
+test('0.6.3 settings: a save warning is localized by code and only falls back to the Host message when unknown', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  const api = slotApi(world, 'settings.section')
+  const store = api.createPageStore()
+  await store.loadInventory()
+  await store.loadSettings()
+  store.setSettingsField('trashRetentionDays', '60')
+  world.setSettingsSetResponse(() => ({
+    ok: true,
+    settings: Object.assign({}, world.settingsValues(), { trashRetentionDays: 60 }),
+    defaults: null,
+    persisted: true,
+    warnings: [
+      { code: 'EXISTING_DATA_STAYS', field: 'trashRetentionDays', message: 'Existing trashRetentionDays data stays at the old location.' },
+      { code: 'FUTURE_CODE', field: null, message: 'A warning this build does not know.' },
+    ],
+  }))
+  await store.saveSettings()
+  await waitFor(() => store.getSnapshot().settingsStatus !== null, 'saved status')
+  store.setTab('settings')
+  const page = mountSettingsPage(world, store)
+  const text = collectText(page.render())
+  assert.match(text, /回收站保留天数 的旧数据仍留在原位置/, 'a known code uses the localized field label')
+  assert.doesNotMatch(text, /Existing trashRetentionDays data/, 'the English Host sentence is not shown')
+  assert.match(text, /A warning this build does not know/, 'an unknown code falls back to the Host message')
+  store.dispose()
+})
+
+test('0.6.3 page header: summary chips, data freshness, trash badge and the refresh spinner', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setWorkspaces(() => [workspaceRow('ws-a', 'proj', '/tmp/proj')])
+  world.setTrashSummary(() => ({ root: '/home/.dsh/trash', entries: 3, bytes: 3072 }))
+  world.setDeferredSummary(() => ({ count: 2, retained: 0, lastRun: null }))
+  world.setCapabilities({ usage: false, projectionCache: false, openPath: false })
+  const api = slotApi(world, 'settings.section')
+  const store = api.createPageStore()
+  const page = mountSettingsPage(world, store)
+
+  // Before the first load the header already shows the refresh spinner / aria-busy.
+  const loadingTree = page.render()
+  assert.equal(elementsByClass(loadingTree, 'dsh-cleanup-spinner').length >= 1, true, 'refreshing shows a spinner')
+  assert.equal(findButtonByText(loadingTree, '刷新').props['aria-busy'], 'true')
+
+  await store.loadInventory()
+  const tree = page.render()
+  const text = collectText(tree)
+  assert.match(text, /工作区 1/, 'the summary counts workspaces')
+  assert.match(text, /会话 2/, 'the summary counts sessions')
+  assert.match(text, /回收站 3 项 · 3 KB/, 'the summary carries the trash entry count and size')
+  assert.match(text, /待删 2/, 'the summary reports the queued deletions')
+  assert.match(text, /数据更新于 /, 'the header states the data timestamp')
+  const badge = elementsByClass(tree, 'dsh-cleanup-tab-badge')[0]
+  assert.ok(badge, 'the Trash tab carries a count badge')
+  assert.equal(collectText(badge), '3')
+  store.dispose()
+})
+
+test('0.6.3 delete deadline: the failed view says the Host may still be executing the deletion', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  const api = overlay.options.inject().api
+  api.openDialog([{ kind: 'session', id: 'session-a', title: 'session-a' }])
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+
+  const realFetch = globalThis.fetch
+  const realTimeout = AbortSignal.timeout
+  const realAny = AbortSignal.any
+  let pending
+  try {
+    AbortSignal.timeout = () => AbortSignal.abort()
+    AbortSignal.any = (signals) => signals.find((signal) => signal.aborted === true) || signals[0]
+    globalThis.fetch = (url, init) => String(url).endsWith('cleanup.delete')
+      ? Promise.reject(new DOMException('aborted', 'AbortError'))
+      : realFetch(url, init)
+    pending = api.confirmDelete()
+  } finally {
+    globalThis.fetch = realFetch
+    AbortSignal.timeout = realTimeout
+    AbortSignal.any = realAny
+  }
+  await pending
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'failed', 'failed phase')
+  const state = api.dialogStore.getSnapshot()
+  assert.equal(state.failureStage, 'delete')
+  assert.equal(state.error.transport, 'timeout')
+  const text = collectText(renderDeep(overlay.component({ api: api, t: api.t })))
+  assert.match(text, /操作超时，请重试/)
+  assert.match(text, /不要直接重复删除/, 'the delete-stage failed view adds the dedicated warning line')
+  api.disposeDialog()
 })

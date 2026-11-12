@@ -48,17 +48,33 @@ window.__ModuleLoader__.load({
       open: '/api/cleanup.open'.slice(1),
     }
 
-    /** How long a successful result stays on screen before the dialog closes itself. */
-    const DONE_VISIBLE_MS = 3200
+    /**
+     * How long a successful result stays on screen before the dialog closes itself. Long enough to
+     * read a multi-target summary and reach the undo control (its hover/focus pause is separate).
+     */
+    const DONE_VISIBLE_MS = 8000
     /** Ignore a confirming second activation for this long so a double click cannot purge. */
     const CONFIRM_COOLDOWN_MS = 400
+    /**
+     * Per-request deadlines (SPEC §8). A Host that never answers used to leave the page spinning
+     * forever; every `request` now carries one of these and reports `transport: 'timeout'`.
+     * Page-level reads are quick; planning/folding may walk a large history; deletion and
+     * measurement legitimately take minutes on a big workspace.
+     */
+    const REQUEST_TIMEOUT_MS = 20000
+    const PLAN_TIMEOUT_MS = 60000
+    const LONG_REQUEST_TIMEOUT_MS = 600000
     /** UI-only page cap while the Host list may hold up to 2000 sessions. */
     const SESSION_PAGE_SIZE = 300
+    /** Longest accepted Sessions search text; a title/`cwd` filter never needs more. */
+    const SESSION_SEARCH_MAX = 200
     /** Workspace filter values for the Sessions tab (`''` = every Session). */
     const SESSION_WORKSPACE_ANY = ''
     const SESSION_WORKSPACE_UNGROUPED = '__ungrouped__'
     /** Max queued targets rendered per deferred entry before "and N more". */
     const DEFERRED_TARGETS_MAX = 4
+    /** Host restore warnings shown under the Trash tab before the rest is dropped (SPEC §4.5). */
+    const TRASH_RESTORE_WARNINGS_MAX = 3
     /** Cleanup-wizard preview cap (SPEC §4.9 limit) and the plan's target cap. */
     const WIZARD_PREVIEW_LIMIT = 100
     const WIZARD_TARGET_MAX = 64
@@ -140,6 +156,11 @@ window.__ModuleLoader__.load({
       'page.refresh': '刷新',
       'page.measure': '测量大小',
       'page.footer.note': '回收站不会自动清理，可随时恢复；彻底删除无法撤销。',
+      'summary.workspaces': '工作区 {count}',
+      'summary.sessions': '会话 {count}',
+      'summary.trash': '回收站 {count} 项 · {size}',
+      'summary.deferred': '待删 {count}',
+      'summary.updatedAt': '数据更新于 {time}',
       'page.truncated': '会话数量已达上限，列表只显示了一部分。',
       'page.truncated.cap': '会话数量已达上限（{count} 条），列表只显示了一部分。',
       'page.loading': '正在加载…',
@@ -151,6 +172,7 @@ window.__ModuleLoader__.load({
       'page.select': '选择',
       'page.selectedCount_one': '已选择 {count} 项',
       'page.selectedCount_other': '已选择 {count} 项',
+      'selection.capNotice': '一次复核最多 64 项；请先删除已选项，或用“按规则选择”分批处理。',
       'page.showMore_one': '显示更多（还有 {count} 项）',
       'page.showMore_other': '显示更多（还有 {count} 项）',
       'tab.workspaces': '工作区',
@@ -279,6 +301,11 @@ window.__ModuleLoader__.load({
       'action.restore': '恢复',
       'action.purge': '彻底删除',
       'action.purgeConfirm': '确认彻底删除',
+      'action.undoDelete': '撤销删除',
+      'action.openTrash': '打开回收站',
+      'action.trimToLimit': '保留前 64 项并重新复核',
+      'action.clearSearch': '清除搜索',
+      'action.restoreSibling': '恢复为副本',
       'action.emptyTrash': '清空回收站',
       'action.emptyTrashConfirm': '确认清空回收站',
       'action.cancel': '取消',
@@ -290,6 +317,18 @@ window.__ModuleLoader__.load({
       'trash.summary_other': '共 {count} 项 · {size}',
       'trash.movedAt': '移入时间',
       'trash.parentSession': '父会话 {id}',
+      'trash.restored.reRegistered': '已重新注册工作区',
+      'trash.restored.statePinned': '置顶状态已恢复',
+      'trash.restored.stateArchived': '归档状态已恢复',
+      'warn.RESTORE_REGISTER_UNSUPPORTED': '工作区未重新注册：当前 Host 不支持重新注册工作区。',
+      'warn.RESTORE_REGISTER_FAILED': '工作区未重新注册：注册失败，详见 Host 说明。',
+      'warn.RESTORE_SESSION_ID_MISSING': '会话的置顶/归档状态未恢复：回收站条目未记录会话 ID。',
+      'warn.RESTORE_PIN_UNSUPPORTED': '会话的置顶状态未恢复：当前 Host 不支持重新置顶。',
+      'warn.RESTORE_PIN_FAILED': '会话的置顶状态未恢复：操作失败，详见 Host 说明。',
+      'warn.RESTORE_ARCHIVE_UNSUPPORTED': '会话的归档状态未恢复：当前 Host 不支持重新归档。',
+      'warn.RESTORE_ARCHIVE_FAILED': '会话的归档状态未恢复：操作失败，详见 Host 说明。',
+      'warn.RESTORE_STATE_UNREADABLE': '文件已恢复，但记录的注册状态未能应用。',
+      'trash.restored.to': '恢复到 {path}',
       'trash.restoreUnavailable': '无法恢复',
       'trash.purgeArmed': '已进入确认状态：再次激活将永久删除“{title}”，此操作不可撤销。',
       'trash.purgeAllArmed': '已进入确认状态：再次激活将永久清空回收站，此操作不可撤销。',
@@ -340,11 +379,19 @@ window.__ModuleLoader__.load({
       'sessions.sort.newest': '最新更新',
       'sessions.sort.oldest': '最旧更新',
       'sessions.sort.largest': '已测量大小',
+      'sessions.sort.inactive': '最久未活动',
       'sessions.sort.largestHint': '按已测量的大小从大到小排序；未测量的会话排在最后。',
       'sessions.filter.label': '归档状态',
       'sessions.filter.all': '全部会话',
       'sessions.filter.archived': '仅归档会话',
       'sessions.filter.active': '隐藏归档会话',
+      'sessions.searchLabel': '搜索',
+      'sessions.searchPlaceholder': '标题、ID 或路径',
+      'sessions.countLine': '已显示 {shown} / 共 {total}',
+      'sessions.countLineMatched': '已显示 {shown} / 共 {total} · 匹配 {matched}',
+      'sessions.emptySearch': '没有匹配的会话。',
+      'sessions.lastActivity': '最近活动 {time}',
+      'sessions.createdAtTitle': '创建于 {time}',
       'sessions.wizard.action': '按规则选择',
       'sessions.wizard.close': '收起筛选规则',
       'sessions.wizard.title': '按规则选择会话',
@@ -393,6 +440,7 @@ window.__ModuleLoader__.load({
       'common.working': '处理中…',
       'error.network': '网络请求失败，请检查连接后重试。',
       'error.badResponse': '服务器返回了无法解析的响应。',
+      'error.timeout': '操作超时，请重试；删除可能仍在后台执行，请先刷新核对。',
       'error.unknown': '操作失败，请重试。',
       'error.CANCELLED': '请求已取消；剩余目标未处理。',
       'dialog.title.session': '删除会话',
@@ -479,6 +527,14 @@ window.__ModuleLoader__.load({
       'dialog.done.trashedMore_one': '另有 {count} 项，可在“存储清理 → 回收站”中查看。',
       'dialog.done.trashedMore_other': '另有 {count} 项，可在“存储清理 → 回收站”中查看。',
       'dialog.done.note': '可在“存储清理 → 回收站”中恢复。',
+      'dialog.undo.title': '已撤销删除',
+      'dialog.undo.failedTitle': '撤销未完成',
+      'dialog.undo.busy': '正在撤销…',
+      'dialog.undo.result_one': '已恢复 {count} 项到原位置',
+      'dialog.undo.result_other': '已恢复 {count} 项到原位置',
+      'dialog.undo.failed_one': '{count} 项恢复失败，可在回收站重试',
+      'dialog.undo.failed_other': '{count} 项恢复失败，可在回收站重试',
+      'dialog.undo.note': '恢复的条目已从回收站移除；失败的条目仍留在回收站，可单独重试。',
       'dialog.done.partial_one': '{count} 项删除失败，未自动关闭；请检查后重试。',
       'dialog.done.partial_other': '{count} 项删除失败，未自动关闭；请检查后重试。',
       'dialog.clear.title': '清空完成',
@@ -515,6 +571,7 @@ window.__ModuleLoader__.load({
       'dialog.failed.deleteTitle': '删除失败',
       'dialog.failed.deferTitle': '安排删除失败',
       'dialog.failed.code': '错误代码：{code}',
+      'dialog.failed.maybeExecuted': '删除请求可能仍在后台执行；请稍后刷新核对，不要直接重复删除。',
       'menu.deleteSession': '删除会话…',
       'menu.deleteWorkspace': '删除工作区目录…',
       'menu.clearWorkspaceSessions': '清空工作区会话…',
@@ -529,6 +586,7 @@ window.__ModuleLoader__.load({
       'warn.WORKSPACE_CONTAINS_WORKSPACE': '该目录内还有另一个已注册的工作区，删除会一并移除它（未在本次复核中单独列出）。',
       'warn.WORKSPACE_GIT_DIRTY': '该仓库有 {count} 处未提交或未跟踪的改动，删除该目录会丢失它们。',
       'warn.WORKSPACE_GIT_UNPUSHED': '该仓库有 {count} 个提交未推送到任何远程仓库。',
+      'warn.EXISTING_DATA_STAYS': '{field} 的旧数据仍留在原位置。',
       'error.BAD_REQUEST': '请求无效，请刷新后重试。',
       'error.UNKNOWN_WORKSPACE': '该工作区已不存在，请刷新后重试。',
       'error.UNKNOWN_SESSION': '该会话已不存在，请刷新后重试。',
@@ -612,6 +670,11 @@ window.__ModuleLoader__.load({
       'page.refresh': 'Refresh',
       'page.measure': 'Measure sizes',
       'page.footer.note': 'The trash is never emptied on a timer and can be restored at any time; permanent deletion cannot be undone.',
+      'summary.workspaces': 'Workspaces {count}',
+      'summary.sessions': 'Sessions {count}',
+      'summary.trash': 'Trash {count} · {size}',
+      'summary.deferred': '{count} scheduled',
+      'summary.updatedAt': 'Data as of {time}',
       'page.truncated': 'The session list reached its cap, so only part of it is shown.',
       'page.truncated.cap': 'The session list reached its cap of {count} entries, so only part of it is shown.',
       'page.loading': 'Loading…',
@@ -623,6 +686,7 @@ window.__ModuleLoader__.load({
       'page.select': 'Select',
       'page.selectedCount_one': '{count} selected',
       'page.selectedCount_other': '{count} selected',
+      'selection.capNotice': 'A review holds at most 64 targets; delete the selected ones first, or use "Select by rules" in batches.',
       'page.showMore_one': 'Show more ({count} remaining)',
       'page.showMore_other': 'Show more ({count} remaining)',
       'tab.workspaces': 'Workspaces',
@@ -751,6 +815,11 @@ window.__ModuleLoader__.load({
       'action.restore': 'Restore',
       'action.purge': 'Delete permanently',
       'action.purgeConfirm': 'Confirm permanent delete',
+      'action.undoDelete': 'Undo delete',
+      'action.openTrash': 'Open trash',
+      'action.trimToLimit': 'Keep first 64 and check again',
+      'action.clearSearch': 'Clear search',
+      'action.restoreSibling': 'Restore as copy',
       'action.emptyTrash': 'Empty trash',
       'action.emptyTrashConfirm': 'Confirm empty trash',
       'action.cancel': 'Cancel',
@@ -762,6 +831,18 @@ window.__ModuleLoader__.load({
       'trash.summary_other': '{count} items · {size}',
       'trash.movedAt': 'Moved',
       'trash.parentSession': 'Parent {id}',
+      'trash.restored.reRegistered': 'workspace re-registered',
+      'trash.restored.statePinned': 'pinned state restored',
+      'trash.restored.stateArchived': 'archived state restored',
+      'warn.RESTORE_REGISTER_UNSUPPORTED': 'The workspace was not registered again: this Host cannot re-register a workspace.',
+      'warn.RESTORE_REGISTER_FAILED': 'The workspace was not registered again: registration failed (see the Host message).',
+      'warn.RESTORE_SESSION_ID_MISSING': 'The pinned/archived state was not restored: the trash entry records no session id.',
+      'warn.RESTORE_PIN_UNSUPPORTED': 'The pinned state was not restored: this Host cannot pin a session again.',
+      'warn.RESTORE_PIN_FAILED': 'The pinned state was not restored: the operation failed (see the Host message).',
+      'warn.RESTORE_ARCHIVE_UNSUPPORTED': 'The archived state was not restored: this Host cannot archive a session again.',
+      'warn.RESTORE_ARCHIVE_FAILED': 'The archived state was not restored: the operation failed (see the Host message).',
+      'warn.RESTORE_STATE_UNREADABLE': 'The files were restored, but the recorded registry state could not be applied.',
+      'trash.restored.to': 'Restored to {path}',
       'trash.restoreUnavailable': 'Cannot be restored',
       'trash.purgeArmed': 'Confirmation required: activate again to permanently delete "{title}". This cannot be undone.',
       'trash.purgeAllArmed': 'Confirmation required: activate again to permanently empty the whole trash. This cannot be undone.',
@@ -812,11 +893,19 @@ window.__ModuleLoader__.load({
       'sessions.sort.newest': 'Newest first',
       'sessions.sort.oldest': 'Oldest first',
       'sessions.sort.largest': 'Largest measured',
+      'sessions.sort.inactive': 'Longest inactive',
       'sessions.sort.largestHint': 'Sorts by measured size, largest first; sessions without a measurement come last.',
       'sessions.filter.label': 'Archive status',
       'sessions.filter.all': 'All sessions',
       'sessions.filter.archived': 'Archived only',
       'sessions.filter.active': 'Hide archived',
+      'sessions.searchLabel': 'Search',
+      'sessions.searchPlaceholder': 'Title, ID or path',
+      'sessions.countLine': 'Showing {shown} of {total}',
+      'sessions.countLineMatched': 'Showing {shown} of {total} · {matched} matched',
+      'sessions.emptySearch': 'No sessions match this search.',
+      'sessions.lastActivity': 'Last activity {time}',
+      'sessions.createdAtTitle': 'Created {time}',
       'sessions.wizard.action': 'Select by rules',
       'sessions.wizard.close': 'Close rule selection',
       'sessions.wizard.title': 'Select sessions by rules',
@@ -865,6 +954,7 @@ window.__ModuleLoader__.load({
       'common.working': 'Working…',
       'error.network': 'The network request failed. Check the connection and try again.',
       'error.badResponse': 'The server returned a response that could not be read.',
+      'error.timeout': 'The request timed out. Retry; a deletion may still be running in the background, so refresh to check first.',
       'error.unknown': 'The operation failed. Try again.',
       'error.CANCELLED': 'The request was cancelled; the remaining targets were not processed.',
       'dialog.title.session': 'Delete session',
@@ -951,6 +1041,14 @@ window.__ModuleLoader__.load({
       'dialog.done.trashedMore_one': '{count} more is listed in Storage cleanup → Trash.',
       'dialog.done.trashedMore_other': '{count} more are listed in Storage cleanup → Trash.',
       'dialog.done.note': 'Restore it from Storage cleanup → Trash.',
+      'dialog.undo.title': 'Delete undone',
+      'dialog.undo.failedTitle': 'Undo incomplete',
+      'dialog.undo.busy': 'Undoing…',
+      'dialog.undo.result_one': 'Restored {count} item to its original location',
+      'dialog.undo.result_other': 'Restored {count} items to their original locations',
+      'dialog.undo.failed_one': '{count} item could not be restored; retry it from the Trash tab',
+      'dialog.undo.failed_other': '{count} items could not be restored; retry them from the Trash tab',
+      'dialog.undo.note': 'Restored entries left the Trash; failed ones are still there and can be retried individually.',
       'dialog.done.partial_one': '{count} item failed to delete; the window stays open so you can check it.',
       'dialog.done.partial_other': '{count} items failed to delete; the window stays open so you can check them.',
       'dialog.clear.title': 'Workspace sessions cleared',
@@ -987,6 +1085,7 @@ window.__ModuleLoader__.load({
       'dialog.failed.deleteTitle': 'Deletion failed',
       'dialog.failed.deferTitle': 'Could not schedule the deletion',
       'dialog.failed.code': 'Error code: {code}',
+      'dialog.failed.maybeExecuted': 'The Host may still be executing this deletion; refresh to check before trying again.',
       'menu.deleteSession': 'Delete session…',
       'menu.deleteWorkspace': 'Delete workspace folder…',
       'menu.clearWorkspaceSessions': 'Clear workspace sessions…',
@@ -1001,6 +1100,7 @@ window.__ModuleLoader__.load({
       'warn.WORKSPACE_CONTAINS_WORKSPACE': 'Another registered workspace is nested inside this folder and will be removed with it, without its own review step.',
       'warn.WORKSPACE_GIT_DIRTY': 'This repository has {count} uncommitted or untracked change(s); deleting this folder loses them.',
       'warn.WORKSPACE_GIT_UNPUSHED': 'This repository has {count} commit(s) that are not on any remote.',
+      'warn.EXISTING_DATA_STAYS': 'Existing {field} data stays at the old location.',
       'error.BAD_REQUEST': 'The request was invalid. Refresh and try again.',
       'error.UNKNOWN_WORKSPACE': 'This workspace no longer exists. Refresh and try again.',
       'error.UNKNOWN_SESSION': 'This session no longer exists. Refresh and try again.',
@@ -1934,6 +2034,25 @@ window.__ModuleLoader__.load({
         && !!value.totals && typeof value.totals === 'object'
     }
 
+    /**
+     * Trash entry ids a delete result reported for its trashed items (SPEC §4.4, 0.6.3). An item
+     * without a usable `entryId` means the result cannot be undone from the dialog, so the whole
+     * set is rejected instead of restoring only part of it.
+     * @param {object | null} result - delete result from `api/cleanup.delete`.
+     * @returns {string[]} one id per trashed item, or `[]` when any of them lacks one.
+     */
+    function trashedEntryIds(result) {
+      const items = result && Array.isArray(result.items) ? result.items : []
+      const ids = []
+      for (let i = 0; i < items.length; i += 1) {
+        const item = items[i]
+        if (!item || item.status !== 'trashed') continue
+        if (typeof item.entryId !== 'string' || item.entryId === '') return []
+        ids.push(item.entryId)
+      }
+      return ids
+    }
+
     // ------------------------------------------------------- settings helpers
 
     /** Bytes → the MB text shown in a byte-valued settings input. */
@@ -1955,6 +2074,26 @@ window.__ModuleLoader__.load({
 
     function settingsFieldLabel(t, field) {
       return t('settings.field.' + field)
+    }
+
+    /**
+     * One settings-save warning (SPEC §4.8). A known `code` is localized through `warn.<code>`
+     * with the field's own label; the Host `message` is only the fallback for a code this build
+     * does not know yet, so a Chinese page never shows a bare English sentence we can translate.
+     */
+    function settingsWarningText(t, warning) {
+      const code = warning && typeof warning.code === 'string' ? warning.code : ''
+      if (code !== '') {
+        const key = 'warn.' + code
+        if (hasKey(key)) {
+          const rawField = warning && typeof warning.field === 'string' ? warning.field : ''
+          const field = rawField === ''
+            ? t('common.none')
+            : (hasKey('settings.field.' + rawField) ? settingsFieldLabel(t, rawField) : rawField)
+          return t(key, { field: field })
+        }
+      }
+      return warning && typeof warning.message === 'string' ? warning.message : ''
     }
 
     /** Build the editable form from an effective settings object. */
@@ -2168,21 +2307,87 @@ window.__ModuleLoader__.load({
     // ------------------------------------------------------------------- HTTP
 
     /**
-     * POST JSON and normalize every inability to read the envelope into a
-     * transport value (SPEC §8: non-JSON body, network failure and `{ok:false}`
-     * are three distinct failures). Abort errors are re-thrown untouched.
+     * One deadline-guarded abort signal for a single `request` call (SPEC §8).
+     *
+     * Uses `AbortSignal.timeout` + `AbortSignal.any` where the runtime has them, and a manual
+     * controller + timer otherwise (the guard then also has to forward the caller's abort). The
+     * returned `didTimeout()` distinguishes "our deadline fired" from "the caller aborted", which
+     * is the difference between a `timeout` transport and an abort that must stay silent.
+     * @param {AbortSignal | undefined} signal - caller's abort signal (supersede/unmount).
+     * @param {number} timeoutMs - deadline in milliseconds.
+     * @returns {{ signal: AbortSignal, didTimeout: () => boolean, dispose: () => void }}
      */
-    async function request(path, payload, signal) {
+    function requestTimeoutGuard(signal, timeoutMs) {
+      const canCombine = typeof AbortSignal !== 'undefined'
+        && typeof AbortSignal.timeout === 'function'
+        && typeof AbortSignal.any === 'function'
+      if (canCombine) {
+        const timeoutSignal = AbortSignal.timeout(timeoutMs)
+        const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+        return {
+          signal: combined,
+          didTimeout: function () { return timeoutSignal.aborted === true },
+          dispose: function () { },
+        }
+      }
+      const controller = new AbortController()
+      let timedOut = false
+      let forward = null
+      const timer = setTimeout(function () {
+        timedOut = true
+        try { controller.abort() } catch (error) { /* abort is best effort */ }
+      }, timeoutMs)
+      if (timer && typeof timer.unref === 'function') timer.unref()
+      if (signal) {
+        if (signal.aborted === true) {
+          try { controller.abort() } catch (error) { /* ignore */ }
+        } else if (typeof signal.addEventListener === 'function') {
+          forward = function () {
+            try { controller.abort() } catch (error) { /* ignore */ }
+          }
+          signal.addEventListener('abort', forward)
+        }
+      }
+      return {
+        signal: controller.signal,
+        didTimeout: function () { return timedOut },
+        dispose: function () {
+          clearTimeout(timer)
+          if (forward !== null && typeof signal.removeEventListener === 'function') {
+            signal.removeEventListener('abort', forward)
+          }
+        },
+      }
+    }
+
+    /**
+     * POST JSON and normalize every inability to read the envelope into a
+     * transport value (SPEC §8: non-JSON body, network failure, deadline expiry and
+     * `{ok:false}` are distinct failures). A caller abort is re-thrown untouched; our own
+     * deadline is reported as `{ transport: 'timeout' }` so the UI can offer a retry instead of
+     * trusting a result that may never arrive.
+     * @param {string} path - document-relative API path.
+     * @param {object} payload - request body.
+     * @param {AbortSignal} [signal] - caller's abort signal.
+     * @param {number} [timeoutMs] - deadline; one of the module-level REQUEST/PLAN/LONG values.
+     */
+    async function request(path, payload, signal, timeoutMs) {
       if (typeof fetch !== 'function') return { transport: 'network' }
+      const deadline = typeof timeoutMs === 'number' && isFinite(timeoutMs) && timeoutMs > 0
+        ? timeoutMs
+        : REQUEST_TIMEOUT_MS
+      const guard = requestTimeoutGuard(signal, deadline)
       let response
       try {
         response = await fetch(path, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(payload === undefined ? {} : payload),
-          signal: signal,
+          signal: guard.signal,
         })
       } catch (error) {
+        guard.dispose()
+        if (guard.didTimeout()) return { transport: 'timeout' }
         if (isAbortError(error)) throw error
         return { transport: 'network' }
       }
@@ -2190,9 +2395,12 @@ window.__ModuleLoader__.load({
       try {
         body = await response.json()
       } catch (error) {
+        guard.dispose()
+        if (guard.didTimeout()) return { transport: 'timeout' }
         if (isAbortError(error)) throw error
         return { transport: 'badResponse' }
       }
+      guard.dispose()
       if (body === null || typeof body !== 'object' || Array.isArray(body) || typeof body.ok !== 'boolean') {
         return { transport: 'badResponse' }
       }
@@ -2254,6 +2462,9 @@ window.__ModuleLoader__.load({
       if (!error) return t('error.unknown')
       if (error.transport === 'network') return t('error.network')
       if (error.transport === 'badResponse') return t('error.badResponse')
+      // The deadline fired: the Host may still be working (a delete can complete after the client
+      // gave up), so the copy asks for a refresh before the user retries.
+      if (error.transport === 'timeout') return t('error.timeout')
       return localizedCode(t, 'error', error.code, error.message)
     }
 
@@ -2272,12 +2483,17 @@ window.__ModuleLoader__.load({
       '.dsh-cleanup-page-heading{display:flex;flex-direction:column;gap:4px;min-width:0}',
       '.dsh-cleanup-page-title{margin:0;font-size:15px;line-height:22px;font-weight:600}',
       '.dsh-cleanup-page-intro{margin:0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}',
+      '.dsh-cleanup-page-updated{color:var(--dsw-alias-label-secondary);font-size:11.5px;line-height:17px;font-variant-numeric:tabular-nums}',
+      '.dsh-cleanup-summary{display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
+      '.dsh-cleanup-summary-chip{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:11.5px;line-height:17px;font-variant-numeric:tabular-nums}',
+      '.dsh-cleanup-summary-chip-warn{color:var(--dsw-alias-state-warn-primary);border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 35%,transparent)}',
       '.dsh-cleanup-page-actions{display:flex;align-items:center;gap:8px;flex:none;flex-wrap:wrap;justify-content:flex-end}',
       '.dsh-cleanup-page-foot{color:var(--dsw-alias-label-secondary);font-size:11.5px;line-height:17px;border-top:1px solid var(--dsw-alias-border-l1);padding-top:10px}',
       '.dsh-cleanup-tabs{display:flex;gap:2px;border-bottom:1px solid var(--dsw-alias-border-l1)}',
       '.dsh-cleanup-tab{appearance:none;border:0;background:transparent;font:inherit;font-size:13px;line-height:20px;padding:6px 10px;margin-bottom:-1px;color:var(--dsw-alias-label-secondary);border-bottom:2px solid transparent;cursor:pointer;border-radius:6px 6px 0 0}',
       '.dsh-cleanup-tab:hover{color:var(--dsw-alias-label-primary);background:color-mix(in srgb,var(--dsw-alias-label-primary) 5%,transparent)}',
       '.dsh-cleanup-tab[aria-selected="true"]{color:var(--dsw-alias-label-primary);border-bottom-color:var(--dsw-alias-brand-primary);font-weight:500}',
+      '.dsh-cleanup-tab-badge{display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;margin-left:5px;padding:0 4px;border-radius:999px;background:color-mix(in srgb,var(--dsw-alias-brand-primary) 16%,transparent);color:var(--dsw-alias-brand-primary);font-size:10.5px;line-height:16px;font-variant-numeric:tabular-nums}',
       '.dsh-cleanup-panel{display:flex;flex-direction:column;gap:10px;min-height:120px}',
       '.dsh-cleanup-panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px;flex-wrap:wrap}',
       '.dsh-cleanup-list{display:flex;flex-direction:column;gap:8px}',
@@ -2317,6 +2533,7 @@ window.__ModuleLoader__.load({
       '.dsh-cleanup-empty{padding:18px;text-align:center;color:var(--dsw-alias-label-secondary);font-size:12px;border:1px dashed var(--dsw-alias-border-l1);border-radius:10px}',
       '.dsh-cleanup-batchbar{display:flex;align-items:center;gap:10px;padding:8px 12px;border:1px solid var(--dsw-alias-border-l1);border-radius:10px;background:var(--dsw-alias-bg-layer-2);font-size:12px;flex-wrap:wrap}',
       '.dsh-cleanup-batchbar-text{flex:1;color:var(--dsw-alias-label-secondary);min-width:0}',
+      '.dsh-cleanup-selection-cap{flex-basis:100%;margin:0}',
       '.dsh-cleanup-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}',
       '.dsh-cleanup-toolbar-field{display:flex;align-items:center;gap:5px}',
       '.dsh-cleanup-select{font:inherit;font-size:12.5px;line-height:18px;padding:4px 8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary)}',
@@ -2363,6 +2580,7 @@ window.__ModuleLoader__.load({
       '.dsh-cleanup-notice-mark{flex:none;width:14px;text-align:center;font-weight:600}',
       '.dsh-cleanup-totals{font-size:12px;line-height:18px;color:var(--dsw-alias-label-primary);font-variant-numeric:tabular-nums}',
       '.dsh-cleanup-muted{font-size:11.5px;line-height:17px;color:var(--dsw-alias-label-secondary)}',
+      '.dsh-cleanup-restore-notice{display:flex;flex-direction:column;gap:2px}',
       '.dsh-cleanup-mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}',
       '.dsh-cleanup-modes{display:flex;align-items:flex-start;gap:8px}',
       '.dsh-cleanup-mode{position:relative;flex:1;min-width:0;display:flex}',
@@ -2433,6 +2651,8 @@ window.__ModuleLoader__.load({
       '.dsh-cleanup-setting-hint{font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary)}',
       '.dsh-cleanup-setting-control{display:flex;align-items:center;gap:6px;flex:none}',
       '.dsh-cleanup-input-sm{width:140px}',
+      '.dsh-cleanup-search-input{width:180px}',
+      '.dsh-cleanup-session-count{justify-content:flex-start}',
       '.dsh-cleanup-status-success{color:var(--dsw-alias-state-success-primary);font-size:12px;line-height:18px}',
       '.dsh-cleanup-status-warn{color:var(--dsw-alias-state-warn-primary);font-size:12px;line-height:18px}',
       '.dsh-cleanup-retention{flex-direction:column;align-items:stretch}',
@@ -2464,6 +2684,11 @@ window.__ModuleLoader__.load({
       '.dsh-cleanup-wizard-footer{display:flex;justify-content:flex-end;gap:8px}',
       '.dsh-cleanup-progress-items{font-variant-numeric:tabular-nums}',
       '.dsh-cleanup-progress-elapsed{font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary)}',
+      // 0.6.3 a11y: one visible focus ring for the controls that relied on the UA default (tabs and
+      // inline text buttons were effectively invisible on the coloured cards).
+      '.dsh-cleanup-tab:focus-visible,.dsh-cleanup-inline-action:focus-visible,.dsh-cleanup-target-more:focus-visible,.dsh-cleanup-open:focus-visible,.dsh-cleanup-usage-toggle input:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}',
+      '.dsh-cleanup-tree-node:focus-within,.dsh-cleanup-checkrow:focus-within,.dsh-cleanup-target:focus-within{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px;border-radius:8px}',
+      '@media (prefers-reduced-motion:reduce){.dsh-cleanup-spinner{animation:none}.dsh-cleanup-skeleton-line{animation:none;opacity:.8}}',
       '@media (max-width:560px){.dsh-cleanup-modes{flex-direction:column}.dsh-cleanup-page-head{flex-direction:column;align-items:stretch}}',
     ].join('')
 
@@ -2611,6 +2836,14 @@ window.__ModuleLoader__.load({
         }
         return String(left && left.id).localeCompare(String(right && right.id))
       }
+      if (sort === 'inactive') {
+        // Ascending last-activity order: the sessions nothing has touched for the longest time come
+        // first, which is what a storage cleanup is usually after. A missing stamp counts as 0.
+        const leftValue = sessionSortValue(catalog, left)
+        const rightValue = sessionSortValue(catalog, right)
+        if (leftValue !== rightValue) return leftValue - rightValue
+        return String(left && left.id).localeCompare(String(right && right.id))
+      }
       if (sort === 'usage') {
         const usage = state && state.usage && typeof state.usage === 'object' ? state.usage : {}
         const usageOf = function (session) {
@@ -2634,15 +2867,44 @@ window.__ModuleLoader__.load({
       return compareSessionRows(catalog, state, 'newest', left, right)
     }
 
-    /** Sessions matching the tab's workspace + archive filters, in the active sort order. */
+    /**
+     * Trim + lowercase the Sessions search once per filter pass. An empty string means "no search";
+     * a Host that changes the catalog between renders simply re-matches against the new titles.
+     */
+    function normalizedSessionSearch(state) {
+      const raw = state && typeof state.sessionSearch === 'string' ? state.sessionSearch : ''
+      const trimmed = raw.trim().toLowerCase()
+      return trimmed.length > SESSION_SEARCH_MAX ? trimmed.slice(0, SESSION_SEARCH_MAX) : trimmed
+    }
+
+    /**
+     * Free-text Sessions match (SPEC §10 "Sessions tab"): the sidebar label, the Session id and the
+     * recorded cwd, case-insensitively. Absent fields are skipped rather than treated as a match.
+     */
+    function sessionMatchesSearch(catalog, session, search) {
+      if (search === '') return true
+      const id = session && typeof session.id === 'string' ? session.id : ''
+      const title = id !== '' ? catalogDisplayTitle(catalog, id) : null
+      const cwd = session && typeof session.cwd === 'string' ? session.cwd : ''
+      const fields = [title, id, cwd]
+      for (let i = 0; i < fields.length; i += 1) {
+        const field = fields[i]
+        if (typeof field !== 'string' || field === '') continue
+        if (field.toLowerCase().indexOf(search) !== -1) return true
+      }
+      return false
+    }
+
+    /** Sessions matching the tab's workspace + archive + search filters, in the active sort order. */
     function filteredSessionRows(state, catalog) {
       const inventory = state && state.inventory ? state.inventory : null
       const allSessions = inventory && Array.isArray(inventory.sessions) ? inventory.sessions.slice() : []
-      const sort = state && (state.sessionSort === 'oldest' || state.sessionSort === 'largest' || state.sessionSort === 'usage')
+      const sort = state && (state.sessionSort === 'oldest' || state.sessionSort === 'largest' || state.sessionSort === 'usage' || state.sessionSort === 'inactive')
         ? state.sessionSort
         : 'newest'
       const filter = state && (state.sessionFilter === 'archived' || state.sessionFilter === 'active') ? state.sessionFilter : 'all'
       const workspaceFilter = state && typeof state.sessionWorkspace === 'string' ? state.sessionWorkspace : SESSION_WORKSPACE_ANY
+      const search = normalizedSessionSearch(state)
       const byId = Object.create(null)
       for (let i = 0; i < allSessions.length; i += 1) byId[allSessions[i].id] = allSessions[i]
       const filtered = allSessions
@@ -2650,6 +2912,7 @@ window.__ModuleLoader__.load({
           return workspaceMatchesFilter(sessionWorkspaceOf(session, byId), workspaceFilter)
         })
         .filter(function (session) { return sessionMatchesFilter(session, filter) })
+        .filter(function (session) { return sessionMatchesSearch(catalog, session, search) })
       filtered.sort(function (left, right) { return compareSessionRows(catalog, state, sort, left, right) })
       return filtered
     }
@@ -2863,6 +3126,22 @@ window.__ModuleLoader__.load({
         h('div', { className: 'dsh-cleanup-state-title' }, t('page.error')),
         h('div', null, apiErrorText(t, error)),
         h('button', { type: 'button', className: 'dsh-cleanup-btn', onClick: onRetry }, t('action.retry')),
+      )
+    }
+
+    /**
+     * Explanation shown inside a batch bar when the page refused a selection click because one
+     * review holds at most `MAX_PLAN_TARGETS` targets (SPEC §4.3/§9). It renders where the refused
+     * click happened, so a silently-ignored checkbox never looks broken.
+     */
+    function renderSelectionCapNotice(t) {
+      return h('div', {
+        className: 'dsh-cleanup-notice dsh-cleanup-notice-warn dsh-cleanup-selection-cap',
+        role: 'status',
+        'aria-live': 'polite',
+      },
+        h('span', { className: 'dsh-cleanup-notice-mark', 'aria-hidden': 'true' }, '!'),
+        h('span', null, t('selection.capNotice')),
       )
     }
 
@@ -3662,6 +3941,41 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Done view after "撤销删除" (0.6.3): the delete summary is replaced by what the undo actually
+     * restored, because that is the new state of the world. A partial undo names the failures and
+     * points at the Trash tab where each entry can be retried; the walk never throws away the
+     * items it already restored.
+     */
+    function renderUndoBody(t, state, describedById) {
+      const undo = state.undoResult && typeof state.undoResult === 'object' ? state.undoResult : {}
+      const restored = typeof undo.ok === 'number' && isFinite(undo.ok) && undo.ok > 0 ? Math.floor(undo.ok) : 0
+      const failed = typeof undo.failed === 'number' && isFinite(undo.failed) && undo.failed > 0 ? Math.floor(undo.failed) : 0
+      const children = [
+        h('div', {
+          className: restored > 0 ? 'dsh-cleanup-done-title' : 'dsh-cleanup-failed-title',
+          key: 'title',
+        }, t(restored > 0 ? 'dialog.undo.title' : 'dialog.undo.failedTitle')),
+      ]
+      if (restored > 0) {
+        children.push(h('div', { key: 'restored' }, plural(t, 'dialog.undo.result', restored)))
+      }
+      if (failed > 0) {
+        children.push(h('div', { className: 'dsh-cleanup-notice dsh-cleanup-notice-warn', key: 'failed' },
+          h('span', { className: 'dsh-cleanup-notice-mark', 'aria-hidden': 'true' }, '!'),
+          h('span', null, plural(t, 'dialog.undo.failed', failed)),
+        ))
+      }
+      children.push(h('div', { className: 'dsh-cleanup-muted', key: 'note' }, t('dialog.undo.note')))
+      return h('div', {
+        className: 'dsh-cleanup-done',
+        role: 'status',
+        'aria-live': 'polite',
+        'aria-atomic': 'true',
+        id: describedById,
+      }, children)
+    }
+
+    /**
      * Distinct done-style state for a queued deletion (task-9): the deletion did
      * not happen now, it is scheduled for the next DSH start. Announced politely
      * and associated with the dialog through `aria-describedby`.
@@ -3716,6 +4030,11 @@ window.__ModuleLoader__.load({
           : (stage === 'defer' ? 'dialog.failed.deferTitle' : 'dialog.failed.planTitle'))
       const error = state.error
       const code = apiErrorCode(error)
+      // A delete that timed out may still be running on the Host (the client only stopped waiting).
+      // Say so next to the generic timeout copy so nobody concludes the deletion did not happen.
+      const maybeExecuted = stage === 'delete' && error && error.transport === 'timeout'
+        ? h('div', { className: 'dsh-cleanup-muted', key: 'maybe-executed' }, t('dialog.failed.maybeExecuted'))
+        : null
       const clearDone = state.clear && state.clear.done && typeof state.clear.done === 'object' ? state.clear.done : null
       const partial = clearDone && typeof clearDone.count === 'number' && clearDone.count > 0
         ? h('div', { className: 'dsh-cleanup-muted' },
@@ -3727,6 +4046,7 @@ window.__ModuleLoader__.load({
           h('span', { className: 'dsh-cleanup-notice-mark', 'aria-hidden': 'true' }, '×'),
           h('span', null, apiErrorText(t, error)),
         ),
+        maybeExecuted,
         partial,
         code !== null
           ? h('div', { className: 'dsh-cleanup-muted dsh-cleanup-mono' }, t('dialog.failed.code', { code: code }))
@@ -3991,6 +4311,25 @@ window.__ModuleLoader__.load({
       const canDefer = deferrability.canDefer && (state.clear === null || state.clear.deletable === 0)
       const deferDisabled = phase !== 'review' || state.refreshing === true || typedMatches === false
       const canDismiss = busy === false
+      // 0.6.3 result controls (SPEC §9 "done"): the dialog can open the Trash tab only when its
+      // host page passed a tab switcher (the settings surface does; the shell.overlay copy has no
+      // page store), and it offers undo only when every trashed item reported a trash `entryId`.
+      const onOpenTrash = typeof props.onOpenTrash === 'function' ? props.onOpenTrash : null
+      const resultTotals = state.result && state.result.totals && typeof state.result.totals === 'object'
+        ? state.result.totals
+        : {}
+      const trashedCount = typeof resultTotals.trashed === 'number' ? resultTotals.trashed : 0
+      const deletedCount = typeof resultTotals.deleted === 'number' ? resultTotals.deleted : 0
+      const failedResultCount = typeof resultTotals.failed === 'number' ? resultTotals.failed : 0
+      const undoEntryIds = phase === 'done' ? trashedEntryIds(state.result) : []
+      const canUndoDelete = phase === 'done' && state.clear === null
+        && trashedCount > 0 && deletedCount === 0 && failedResultCount === 0
+        && undoEntryIds.length === trashedCount
+      const canOpenTrash = phase === 'done' && onOpenTrash !== null && trashedCount > 0
+      // A workspace clear has its own batch trimming; the self-rescue control is for ordinary
+      // reviews, where the failed view otherwise offers no way to narrow the selection.
+      const canTrimToLimit = phase === 'failed' && state.clear === null
+        && !!state.error && state.error.code === 'TOO_MANY_TARGETS'
 
       let footer
       if (phase === 'planning' || (phase === 'review' && state.refreshing === true)) {
@@ -4075,7 +4414,29 @@ window.__ModuleLoader__.load({
           h('button', { key: 'defer', type: 'button', className: 'dsh-cleanup-btn dsh-cleanup-btn-accent', disabled: true }, t('dialog.defer.action')),
         ]
       } else if (phase === 'done') {
+        const undoButton = canUndoDelete
+          ? h('button', {
+            key: 'undo',
+            type: 'button',
+            className: 'dsh-cleanup-btn',
+            disabled: state.undoBusy === true || state.undoResult !== null,
+            onClick: api.undoLastDelete,
+          }, state.undoBusy === true ? t('dialog.undo.busy') : t('action.undoDelete'))
+          : null
+        const openTrashButton = canOpenTrash
+          ? h('button', {
+            key: 'open-trash',
+            type: 'button',
+            className: 'dsh-cleanup-btn',
+            onClick: function () {
+              onOpenTrash()
+              api.closeDialog()
+            },
+          }, t('action.openTrash'))
+          : null
         footer = [
+          undoButton,
+          openTrashButton,
           h('button', {
             key: 'done',
             ref: doneRef,
@@ -4083,7 +4444,7 @@ window.__ModuleLoader__.load({
             className: 'dsh-cleanup-btn dsh-cleanup-btn-accent',
             onClick: api.closeDialog,
           }, t('action.done')),
-        ]
+        ].filter(function (button) { return button !== null })
       } else if (phase === 'deferred') {
         footer = [
           h('button', {
@@ -4096,6 +4457,16 @@ window.__ModuleLoader__.load({
         ]
       } else {
         footer = [
+          // An oversized review can be narrowed from the failure itself: keep the first 64 planned
+          // targets and re-plan, instead of forcing a close and a manual re-selection (SPEC §9).
+          canTrimToLimit
+            ? h('button', {
+              key: 'trim',
+              type: 'button',
+              className: 'dsh-cleanup-btn',
+              onClick: api.trimToPlanLimit,
+            }, t('action.trimToLimit'))
+            : null,
           h('button', {
             key: 'close',
             ref: closeRef,
@@ -4110,7 +4481,7 @@ window.__ModuleLoader__.load({
             className: 'dsh-cleanup-btn dsh-cleanup-btn-accent',
             onClick: api.retryDialog,
           }, t('action.retry')),
-        ]
+        ].filter(function (button) { return button !== null })
       }
 
       const bodyChildren = []
@@ -4158,7 +4529,17 @@ window.__ModuleLoader__.load({
         ))
       }
       if (phase === 'review' && state.clear !== null) bodyChildren.push(renderClearReviewNote(t, state))
-      if (phase === 'done') bodyChildren.push(h('div', { key: 'done' }, renderDoneBody(t, state, describedById)))
+      if (phase === 'done') {
+        bodyChildren.push(h('div', {
+          key: 'done',
+          // Reading the summary must not race the dwell timer: hovering or focusing inside pauses
+          // it, leaving re-arms it (unless the result stopped being auto-dismissable).
+          onMouseEnter: api.pauseDoneDismiss,
+          onMouseLeave: api.resumeDoneDismiss,
+          onFocusCapture: api.pauseDoneDismiss,
+          onBlurCapture: api.resumeDoneDismiss,
+        }, state.undoResult !== null ? renderUndoBody(t, state, describedById) : renderDoneBody(t, state, describedById)))
+      }
       if (phase === 'deferred') bodyChildren.push(h('div', { key: 'deferred' }, renderDeferredBody(t, state, describedById)))
       if (phase === 'failed') bodyChildren.push(h('div', { key: 'failed' }, renderFailedBody(t, state)))
 
@@ -4262,6 +4643,7 @@ window.__ModuleLoader__.load({
               onDelete(targets)
             },
           }, plural(t, 'action.deleteSelected', state.selected.length)),
+          state.selectionNotice === true ? renderSelectionCapNotice(t) : null,
         )
         : null
 
@@ -4698,12 +5080,26 @@ window.__ModuleLoader__.load({
       const allSessions = Array.isArray(inventory.sessions) ? inventory.sessions.slice() : []
       // Sort and archive filter live in the page store so they survive tab
       // switches and pagination (the "show more" limit lives there too).
-      const sort = state.sessionSort === 'oldest' || state.sessionSort === 'largest' || state.sessionSort === 'usage'
+      const sort = state.sessionSort === 'oldest' || state.sessionSort === 'largest' || state.sessionSort === 'usage' || state.sessionSort === 'inactive'
         ? state.sessionSort
         : 'newest'
       const filter = state.sessionFilter === 'archived' || state.sessionFilter === 'active' ? state.sessionFilter : 'all'
       const workspaceFilter = typeof state.sessionWorkspace === 'string' ? state.sessionWorkspace : SESSION_WORKSPACE_ANY
+      const searchValue = typeof state.sessionSearch === 'string' ? state.sessionSearch : ''
+      const searchActive = normalizedSessionSearch(state) !== ''
       const remaining = filtered.length - visible.length
+      // "已显示 n / 共 m" (plus the match count while searching) so a 300-row page never looks like
+      // the whole history. total is the pre-search filter result, or the whole list while searching.
+      const totalCount = searchActive ? allSessions.length : filtered.length
+      const countLineText = searchActive
+        ? t('sessions.countLineMatched', {
+          shown: formatNumber(visible.length),
+          total: formatNumber(totalCount),
+          matched: formatNumber(filtered.length),
+        })
+        : t('sessions.countLine', { shown: formatNumber(visible.length), total: formatNumber(totalCount) })
+      const countLine = h('div', { className: 'dsh-cleanup-panel-head dsh-cleanup-session-count' },
+        h('span', null, countLineText))
       const selectedSessions = Array.isArray(state.selectedSessions) ? state.selectedSessions : []
       const selectedSet = {}
       for (let i = 0; i < selectedSessions.length; i += 1) selectedSet[selectedSessions[i]] = true
@@ -4778,6 +5174,7 @@ window.__ModuleLoader__.load({
       const sortId = ids + '-sort'
       const filterId = ids + '-filter'
       const workspaceId = ids + '-workspace'
+      const searchId = ids + '-search'
       const workspaceRows = Array.isArray(inventory.workspaces) ? inventory.workspaces : []
       const toolbar = h('div', { className: 'dsh-cleanup-toolbar' },
         // Workspace first: it narrows the list the most, so the sort/filter after it apply to a
@@ -4797,6 +5194,29 @@ window.__ModuleLoader__.load({
             }),
           ),
         ),
+        // Free-text search right after the workspace filter: typing a title fragment narrows 2000
+        // rows faster than any select, while the workspace still owns the coarsest cut (SPEC §10).
+        h('label', { className: 'dsh-cleanup-toolbar-field', htmlFor: searchId },
+          h('span', null, t('sessions.searchLabel')),
+          h('input', {
+            id: searchId,
+            type: 'text',
+            className: 'dsh-cleanup-input dsh-cleanup-input-sm dsh-cleanup-search-input',
+            value: searchValue,
+            placeholder: t('sessions.searchPlaceholder'),
+            autoComplete: 'off',
+            spellCheck: false,
+            onChange: function (event) { store.setSessionSearch(event.target.value) },
+          }),
+        ),
+        searchValue !== ''
+          ? h('button', {
+            type: 'button',
+            className: 'dsh-cleanup-btn dsh-cleanup-btn-ghost dsh-cleanup-btn-sm',
+            'aria-label': t('action.clearSearch'),
+            onClick: function () { store.setSessionSearch('') },
+          }, t('action.clearSearch'))
+          : null,
         h('label', { className: 'dsh-cleanup-toolbar-field', htmlFor: sortId },
           h('span', null, t('sessions.sort.label')),
           h('select', {
@@ -4807,6 +5227,7 @@ window.__ModuleLoader__.load({
           },
             h('option', { value: 'newest' }, t('sessions.sort.newest')),
             h('option', { value: 'oldest' }, t('sessions.sort.oldest')),
+            h('option', { value: 'inactive' }, t('sessions.sort.inactive')),
             h('option', { value: 'largest' }, t('sessions.sort.largest')),
             usageOn ? h('option', { value: 'usage' }, t('sessions.sort.usage')) : null,
           ),
@@ -4905,6 +5326,7 @@ window.__ModuleLoader__.load({
               if (targets.length > 0) onDelete(targets)
             },
           }, plural(t, 'action.deleteSelected', selectedSessions.length)),
+          state.selectionNotice === true ? renderSelectionCapNotice(t) : null,
         )
         : null
 
@@ -4914,7 +5336,16 @@ window.__ModuleLoader__.load({
       }
       if (filtered.length === 0) {
         return h('div', { className: 'dsh-cleanup-panel' }, toolbar, wizardPanel, batch,
-          h('div', { className: 'dsh-cleanup-empty' }, t('page.empty.sessionsFiltered')))
+          h('div', { className: 'dsh-cleanup-empty' },
+            h('div', null, searchActive ? t('sessions.emptySearch') : t('page.empty.sessionsFiltered')),
+            searchActive
+              ? h('div', { style: { marginTop: '8px' } },
+                h('button', {
+                  type: 'button',
+                  className: 'dsh-cleanup-btn dsh-cleanup-btn-sm',
+                  onClick: function () { store.setSessionSearch('') },
+                }, t('action.clearSearch')))
+              : null))
       }
 
       function renderSessionRow(session) {
@@ -4949,7 +5380,15 @@ window.__ModuleLoader__.load({
             ),
             cwd !== '' ? h('div', { className: 'dsh-cleanup-path', title: cwd }, middleEllipsis(cwd, 64)) : null,
             h('div', { className: 'dsh-cleanup-item-meta' },
-              h('span', null, formatTime(session.createdAt) || t('common.none')),
+              // The sort key is the Session's last activity (updatedAt, createdAt fallback), so the
+              // row shows the same stamp it is ordered by; the creation time stays in the title.
+              h('span', {
+                title: formatTime(session.createdAt) !== ''
+                  ? t('sessions.createdAtTitle', { time: formatTime(session.createdAt) })
+                  : undefined,
+              }, t('sessions.lastActivity', {
+                time: formatTime(sessionSortValue(catalog, session)) || t('common.none'),
+              })),
               h(Sep, null),
               sizeKnown === null
                 ? h('span', null, t('measure.unmeasured'))
@@ -5056,6 +5495,7 @@ window.__ModuleLoader__.load({
         toolbar,
         wizardPanel,
         batch,
+        countLine,
         h('div', { className: 'dsh-cleanup-list' }, rows),
         remaining > 0
           ? h('div', null,
@@ -5192,8 +5632,46 @@ window.__ModuleLoader__.load({
           : (confirmPurge !== null ? t('trash.purgeArmed', { title: armedTitle || t('common.none') }) : ''))
       const actionNotice = state.actionNotice
       let actionNoticeText = ''
+      // What a 0.6.3 restore reports beyond the rename: re-registration, pinned/archived state and
+      // any Host warnings. The announcement carries them, and the visible block below repeats the
+      // same facts for sighted users (the live region alone is invisible).
+      const restoreExtras = []
+      let restoreNoticeBlock = null
       if (actionNotice && actionNotice.kind === 'restored') {
         actionNoticeText = t('trash.announce.restored', { title: actionNotice.title || t('common.none') })
+        if (actionNotice.reRegistered === true) restoreExtras.push(t('trash.restored.reRegistered'))
+        // `stateRestored` reports the values that came back, so a false/false pair is a recorded
+        // "was neither pinned nor archived" state, not a restored set: only mention what is true.
+        const stateRestored = actionNotice.stateRestored && typeof actionNotice.stateRestored === 'object'
+          ? actionNotice.stateRestored
+          : null
+        if (stateRestored !== null && stateRestored.pinned === true) restoreExtras.push(t('trash.restored.statePinned'))
+        if (stateRestored !== null && stateRestored.archived === true) restoreExtras.push(t('trash.restored.stateArchived'))
+        if (restoreExtras.length > 0) actionNoticeText += ' · ' + restoreExtras.join(' · ')
+        const warnings = Array.isArray(actionNotice.warnings) ? actionNotice.warnings : []
+        const warningTexts = []
+        for (let i = 0; i < warnings.length && i < TRASH_RESTORE_WARNINGS_MAX; i += 1) {
+          const text = warningText(t, warnings[i])
+          if (text !== '') warningTexts.push(text)
+        }
+        // The live region must carry the warnings too: a sighted user sees the block below, a screen
+        // reader user only hears this announcement.
+        if (warningTexts.length > 0) actionNoticeText += ' · ' + warningTexts.join(' · ')
+        const restoreLines = [h('span', { key: 'base', className: 'dsh-cleanup-muted' }, actionNoticeText)]
+        if (typeof actionNotice.restoredTo === 'string' && actionNotice.restoredTo !== '') {
+          restoreLines.push(h('div', {
+            className: 'dsh-cleanup-path',
+            key: 'to',
+            title: actionNotice.restoredTo,
+          }, t('trash.restored.to', { path: middleEllipsis(actionNotice.restoredTo, 72) })))
+        }
+        for (let i = 0; i < warningTexts.length; i += 1) {
+          restoreLines.push(h('div', { className: 'dsh-cleanup-muted', key: 'warn-' + i }, warningTexts[i]))
+        }
+        restoreNoticeBlock = h('div', {
+          className: 'dsh-cleanup-restore-notice',
+          key: 'restore-notice',
+        }, restoreLines)
       } else if (actionNotice && actionNotice.kind === 'purged') {
         actionNoticeText = plural(t, 'trash.announce.purged', actionNotice.count)
       }
@@ -5272,7 +5750,7 @@ window.__ModuleLoader__.load({
       }
 
       if (entries.length === 0) {
-        return h('div', { className: 'dsh-cleanup-panel' }, armedStatus, actionStatus, retentionBanner, head, errorBanner,
+        return h('div', { className: 'dsh-cleanup-panel' }, armedStatus, actionStatus, retentionBanner, head, restoreNoticeBlock, errorBanner,
           h('div', { className: 'dsh-cleanup-empty' }, t('page.empty.trash')))
       }
 
@@ -5281,6 +5759,15 @@ window.__ModuleLoader__.load({
         const confirming = confirmPurge === id
         const entryBusy = busy && state.actionBusy.entryId === id
         const restorable = entry.restorable === true
+        // SPEC §4.5 (0.6.3): a workspace-dir entry whose original path came back can still be
+        // restored next to it; a session entry never gets this route (the Host refuses it).
+        const canRestoreSibling = !restorable
+          && entry.kind === 'workspace-dir'
+          && entry.restorableCode === 'RESTORE_ORIGINAL_EXISTS'
+        // The restore control is either the ordinary one or the copy route; a session entry never
+        // gets the copy route (SPEC §4.5: the Host refuses it for session logs).
+        const restoreMode = restorable ? 'original' : (canRestoreSibling ? 'sibling' : null)
+        const restoreLabel = restorable ? t('action.restore') : t('action.restoreSibling')
         const rawTitle = typeof entry.title === 'string' && entry.title !== ''
           ? entry.title
           : baseName(entry.originalPath)
@@ -5289,7 +5776,9 @@ window.__ModuleLoader__.load({
           : (entry.kind === 'session' ? t('dialog.items.session') : null)
         const title = rawTitle !== '' ? rawTitle : (kindText || t('common.none'))
         const originalPath = typeof entry.originalPath === 'string' ? entry.originalPath : ''
-        const restoreNote = restorable
+        // A copy-able workspace explains itself through the button; the "cannot be restored" reason
+        // would contradict the control offered right next to it (SPEC §4.5).
+        const restoreNote = restorable || canRestoreSibling
           ? null
           : localizedCode(t, 'error', entry.restorableCode, t('trash.restoreUnavailable'))
         return h('div', { className: 'dsh-cleanup-item', key: id },
@@ -5298,7 +5787,7 @@ window.__ModuleLoader__.load({
               h('span', { className: 'dsh-cleanup-item-title', title: title }, title),
               kindText ? h(Badge, { tone: 'idle' }, kindText) : null,
               entry.origin === 'subagent' ? h(Badge, { tone: 'idle' }, t('badge.subagent')) : null,
-              restorable ? null : h(Badge, { tone: 'warn' }, t('trash.restoreUnavailable')),
+              restorable || canRestoreSibling ? null : h(Badge, { tone: 'warn' }, t('trash.restoreUnavailable')),
             ),
             originalPath !== ''
               ? h('div', { className: 'dsh-cleanup-path', title: originalPath }, middleEllipsis(originalPath, 64))
@@ -5333,14 +5822,14 @@ window.__ModuleLoader__.load({
                 'data-dsh-cleanup-confirm': id,
                 onClick: function () { store.setConfirmPurge(null) },
               }, t('action.cancel'))
-              : (restorable
+              : (restoreMode !== null
                 ? h('button', {
                   type: 'button',
                   className: 'dsh-cleanup-btn dsh-cleanup-btn-sm',
                   disabled: busy,
-                  'aria-label': t('a11y.rowAction', { action: t('action.restore'), title: title }),
-                  onClick: function () { store.restoreEntry(id) },
-                }, entryBusy ? t('common.working') : t('action.restore'))
+                  'aria-label': t('a11y.rowAction', { action: restoreLabel, title: title }),
+                  onClick: function () { store.restoreEntry(id, restoreMode) },
+                }, entryBusy ? t('common.working') : restoreLabel)
                 : null)),
             h('button', {
               type: 'button',
@@ -5357,7 +5846,7 @@ window.__ModuleLoader__.load({
         )
       })
 
-      return h('div', { className: 'dsh-cleanup-panel' }, armedStatus, actionStatus, retentionBanner, head, errorBanner, h('div', { className: 'dsh-cleanup-list' }, rows))
+      return h('div', { className: 'dsh-cleanup-panel' }, armedStatus, actionStatus, retentionBanner, head, restoreNoticeBlock, errorBanner, h('div', { className: 'dsh-cleanup-list' }, rows))
     }
 
     /** One-line "last start processed N items (M failed)" summary. */
@@ -6033,7 +6522,7 @@ window.__ModuleLoader__.load({
         if (Array.isArray(status.warnings) && status.warnings.length > 0) {
           statusChildren.push(h('span', { key: 'warnings', className: 'dsh-cleanup-muted' },
             status.warnings.map(function (warning) {
-              return warning && typeof warning.message === 'string' ? warning.message : ''
+              return settingsWarningText(t, warning)
             }).filter(function (message) { return message !== '' }).join(' · ')))
         }
       } else if (status && status.kind === 'unchanged') {
@@ -6217,6 +6706,33 @@ window.__ModuleLoader__.load({
         }
       }
 
+      // 0.6.3 page summary (SPEC §10 header row): cheap, Host-provided counts so the page answers
+      // "how much is there?" before any tab is opened. Sizes for workspaces/sessions stay on their
+      // rows because only a measure makes them exact.
+      const summary = inventory === null
+        ? null
+        : {
+          workspaces: Array.isArray(inventory.workspaces) ? inventory.workspaces.length : 0,
+          sessions: Array.isArray(inventory.sessions) ? inventory.sessions.length : 0,
+          trashEntries: inventory.trash && typeof inventory.trash.entries === 'number' ? inventory.trash.entries : 0,
+          trashBytes: inventory.trash && typeof inventory.trash.bytes === 'number' ? inventory.trash.bytes : 0,
+          deferred: inventory.deferred && typeof inventory.deferred.count === 'number' ? inventory.deferred.count : 0,
+        }
+      const summaryChips = summary === null
+        ? null
+        : h('div', { className: 'dsh-cleanup-summary' },
+          h('span', { className: 'dsh-cleanup-summary-chip', key: 'workspaces' },
+            t('summary.workspaces', { count: formatNumber(summary.workspaces) })),
+          h('span', { className: 'dsh-cleanup-summary-chip', key: 'sessions' },
+            t('summary.sessions', { count: formatNumber(summary.sessions) })),
+          h('span', { className: 'dsh-cleanup-summary-chip', key: 'trash' },
+            t('summary.trash', { count: formatNumber(summary.trashEntries), size: formatBytes(summary.trashBytes) })),
+          summary.deferred > 0
+            ? h('span', { className: 'dsh-cleanup-summary-chip dsh-cleanup-summary-chip-warn', key: 'deferred' },
+              t('summary.deferred', { count: formatNumber(summary.deferred) }))
+            : null,
+        )
+
       function focusTab(name) {
         const list = tablistRef.current
         if (!list) return
@@ -6261,6 +6777,9 @@ window.__ModuleLoader__.load({
         openDialogFor(targets)
       }
 
+      const trashBadge = inventory !== null && inventory.trash && typeof inventory.trash.entries === 'number' && inventory.trash.entries > 0
+        ? formatNumber(inventory.trash.entries)
+        : null
       const tabs = tabNames.map(function (name) {
         return h('button', {
           key: name,
@@ -6273,7 +6792,11 @@ window.__ModuleLoader__.load({
           className: 'dsh-cleanup-tab',
           'data-dsh-cleanup-tab': name,
           onClick: function () { store.setTab(name) },
-        }, t('tab.' + name))
+        },
+          t('tab.' + name),
+          name === 'trash' && trashBadge !== null
+            ? h('span', { key: 'badge', className: 'dsh-cleanup-tab-badge' }, trashBadge)
+            : null)
       })
 
       let panelContent
@@ -6360,14 +6883,19 @@ window.__ModuleLoader__.load({
           h('div', { className: 'dsh-cleanup-page-heading' },
             h('h2', { className: 'dsh-cleanup-page-title', ref: pageTitleRef, tabIndex: -1 }, t('page.title')),
             h('p', { className: 'dsh-cleanup-page-intro' }, t('page.intro')),
+            inventory !== null && typeof inventory.generatedAt === 'number' && inventory.generatedAt > 0
+              ? h('div', { className: 'dsh-cleanup-page-updated' },
+                t('summary.updatedAt', { time: formatTime(inventory.generatedAt) || t('common.none') }))
+              : null,
           ),
           h('div', { className: 'dsh-cleanup-page-actions' },
             h('button', {
               type: 'button',
               className: 'dsh-cleanup-btn dsh-cleanup-btn-ghost',
               disabled: state.inventoryLoading,
+              'aria-busy': state.inventoryLoading === true ? 'true' : undefined,
               onClick: function () { store.refresh() },
-            }, t('page.refresh')),
+            }, state.inventoryLoading === true ? h(Spinner, null) : null, t('page.refresh')),
             unmeasured > 0
               ? h('button', {
                 type: 'button',
@@ -6378,6 +6906,7 @@ window.__ModuleLoader__.load({
               : null,
           ),
         ),
+        summaryChips,
         showStartupNotice
           ? h('div', { className: 'dsh-cleanup-banner dsh-cleanup-banner-warn dsh-cleanup-deferred-banner', key: 'startup-notice' },
             h('span', { className: 'dsh-cleanup-banner-text' },
@@ -6434,7 +6963,14 @@ window.__ModuleLoader__.load({
       // so dismissing the review returns to the same tab with the sheet still open.
       return h(React.Fragment, null,
         page,
-        h(CleanupDialog, { api: api, t: t, surface: 'settings' }),
+        h(CleanupDialog, {
+          api: api,
+          t: t,
+          surface: 'settings',
+          // The result's "open trash" control needs the page store's tab switch; the overlay copy
+          // of the dialog is rendered without one and simply hides the control.
+          onOpenTrash: function () { store.setTab('trash') },
+        }),
       )
     }
 
@@ -6571,7 +7107,7 @@ window.__ModuleLoader__.load({
     function createCapabilityProbe(ctx, capabilities) {
       const controller = new AbortController()
       const target = capabilities && typeof capabilities === 'object' ? capabilities : {}
-      request(ROUTE.inventory, {}, controller.signal).then(function (envelope) {
+      request(ROUTE.inventory, {}, controller.signal, REQUEST_TIMEOUT_MS).then(function (envelope) {
         if (!envelope || envelope.transport || envelope.ok !== true) return
         const inventory = normalizeInventory(envelope)
         target.usage = inventory.capabilities.usage
@@ -6699,7 +7235,9 @@ window.__ModuleLoader__.load({
     /**
      * Review-dialog controller (SPEC §9): one immutable store plus the plan/delete/defer
      * transitions, focus restore, timer and fetch aborts. `apply` owns only its lifetime.
-     * @param {{ ctx: object, mutations: object, notifyMutation: Function }} deps - wiring.
+     * @param {{ ctx: object, mutations: object, notifyMutation: Function, scheduleRestoreRefresh?: Function }} deps -
+     *   wiring. `scheduleRestoreRefresh` books one follow-up session refresh after an undo restore, whose
+     *   row a single-flight refresh already in flight would otherwise miss (SPEC §9).
      * @returns {object} `store` and the dialog actions.
      */
     function createDialogController(deps) {
@@ -6712,6 +7250,14 @@ window.__ModuleLoader__.load({
       let dialogAbort = null
       let dialogToken = 0
       let doneTimer = null
+      /**
+       * True when the settled result is eligible to dismiss itself (fully successful, nothing left
+       * behind). Kept as a flag so the hover/focus pause can re-arm the same decision later.
+       */
+      let doneAutoClose = false
+      /** Undo walk (0.6.3): one restore request at a time, superseded by close/dispose. */
+      let undoAbort = null
+      let undoToken = 0
       let returnFocus = null
       // 0.6.0 "Open in file manager": the Host resolves the directory from the id itself, so the
       // client only ever sends `{ kind, id }`. The request owns its own abort handle; failures are
@@ -6729,6 +7275,43 @@ window.__ModuleLoader__.load({
         if (doneTimer !== null) {
           clearTimeout(doneTimer)
           doneTimer = null
+        }
+      }
+
+      /**
+       * (Re)arm the done/results dwell timer. A clean result may dismiss itself after
+       * `DONE_VISIBLE_MS`; a result with failures, skipped/excluded rows or a queued deletion never
+       * does (SPEC §9), and a preserved summary (`keepSummary`) must outlive the dwell.
+       */
+      function scheduleDoneTimer() {
+        clearDoneTimer()
+        if (doneAutoClose !== true) return
+        if (dialogStore.getSnapshot().keepSummary === true) return
+        doneTimer = setTimeout(function () {
+          doneTimer = null
+          if (dialogStore.getSnapshot().phase === 'done') closeDialog()
+        }, DONE_VISIBLE_MS)
+      }
+
+      /** Hover/focus inside the result pauses the auto-dismiss so a summary can be read. */
+      function pauseDoneDismiss() {
+        clearDoneTimer()
+      }
+
+      /** Leaving the result re-arms the dwell, unless the result is no longer auto-dismissable. */
+      function resumeDoneDismiss() {
+        const state = dialogStore.getSnapshot()
+        if (state.phase !== 'done') return
+        if (state.undoResult !== null || state.undoBusy === true) return
+        if (doneTimer !== null) return
+        scheduleDoneTimer()
+      }
+
+      function abortUndoFetch() {
+        undoToken += 1
+        if (undoAbort !== null) {
+          try { undoAbort.abort() } catch (error) { /* ignore */ }
+          undoAbort = null
         }
       }
 
@@ -7015,6 +7598,42 @@ window.__ModuleLoader__.load({
         })
       }
 
+      /**
+       * Self-rescue for a review that failed with `TOO_MANY_TARGETS` (SPEC §9): keep the first
+       * `MAX_PLAN_TARGETS` planned rows/nodes (the same order the plan body would name them) and
+       * re-plan. The reviewed rows all stay on screen, so the user can still un-check more.
+       */
+      function trimToPlanLimit() {
+        const state = dialogStore.getSnapshot()
+        if (state.phase !== 'failed') return
+        // A clear trims its own batches; rewriting the selection here would desync its queue.
+        if (state.clear !== null) return
+        if (!state.error || state.error.code !== 'TOO_MANY_TARGETS') return
+        const rows = plannedTargets(state)
+        const nodes = explicitNodeTargets(state)
+        const keptRows = []
+        const keptNodes = []
+        let budget = MAX_PLAN_TARGETS
+        for (let i = 0; i < rows.length && budget > 0; i += 1) {
+          keptRows.push(rows[i])
+          budget -= 1
+        }
+        for (let i = 0; i < nodes.length && budget > 0; i += 1) {
+          keptNodes.push(nodes[i])
+          budget -= 1
+        }
+        dialogStore.setState({
+          selection: keptRows.map(targetKey),
+          nodeSelection: keptNodes.map(function (node) { return node.id }),
+          typed: '',
+          plan: null,
+          error: null,
+          failureStage: null,
+          refreshing: false,
+        })
+        startPlan()
+      }
+
       function startPlan() {
         let state = dialogStore.getSnapshot()
         if (state.phase === 'idle' || state.targets.length === 0) return
@@ -7079,7 +7698,7 @@ window.__ModuleLoader__.load({
           includeSessions: state.includeSessions === true,
           includeDescendants: state.includeDescendants === true,
         }
-        request(ROUTE.plan, body, handle.controller.signal).then(function (envelope) {
+        request(ROUTE.plan, body, handle.controller.signal, PLAN_TIMEOUT_MS).then(function (envelope) {
           if (!settleDialogFetch(handle)) return
           if (envelope.transport) {
             dialogStore.setState({ phase: 'failed', refreshing: false, failureStage: 'plan', error: { transport: envelope.transport } })
@@ -7144,6 +7763,7 @@ window.__ModuleLoader__.load({
         returnFocus = active && !activeIsBody && typeof active.focus === 'function' ? active : null
         clearDoneTimer()
         abortDialogFetch()
+        abortUndoFetch()
         dialogStore.setState(Object.assign(initialDialogState(), {
           phase: 'planning',
           targets: targets,
@@ -7277,6 +7897,7 @@ window.__ModuleLoader__.load({
         returnFocus = active && !activeIsBody && typeof active.focus === 'function' ? active : null
         clearDoneTimer()
         abortDialogFetch()
+        abortUndoFetch()
         const clear = initialClearState({ id: workspaceId, title: workspace.title })
         dialogStore.setState(Object.assign(initialDialogState(), {
           phase: 'planning',
@@ -7296,7 +7917,7 @@ window.__ModuleLoader__.load({
         const clear = state.clear
         if (clear === null) return Promise.resolve({ ok: false, reason: 'badState' })
         const handle = beginDialogFetch()
-        return request(ROUTE.candidates, clearCandidatesBody(clear), handle.controller.signal).then(function (envelope) {
+        return request(ROUTE.candidates, clearCandidatesBody(clear), handle.controller.signal, PLAN_TIMEOUT_MS).then(function (envelope) {
           if (!settleDialogFetch(handle)) return { ok: false, reason: 'superseded' }
           if (envelope.transport) {
             failDelete('plan', { transport: envelope.transport })
@@ -7444,8 +8065,10 @@ window.__ModuleLoader__.load({
 
       function closeDialog() {
         clearDoneTimer()
+        doneAutoClose = false
         abortDialogFetch()
         abortOpenFetch()
+        abortUndoFetch()
         dialogStore.setState(initialDialogState())
         restoreFocus()
       }
@@ -7458,8 +8081,10 @@ window.__ModuleLoader__.load({
 
       function disposeDialog() {
         clearDoneTimer()
+        doneAutoClose = false
         abortDialogFetch()
         abortOpenFetch()
+        abortUndoFetch()
         dialogStore.setState(initialDialogState())
         returnFocus = null
       }
@@ -7480,7 +8105,7 @@ window.__ModuleLoader__.load({
         abortOpenFetch()
         const controller = new AbortController()
         openAbort = controller
-        return request(ROUTE.open, payload, controller.signal).then(function (envelope) {
+        return request(ROUTE.open, payload, controller.signal, REQUEST_TIMEOUT_MS).then(function (envelope) {
           if (openAbort === controller) openAbort = null
           if (envelope && envelope.transport === undefined && envelope.ok === true) return
           const error = toApiError(envelope)
@@ -7811,7 +8436,7 @@ window.__ModuleLoader__.load({
         const handle = beginDialogFetch()
         const body = deferRequestBody(state, plan)
         dialogStore.setState({ phase: 'deferring', error: null, failureStage: null, deferred: null })
-        request(ROUTE.defer, body, handle.controller.signal).then(function (envelope) {
+        request(ROUTE.defer, body, handle.controller.signal, PLAN_TIMEOUT_MS).then(function (envelope) {
           if (!settleDialogFetch(handle)) return
           if (envelope.transport) {
             dialogStore.setState({ phase: 'failed', refreshing: false, failureStage: 'defer', error: { transport: envelope.transport } })
@@ -7894,7 +8519,7 @@ window.__ModuleLoader__.load({
       function executePlan(plan, typedText, signal) {
         const body = { planId: plan.planId }
         if (typeof typedText === 'string' && typedText !== '') body.confirmationText = typedText
-        return request(ROUTE.delete, body, signal).then(function (envelope) {
+        return request(ROUTE.delete, body, signal, LONG_REQUEST_TIMEOUT_MS).then(function (envelope) {
           if (envelope.transport) return { ok: false, error: { transport: envelope.transport } }
           if (envelope.ok !== true) return { ok: false, error: toApiError(envelope) }
           if (!isDeleteResult(envelope.result)) return { ok: false, error: { transport: 'badResponse' } }
@@ -7904,22 +8529,80 @@ window.__ModuleLoader__.load({
 
       /** Settle a one-shot deletion: show the result and let a clean one dismiss itself. */
       function finishDelete(result) {
-        dialogStore.setState({ phase: 'done', refreshing: false, failureStage: null, error: null, result: result })
+        const counts = resultCounts(result)
+        dialogStore.setState({
+          phase: 'done',
+          refreshing: false,
+          failureStage: null,
+          error: null,
+          result: result,
+          undoBusy: false,
+          undoResult: null,
+        })
         notifyMutation()
-        clearDoneTimer()
         // Only a fully successful result may dismiss itself; a result with failed items stays on
         // screen (and in the live region) until the user explicitly closes it. A review preserved
-        // across a settings-sheet unmount stays until the user closes it too (SPEC §9).
-        if (resultCounts(result).failed === 0 && dialogStore.getSnapshot().keepSummary !== true) {
-          doneTimer = setTimeout(function () {
-            doneTimer = null
-            if (dialogStore.getSnapshot().phase === 'done') closeDialog()
-          }, DONE_VISIBLE_MS)
-        }
+        // across a settings-sheet unmount stays until the user closes it too (SPEC §9). The timer
+        // itself is paused while the user hovers/focuses the summary (SPEC §9 "done").
+        doneAutoClose = counts.failed === 0 && dialogStore.getSnapshot().keepSummary !== true
+        scheduleDoneTimer()
       }
 
       function failDelete(stage, error) {
         dialogStore.setState({ phase: 'failed', refreshing: false, failureStage: stage, error: error })
+      }
+
+      /**
+       * Undo a trashed deletion straight from the result (SPEC §4.5/§9, 0.6.3).
+       *
+       * Every trashed item carries a trash `entryId`, so the restored items can be addressed
+       * without reading the trash list. The restores run one at a time (a partial failure must not
+       * hide the ones that worked); the outcome replaces the delete summary, and a later close or
+       * dispose supersedes the walk so a stale result cannot overwrite a newer review.
+       * @returns {Promise<void>} resolves when the walk settles.
+       */
+      function undoLastDelete() {
+        const state = dialogStore.getSnapshot()
+        if (state.phase !== 'done') return Promise.resolve()
+        if (state.undoBusy === true || state.undoResult !== null) return Promise.resolve()
+        const entryIds = trashedEntryIds(state.result)
+        if (entryIds.length === 0) return Promise.resolve()
+        abortUndoFetch()
+        const token = undoToken
+        const controller = new AbortController()
+        undoAbort = controller
+        // A summary being undone must not vanish under the user: the dwell timer stops for good.
+        clearDoneTimer()
+        dialogStore.setState({ undoBusy: true })
+        let restored = 0
+        let failed = 0
+        let chain = Promise.resolve()
+        for (let i = 0; i < entryIds.length; i += 1) {
+          const entryId = entryIds[i]
+          chain = chain.then(function () {
+            if (token !== undoToken || controller.signal.aborted) return undefined
+            return request(ROUTE.trashRestore, { entryId: entryId }, controller.signal, REQUEST_TIMEOUT_MS)
+              .then(function (envelope) {
+                if (envelope && envelope.transport === undefined && envelope.ok === true) restored += 1
+                else failed += 1
+              })
+              .catch(function (error) {
+                if (isAbortError(error)) return undefined
+                failed += 1
+                return undefined
+              })
+          })
+        }
+        return chain.then(function () {
+          if (undoAbort === controller) undoAbort = null
+          if (token !== undoToken) return
+          dialogStore.setState({ undoBusy: false, undoResult: { ok: restored, failed: failed } })
+          // The trash list and the session catalog changed; a mounted settings page reloads both, and
+          // one follow-up refresh makes a restored sidebar row visible even if the refresh above was
+          // already in flight (the same single-flight rule the trash-tab restore follows).
+          const refreshPending = notifyMutation()
+          if (restored > 0 && typeof deps.scheduleRestoreRefresh === 'function') deps.scheduleRestoreRefresh(refreshPending)
+        })
       }
 
       /** `kind:id` keys a delete result reports as removed from disk. */
@@ -8000,18 +8683,15 @@ window.__ModuleLoader__.load({
           failureStage: null,
           error: null,
           result: null,
+          undoBusy: false,
+          undoResult: null,
           clear: Object.assign({}, clear, { stop: stopCode === null ? null : { code: stopCode, remaining: remaining } }),
         })
-        clearDoneTimer()
         const excludedCount = clear.excluded && typeof clear.excluded === 'object' ? Object.keys(clear.excluded).length : 0
         // Only a fully drained clear may dismiss itself. "Skipped", "excluded" or a stopped walk all
         // mean the workspace is not empty, so the summary must stay until the user closes it (SPEC §9).
-        if (stopCode === null && clear.done.failed === 0 && clear.skipped === 0 && excludedCount === 0 && dialogStore.getSnapshot().keepSummary !== true) {
-          doneTimer = setTimeout(function () {
-            doneTimer = null
-            if (dialogStore.getSnapshot().phase === 'done') closeDialog()
-          }, DONE_VISIBLE_MS)
-        }
+        doneAutoClose = stopCode === null && clear.done.failed === 0 && clear.skipped === 0 && excludedCount === 0
+        scheduleDoneTimer()
       }
 
       /** True when a clear batch plan brings back a target the user un-checked earlier. */
@@ -8069,7 +8749,7 @@ window.__ModuleLoader__.load({
           includeSessions: false,
           includeDescendants: includeDescendants === true,
         }
-        request(ROUTE.plan, body, handle.controller.signal).then(function (envelope) {
+        request(ROUTE.plan, body, handle.controller.signal, PLAN_TIMEOUT_MS).then(function (envelope) {
           if (!settleDialogFetch(handle)) return
           if (envelope.transport) { failDelete('plan', { transport: envelope.transport }); return }
           if (envelope.ok !== true) {
@@ -8136,7 +8816,7 @@ window.__ModuleLoader__.load({
         if (clear === null) return
         dialogStore.setState({ clear: Object.assign({}, clear, { resyncs: clear.resyncs + 1 }) })
         const handle = beginDialogFetch()
-        request(ROUTE.candidates, clearCandidatesBody(clear), handle.controller.signal).then(function (envelope) {
+        request(ROUTE.candidates, clearCandidatesBody(clear), handle.controller.signal, PLAN_TIMEOUT_MS).then(function (envelope) {
           if (!settleDialogFetch(handle)) return
           if (envelope.transport) { failDelete('plan', { transport: envelope.transport }); return }
           if (envelope.ok !== true) { failDelete('plan', toApiError(envelope)); return }
@@ -8183,7 +8863,7 @@ window.__ModuleLoader__.load({
         const clear = state.clear
         if (clear === null) return
         const handle = beginDialogFetch()
-        request(ROUTE.candidates, clearCandidatesBody(clear), handle.controller.signal).then(function (envelope) {
+        request(ROUTE.candidates, clearCandidatesBody(clear), handle.controller.signal, PLAN_TIMEOUT_MS).then(function (envelope) {
           if (!settleDialogFetch(handle)) return
           if (envelope.transport) { failDelete('plan', { transport: envelope.transport }); return }
           if (envelope.ok !== true) { failDelete('plan', toApiError(envelope)); return }
@@ -8240,6 +8920,10 @@ window.__ModuleLoader__.load({
         setIncludeSessions: setIncludeSessions,
         setTypedText: setTypedText,
         openTarget: openTarget,
+        trimToPlanLimit: trimToPlanLimit,
+        undoLastDelete: undoLastDelete,
+        pauseDoneDismiss: pauseDoneDismiss,
+        resumeDoneDismiss: resumeDoneDismiss,
       }
     }
 
@@ -8364,7 +9048,7 @@ window.__ModuleLoader__.load({
         const handle = requests.begin('inventory')
         const controller = handle.controller
         pageStore.setState({ inventoryLoading: true, inventoryError: null })
-        return request(ROUTE.inventory, {}, controller.signal).then(function (envelope) {
+        return request(ROUTE.inventory, {}, controller.signal, REQUEST_TIMEOUT_MS).then(function (envelope) {
           if (requests.stale(handle)) return
           requests.end(handle)
           if (envelope.transport || envelope.ok !== true) {
@@ -8426,6 +9110,12 @@ window.__ModuleLoader__.load({
               },
               selected: current.selected.filter(function (id) { return workspaceIds[id] === true }),
               selectedSessions: current.selectedSessions.filter(function (id) { return sessionIds[id] === true }),
+              // A pruned list can no longer be at the cap; never leave a stale "selection is full"
+              // warning behind after the inventory shrank under it.
+              selectionNotice: current.selectionNotice === true && (
+                current.selected.filter(function (id) { return workspaceIds[id] === true }).length >= MAX_PLAN_TARGETS
+                || current.selectedSessions.filter(function (id) { return sessionIds[id] === true }).length >= MAX_PLAN_TARGETS
+              ),
               deferredConfirm: deferredConfirm,
               deferredConfirmAt: deferredConfirm === current.deferredConfirm ? current.deferredConfirmAt : 0,
               usageAvailable: inventory.capabilities.usage ? current.usageAvailable : null,
@@ -8456,7 +9146,7 @@ window.__ModuleLoader__.load({
         const handle = requests.begin('trash')
         const controller = handle.controller
         pageStore.setState({ trashLoading: true, trashError: null })
-        return request(ROUTE.trashList, {}, controller.signal).then(function (envelope) {
+        return request(ROUTE.trashList, {}, controller.signal, REQUEST_TIMEOUT_MS).then(function (envelope) {
           if (requests.stale(handle)) return
           requests.end(handle)
           if (envelope.transport || envelope.ok !== true) {
@@ -8499,7 +9189,7 @@ window.__ModuleLoader__.load({
         const handle = requests.begin('deferred')
         const controller = handle.controller
         pageStore.setState({ deferredLoading: true, deferredError: null })
-        return request(ROUTE.deferredList, {}, controller.signal).then(function (envelope) {
+        return request(ROUTE.deferredList, {}, controller.signal, REQUEST_TIMEOUT_MS).then(function (envelope) {
           if (requests.stale(handle)) return
           requests.end(handle)
           if (envelope.transport || envelope.ok !== true) {
@@ -8657,7 +9347,7 @@ window.__ModuleLoader__.load({
             wizardPreview: Object.assign({}, current.wizardPreview, { status: 'loading', error: null, fieldErrors: {} }),
           })
         })
-        return request(ROUTE.candidates, validation.request, handle.controller.signal).then(function (envelope) {
+        return request(ROUTE.candidates, validation.request, handle.controller.signal, PLAN_TIMEOUT_MS).then(function (envelope) {
           if (requests.stale(handle)) return
           requests.end(handle)
           if (envelope.transport) {
@@ -8799,7 +9489,7 @@ window.__ModuleLoader__.load({
           deferredNotice: null,
         })
         const payload = entryIds === null ? { all: true } : { entryIds: entryIds }
-        return request(ROUTE.deferredCancel, payload, controller.signal).then(function (envelope) {
+        return request(ROUTE.deferredCancel, payload, controller.signal, REQUEST_TIMEOUT_MS).then(function (envelope) {
           requests.end(handle)
           if (envelope && envelope.transport) {
             pageStore.setState({ deferredActionBusy: null, deferredActionError: { transport: envelope.transport }, deferredConfirm: null, deferredConfirmAt: 0 })
@@ -8878,7 +9568,7 @@ window.__ModuleLoader__.load({
         const handle = requests.begin('settings')
         const controller = handle.controller
         pageStore.setState({ settingsLoading: true, settingsError: null, settingsErrorSource: null })
-        return request(ROUTE.settingsGet, {}, controller.signal).then(function (envelope) {
+        return request(ROUTE.settingsGet, {}, controller.signal, REQUEST_TIMEOUT_MS).then(function (envelope) {
           if (requests.stale(handle)) return
           requests.end(handle)
           if (envelope.transport || envelope.ok !== true) {
@@ -8972,7 +9662,7 @@ window.__ModuleLoader__.load({
           settingsErrorSource: null,
           settingsStatus: null,
         })
-        return request(ROUTE.settingsSet, { patch: validated.patch }, controller.signal).then(function (envelope) {
+        return request(ROUTE.settingsSet, { patch: validated.patch }, controller.signal, REQUEST_TIMEOUT_MS).then(function (envelope) {
           if (requests.stale(handle)) return
           requests.end(handle)
           if (envelope && envelope.transport) {
@@ -9080,7 +9770,7 @@ window.__ModuleLoader__.load({
           retainedConfirmAt: 0,
         })
         const path = action === 'requeue' ? ROUTE.deferredRequeue : ROUTE.deferredCancel
-        return request(path, { entryIds: [entryId] }, controller.signal).then(function (envelope) {
+        return request(path, { entryIds: [entryId] }, controller.signal, REQUEST_TIMEOUT_MS).then(function (envelope) {
           requests.end(handle)
           if (envelope && envelope.transport) {
             pageStore.setState({ retainedActionBusy: null, retainedActionError: { transport: envelope.transport }, retainedConfirm: null, retainedConfirmAt: 0 })
@@ -9184,7 +9874,7 @@ window.__ModuleLoader__.load({
         const payload = {}
         if (workspaceIds.length > 0) payload.workspaceIds = workspaceIds
         if (sessionIds.length > 0) payload.sessionIds = sessionIds
-        return request(ROUTE.measure, payload, controller.signal).then(function (envelope) {
+        return request(ROUTE.measure, payload, controller.signal, LONG_REQUEST_TIMEOUT_MS).then(function (envelope) {
           if (requests.stale(handle)) return
           requests.end(handle)
           if (envelope.transport || envelope.ok !== true) {
@@ -9308,7 +9998,7 @@ window.__ModuleLoader__.load({
         const generation = usageGeneration
         usageRequesting = true
         pageStore.setState({ usageLoading: true })
-        request(ROUTE.usage, { sessionIds: chunk }, handle.controller.signal).then(function (envelope) {
+        request(ROUTE.usage, { sessionIds: chunk }, handle.controller.signal, PLAN_TIMEOUT_MS).then(function (envelope) {
           if (disposed || requests.stale(handle) || generation !== usageGeneration) return
           requests.end(handle)
           usageRequesting = false
@@ -9480,7 +10170,7 @@ window.__ModuleLoader__.load({
         lastOpenTarget = { kind: kind, id: kind === 'cache' ? '' : id }
         const handle = requests.begin('open')
         pageStore.setState({ openError: null })
-        return request(ROUTE.open, payload, handle.controller.signal).then(function (envelope) {
+        return request(ROUTE.open, payload, handle.controller.signal, REQUEST_TIMEOUT_MS).then(function (envelope) {
           if (disposed || requests.stale(handle)) return
           requests.end(handle)
           if (envelope && envelope.transport === undefined && envelope.ok === true) return
@@ -9526,17 +10216,33 @@ window.__ModuleLoader__.load({
         if (tab === 'settings') ensureSettingsLoaded()
       }
 
+      /**
+       * One plan holds at most 64 targets (SPEC §4.3), so the page refuses the 65th selected row
+       * and raises a visible explanation instead of letting the review dead-end on
+       * `TOO_MANY_TARGETS` after a full selection round trip.
+       * @param {string[]} list - the selection list being extended.
+       * @returns {boolean} true when the next add must be refused.
+       */
+      function selectionAtCap(list) {
+        if (list.length < MAX_PLAN_TARGETS) return false
+        pageStore.setState({ selectionNotice: true })
+        return true
+      }
+
       function toggleSelect(workspaceId) {
         const state = pageStore.getSnapshot()
         const index = state.selected.indexOf(workspaceId)
         const selected = state.selected.slice()
         if (index >= 0) selected.splice(index, 1)
-        else selected.push(workspaceId)
-        pageStore.setState({ selected: selected })
+        else {
+          if (selectionAtCap(selected)) return
+          selected.push(workspaceId)
+        }
+        pageStore.setState({ selected: selected, selectionNotice: false })
       }
 
       function clearSelection() {
-        pageStore.setState({ selected: [] })
+        pageStore.setState({ selected: [], selectionNotice: false })
       }
 
       function toggleSessionSelect(sessionId) {
@@ -9545,16 +10251,19 @@ window.__ModuleLoader__.load({
         const index = state.selectedSessions.indexOf(sessionId)
         const selectedSessions = state.selectedSessions.slice()
         if (index >= 0) selectedSessions.splice(index, 1)
-        else selectedSessions.push(sessionId)
-        pageStore.setState({ selectedSessions: selectedSessions })
+        else {
+          if (selectionAtCap(selectedSessions)) return
+          selectedSessions.push(sessionId)
+        }
+        pageStore.setState({ selectedSessions: selectedSessions, selectionNotice: false })
       }
 
       function clearSessionSelection() {
-        pageStore.setState({ selectedSessions: [] })
+        pageStore.setState({ selectedSessions: [], selectionNotice: false })
       }
 
       function setSessionSort(sort) {
-        if (sort !== 'newest' && sort !== 'oldest' && sort !== 'largest' && sort !== 'usage') return
+        if (sort !== 'newest' && sort !== 'oldest' && sort !== 'largest' && sort !== 'usage' && sort !== 'inactive') return
         if (pageStore.getSnapshot().sessionSort === sort) return
         pageStore.setState({ sessionSort: sort })
       }
@@ -9564,7 +10273,24 @@ window.__ModuleLoader__.load({
         if (pageStore.getSnapshot().sessionFilter === filter) return
         // Rows hidden by the new filter must not stay selected for a batch deletion the user can no
         // longer see in the list; the review would show them, but clearing is the least surprising.
-        pageStore.setState({ sessionFilter: filter, selectedSessions: [] })
+        pageStore.setState({ sessionFilter: filter, selectedSessions: [], selectionNotice: false })
+      }
+
+      /**
+       * Free-text Sessions filter (title / id / cwd, case-insensitive). Changing it restarts paging
+       * and drops the batch selection, for the same reason the workspace/archive filters do: a
+       * selection made under another search must never be deleted unseen (SPEC §10).
+       */
+      function setSessionSearch(value) {
+        const raw = typeof value === 'string' ? value : ''
+        const next = raw.length > SESSION_SEARCH_MAX ? raw.slice(0, SESSION_SEARCH_MAX) : raw
+        if (pageStore.getSnapshot().sessionSearch === next) return
+        pageStore.setState({
+          sessionSearch: next,
+          sessionLimit: SESSION_PAGE_SIZE,
+          selectedSessions: [],
+          selectionNotice: false,
+        })
       }
 
       /** Workspace filter for the Sessions tab; a narrower list restarts paging. */
@@ -9573,7 +10299,7 @@ window.__ModuleLoader__.load({
         if (pageStore.getSnapshot().sessionWorkspace === value) return
         // A selection made under the previous workspace filter must not leak into a batch deletion
         // of the newly narrowed list (SPEC §10).
-        pageStore.setState({ sessionWorkspace: value, sessionLimit: SESSION_PAGE_SIZE, selectedSessions: [] })
+        pageStore.setState({ sessionWorkspace: value, sessionLimit: SESSION_PAGE_SIZE, selectedSessions: [], selectionNotice: false })
       }
 
       /** The "show more" limit lives in the store, so a tab switch keeps it. */
@@ -9603,7 +10329,14 @@ window.__ModuleLoader__.load({
         return null
       }
 
-      /** sr-only announcement text for a successful restore/purge. */
+      /**
+       * Announced/visible notice for a successful restore/purge (SPEC §4.5).
+       *
+       * A 0.6.3 restore reports what happened beyond the rename: whether the workspace was
+       * re-registered, whether pinned/archived state came back, and any warnings the Host could not
+       * turn into a failure. Those travel with the notice so the UI never claims a clean restore
+       * when part of the state was lost.
+       */
       function makeActionNotice(kind, entryId, envelope) {
         actionNoticeSeq += 1
         if (kind === 'restore') {
@@ -9611,7 +10344,30 @@ window.__ModuleLoader__.load({
           const title = entry
             ? (typeof entry.title === 'string' && entry.title !== '' ? entry.title : baseName(entry.originalPath))
             : ''
-          return { seq: actionNoticeSeq, kind: 'restored', title: title }
+          const restoredTo = envelope && typeof envelope.restoredTo === 'string' ? envelope.restoredTo : ''
+          const stateRestored = envelope && envelope.stateRestored && typeof envelope.stateRestored === 'object'
+            ? envelope.stateRestored
+            : null
+          const warnings = []
+          const rawWarnings = envelope && Array.isArray(envelope.warnings) ? envelope.warnings : []
+          for (let i = 0; i < rawWarnings.length && warnings.length < TRASH_RESTORE_WARNINGS_MAX; i += 1) {
+            const raw = rawWarnings[i]
+            // Host warnings are `{ code, message }` objects so the client can localize the known ones;
+            // a bare string from an older Host is still shown verbatim.
+            if (typeof raw === 'string' && raw !== '') warnings.push({ code: '', message: raw })
+            else if (raw && typeof raw === 'object' && typeof raw.message === 'string' && raw.message !== '') {
+              warnings.push({ code: typeof raw.code === 'string' ? raw.code : '', message: raw.message })
+            }
+          }
+          return {
+            seq: actionNoticeSeq,
+            kind: 'restored',
+            title: title,
+            restoredTo: restoredTo,
+            reRegistered: !!(envelope && envelope.reRegistered === true),
+            stateRestored: stateRestored,
+            warnings: warnings,
+          }
         }
         const count = envelope && typeof envelope.purged === 'number' && isFinite(envelope.purged)
           ? envelope.purged
@@ -9672,9 +10428,17 @@ window.__ModuleLoader__.load({
         })
       }
 
-      function restoreEntry(entryId) {
+      /**
+       * Restore one trash entry (SPEC §4.5). `mode: 'sibling'` asks the Host to restore a workspace
+       * directory next to the original as `"<name> (restored)"`; it is only offered for a
+       * workspace-dir entry whose original path came back. A session never sends it (the Host
+       * refuses: renaming a session directory breaks DSH's layout).
+       */
+      function restoreEntry(entryId, mode) {
+        const body = { entryId: entryId }
+        if (mode === 'sibling') body.restoreMode = 'sibling'
         return runAction('restore', entryId, function (signal) {
-          return request(ROUTE.trashRestore, { entryId: entryId }, signal)
+          return request(ROUTE.trashRestore, body, signal, REQUEST_TIMEOUT_MS)
         })
       }
 
@@ -9683,7 +10447,7 @@ window.__ModuleLoader__.load({
           // SPEC §4.5: emptying the trash is explicit `{ all: true }`, never an
           // omission; the single-entry form keeps its request body on retry.
           const payload = entryIds === null ? { all: true } : { entryIds: entryIds }
-          return request(ROUTE.trashPurge, payload, signal)
+          return request(ROUTE.trashPurge, payload, signal, REQUEST_TIMEOUT_MS)
         })
       }
 
@@ -9754,6 +10518,7 @@ window.__ModuleLoader__.load({
         setSessionSort: setSessionSort,
         setSessionWorkspace: setSessionWorkspace,
         setSessionFilter: setSessionFilter,
+        setSessionSearch: setSessionSearch,
         setUsageEnabled: setUsageEnabled,
         ensureUsageFor: ensureUsageFor,
         retryUsage: retryUsage,
@@ -9967,6 +10732,7 @@ window.__ModuleLoader__.load({
         notifyMutation: notifyMutation,
         capabilities: capabilities,
         notifyContextMenu: notifyContextMenu,
+        scheduleRestoreRefresh: restoreRefresh.schedule,
       })
       const createPageStoreForMount = function () {
         return createPageStore({
@@ -10000,6 +10766,10 @@ window.__ModuleLoader__.load({
         selectAllDialogTargets: dialog.selectAllDialogTargets,
         setTypedText: dialog.setTypedText,
         openTarget: dialog.openTarget,
+        trimToPlanLimit: dialog.trimToPlanLimit,
+        undoLastDelete: dialog.undoLastDelete,
+        pauseDoneDismiss: dialog.pauseDoneDismiss,
+        resumeDoneDismiss: dialog.resumeDoneDismiss,
       }
 
       ctx.effect(function () {
@@ -10083,6 +10853,11 @@ window.__ModuleLoader__.load({
         // summary on screen when the page is reopened instead of letting the dwell timer drop it.
         keepSummary: false,
         deletingStartedAt: null,
+        // 0.6.3 undo: a trashed result can be reverted from the done view. `undoBusy` disables the
+        // control while the restore walk runs, and `undoResult` replaces the delete summary with
+        // what the undo actually restored (SPEC §9 "done").
+        undoBusy: false,
+        undoResult: null,
       }
     }
 
@@ -10096,10 +10871,15 @@ window.__ModuleLoader__.load({
         measureError: null,
         selected: [],
         selectedSessions: [],
+        // Set when a selection click was refused because one plan holds at most 64 targets; the
+        // page shows an explanation instead of silently ignoring the click (SPEC §4.3/§9).
+        selectionNotice: false,
         sessionSort: 'newest',
         sessionWorkspace: SESSION_WORKSPACE_ANY,
         sessionFilter: 'all',
         sessionLimit: SESSION_PAGE_SIZE,
+        // Sessions-tab free-text filter (title/id/cwd); an empty string means "no search".
+        sessionSearch: '',
         // 0.6.0 usage opt-in (SPEC §10 "Usage (0.6.0)"): off by default, plugin-owned key.
         usageEnabled: readBooleanPreference(USAGE_PREF_STORAGE_KEY, false),
         usageAvailable: null,

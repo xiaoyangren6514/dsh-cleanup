@@ -272,6 +272,7 @@ function makeReaderWorld(options = {}) {
     readSession,
     ...(options.noSnapshotOf === true ? {} : { snapshotOf }),
     ...(options.limit === undefined ? {} : { limit: options.limit }),
+    ...(options.maxEvents === undefined ? {} : { maxEvents: options.maxEvents }),
   })
   return { reader, calls, sessions, snapshots }
 }
@@ -369,6 +370,18 @@ describe('createUsageReader: snapshot-keyed cache (SPEC §5.11)', () => {
 })
 
 describe('createUsageReader: per-id failure classification (SPEC §4.10)', () => {
+  test('refuses a pathological log instead of folding it synchronously', async () => {
+    const world = makeReaderWorld({ snapshots: [['huge', { eventCount: 3, sizeBytes: 3 }]], maxEvents: 2 })
+    world.sessions.set('huge', storedSession('huge', [
+      assistantEvent(usageOf(1, 0, 0, 1), 'm1'),
+      assistantEvent(usageOf(1, 0, 0, 1), 'm2'),
+      assistantEvent(usageOf(1, 0, 0, 1), 'm3'),
+    ]))
+    const result = await world.reader.readMany(['huge'])
+    assert.deepEqual(Object.keys(result.usage), [])
+    assert.deepEqual({ ...result.failed }, { huge: 'LOG_TOO_LARGE' })
+  })
+
   test('classifies a missing Session as UNKNOWN_SESSION and a broken read as READ_FAILED', async () => {
     const world = makeReaderWorld({
       snapshots: [

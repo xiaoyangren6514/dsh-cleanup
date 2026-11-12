@@ -15,7 +15,7 @@ kind: "package-bundle"
 
 DSH itself only unregisters a workspace — the folder, its files, and its Session history stay on disk — and Sessions can only be archived, never deleted. `dsh-cleanup` fills that gap while keeping the destructive surface narrow: targets are addressed by DSH identity, never by arbitrary path; every deletion is planned, reviewed, and confirmed; and the default outcome is a recoverable trash.
 
-- Package: `dsh-cleanup` 0.6.2
+- Package: `dsh-cleanup` 0.6.3
 - Repository: <https://github.com/xiaoyangren6514/dsh-cleanup>
 - License: MIT © 2026 fly
 - Tested with: DSH 0.2.2-rc.1 / 0.2.2-rc.2
@@ -89,9 +89,17 @@ One plan carries at most 64 targets (the Host's safety budget). When the checked
 
 "Clear workspace sessions…" deletes only the Session logs of one workspace; the folder and its registration stay untouched. It pre-flights, lets the user review the first batch (at most 64 logs), and then continues automatically batch by batch: the pre-flight lists logs opened or running in this app run as skipped and says how many (the same Session is never counted twice across refilled pages), each executed batch prunes the ids it actually removed, and a target deleted by another process makes the client re-read the workspace and rebuild the queue instead of failing the whole walk. The result auto-closes only when nothing is left over (no failures, no skipped rows, no excluded rows, no early stop); otherwise it stays until the user dismisses it. When every remaining log can only be deleted after a restart, the review offers "Schedule deletion" and the queued result reports how many are not included.
 
+### Undo, search, and a more complete restore (0.6.3)
+
+- **A deletion can be undone.** When the mode was trash and the whole review succeeded, the result offers **Undo delete**: it restores each `entryId` in turn, replaces the summary with the undo result (reporting per-entry failures), and also offers **Open trash**. The result stays for 8 seconds and pauses while the pointer is over it or focus is inside it.
+- **The selection cap is enforced up front.** Checking a 65th target is refused at the checkbox with an inline notice (the Host would refuse the plan anyway); if a review still fails with `TOO_MANY_TARGETS`, the dialog offers **Keep the first 64 and check again**, which trims the checked rows/nodes and re-plans without leaving the dialog.
+- **The Sessions list is searchable and explainable.** A search box filters by title / Session id / recorded path and the header reports `shown / total` (plus matches); the sort menu gains **Least recently active**, and each row's time column is its most recent activity with the creation time in the `title` — the cleanup decision is "least recently used", not "oldest created".
+- **Restore restores the files and, best effort, the DSH state.** v2 trash metadata records a workspace's display title and a Session's pin/archive state: restoring a workspace registers it again (`reRegistered`), restoring a Session puts its pin/archive set back (`stateRestored`). Both are best-effort and reported as `warnings` without failing the restore. When the original path is occupied, a workspace entry can be **restored as a copy** (`<name> (restored)`); a Session log directory cannot be renamed, so the occupying path must move first. v1 entries written by 0.6.2 and earlier remain listable, restorable and purgeable.
+- **The safety switch is re-read at execute.** The permanent-deletion switch is checked at plan time and again at execute: turning it off after a plan was produced refuses with `PERMANENT_DISABLED` instead of honoring the plan's stale copy.
+
 ## Safety model
 
-Four gates stand between a click and a deleted byte.
+Five gates stand between a click and a deleted byte.
 
 ### 1. Plan before execute
 
@@ -103,15 +111,21 @@ Deletions move targets to the trash under `<DSH_HOME>/trash/dsh-cleanup/` instea
 
 A cross-device move cannot be expressed as a rename. The plugin refuses that case and asks you to choose permanent deletion instead of silently copying gigabytes.
 
-### 3. Only registered, canonical targets
+### 3. The switch is re-read at execute
+
+The permanent-deletion switch and the trash location are safety/path settings: execute re-reads the switch (refusing with `PERMANENT_DISABLED` when it is now off), and changing `trashRoot` invalidates every reviewed plan (`PLAN_UNKNOWN`, so a fresh plan is required). Other settings (audit, scan budget, ...) do not discard a reviewed delete.
+
+### 4. Only registered, canonical targets
 
 A workspace folder can only be deleted through a workspace id from DSH's registry. Before execution the path is re-resolved (`lstat` + `realpath`) and must still equal the recorded canonical path; a symlink or a replaced directory is refused. A static path policy also refuses the filesystem root, the home directory, `~/.dsh`, the Host process working directory **and its ancestors**, the trash itself, paths containing `~/.dsh`, and paths that are too shallow to be a project.
 
 The set of deletable things is therefore the intersection of "DSH knows it" and "the filesystem still agrees", re-checked at execution time.
 
-### 4. Never touch a live Session
+### 5. Never touch a live Session
 
 DSH keeps an Agent — and its Session write handle — alive for the whole process lifetime, and it exposes no API to release it. Deleting a Session log while that handle exists corrupts the log. The plugin therefore probes the Session persistence write handle for immediate and deferred deletions, including Sessions held by another Host process, and refuses with `SESSION_RUNNING` (actively running) or `SESSION_LIVE` (open but idle). Deleting a workspace folder is likewise blocked while any live Session's working directory is inside it.
+
+Deleting a **workspace folder** additionally probes the stored Sessions inside it (by persistence `cwd`, at most 32 per pass) for another Host's write lease at plan time, at admission and again immediately before the mutation; a held lease is `WORKSPACE_HAS_LIVE_SESSIONS`. A failure of the live Agent's *effective* working-directory probe is a refusal (`IO_ERROR`) instead of a fallback to the header `cwd` — the effective directory is exactly what that check exists to establish.
 
 For Sessions opened in the current Host, the review dialog offers **Schedule deletion (runs automatically after this app exits)**: the reviewed targets and options are recorded under `<DSH_HOME>/cleanup/deferred.json` and applied as early as the next Host start allows (best-effort: before the browser can resume a Session) through the same plan → admission → execute pipeline. Blocked entries are recorded with their reason instead of failing the run, and the queue can be inspected and cancelled in Settings. Plugin hot-reload inside a running process deliberately does not consume the queue.
 
@@ -124,10 +138,10 @@ For Sessions opened in the current Host, the review dialog offers **Schedule del
 
 ```sh
 # From npm (after publication)
-dsh plugin --profile web add dsh-cleanup@0.6.2
+dsh plugin --profile web add dsh-cleanup@0.6.3
 
-# From GitHub, pinned to the v0.6.2 tag (a fixed commit; swap in `git rev-parse v0.6.2` for the raw sha)
-dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.2
+# From GitHub, pinned to the v0.6.3 tag (a fixed commit; swap in `git rev-parse v0.6.3` for the raw sha)
+dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.3
 
 # From a local checkout
 git clone https://github.com/xiaoyangren6514/dsh-cleanup.git
@@ -169,6 +183,10 @@ The plugin is fully local:
 
 These are properties of DSH or of this release, not bugs to report:
 
+- **Undo exists only for a fully successful trash-mode result.** Permanent deletion and mixed results have no undo; the result page only summarizes them.
+- **Restore restores the files, and best-effort the DSH state.** The payload always comes back; re-registering a workspace and restoring a Session's pin/archive set depend on Host APIs and are reported as `warnings` (with `reRegistered: false`) without failing the restore. An occupied original path can be restored as a copy for a workspace; a Session log directory cannot be renamed.
+- **The workspace cross-process probe only sees Sessions whose stored `cwd` is inside the folder** (first 32, at plan, admission and again before mutation). If another process moves a Session's runtime working directory in while its header `cwd` stays elsewhere, this process cannot see it — DSH has no cross-process directory lease.
+- **Settings have explicit effect boundaries.** A `trashRoot` change invalidates all reviewed plans; the permanent-deletion switch is re-read at execute; the audit ceiling applies once the audit log is rebuilt; the remaining fields apply to the next plan/measure.
 - **Open (live) Sessions cannot be deleted now.** DSH keeps a Session's Agent — and its log write handle — alive for the whole Host process and exposes no API to release it, so deleting the log would corrupt it. The review dialog offers **Schedule deletion**, applied at the next DSH start before any Session is restored; a Session opened by another Host process sharing the same `$DSH_HOME` is refused the same way.
 - **Usage needs the Host's query seam.** The Usage view only appears when the Host exposes `sessionQuery.readSession(id)`; without it the columns are hidden (`inventory.capabilities.usage` is `false`). Usage is folded from replay-validated logs, so a fork's inherited history is excluded from its own counts and a repeated request is counted once.
 - **Projection-cache cleanup needs the Host's storage-domain service.** A deleted Session's `session_projcache` record is dropped with its files only when the Host exposes that service; otherwise the drop is silently skipped (`inventory.capabilities.projectionCache` is `false`, `cacheDropped: false` on the result). The record is a disposable fold cache, never user data, and it is rebuilt on demand.

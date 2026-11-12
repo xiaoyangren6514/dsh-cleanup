@@ -706,6 +706,18 @@ describe('route payloads', () => {
     await dispose()
   })
 
+  test('forwards the request signal to measure so an aborted request answers CANCELLED', async () => {
+    const world = await makeWorld()
+    const { registrations, dispose } = startPlugin(world)
+    const controller = new AbortController()
+    controller.abort()
+    const response = await call(registrations, '/api/cleanup.measure', { workspaceIds: ['ws1'] }, { signal: controller.signal })
+    assert.equal(response.status, 200)
+    assert.equal(response.body.ok, false)
+    assert.equal(response.body.error.code, 'CANCELLED')
+    await dispose()
+  })
+
   test('measure answers per-id maps and BAD_REQUEST for a bad id list', async () => {
     const world = await makeWorld()
     const { registrations, dispose } = startPlugin(world)

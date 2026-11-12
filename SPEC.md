@@ -219,7 +219,9 @@ Bounded node:fs walks, honoring `maxScanEntries`/`scanTimeoutMs`.
 ```
 A missing directory reports `{ "bytes": 0, "files": 0, "dirs": 0, "truncated": false, "missing": true }`.
 Unknown ids are simply absent from the maps. Walk must not follow symlinks and must not throw on
-`EACCES`/`ENOENT` (skip that subtree).
+`EACCES`/`ENOENT` (skip that subtree). A request whose client aborts answers `CANCELLED` before any
+walk starts (or as soon as the in-flight walk observes the abort), so a closed dialog cannot leave a
+scan running.
 
 ### 4.3 `POST /api/cleanup.plan`
 
@@ -264,6 +266,10 @@ workspace items). `confirmation` is non-null exactly when the plan deletes one *
 that still exists and `mode === "permanent"`; `expected` is that directory's final path segment;
 `label` is the same directory's workspace title, falling back to `expected`, for the prompt.
 
+A request whose client aborts answers `CANCELLED` before any resolve/scan begins (or as soon as the
+in-flight scan observes the abort); the persistence listing, the directory walks and the per-target
+inspection all observe the same signal.
+
 This is deliberately **independent of `blockers`**: a blocked plan cannot execute now, but the user can
 still choose the deferred route (§4.7), and the typed folder name is the same deliberation gate the
 start-up run re-validates. The dialog keeps its destructive button disabled while blockers exist; the
@@ -291,8 +297,10 @@ usable, including a valid `planId` with a non-string `confirmationText`.
   "result": {
     "items": [
       { "kind": "workspace-dir", "id": "ws-…", "status": "trashed",  // "trashed" | "deleted" | "failed"
-        "error": null, "movedTo": "/Users/x/.dsh/trash/dsh-cleanup/…", "bytes": 1024 },
-      { "kind": "session", "id": "session-…", "status": "trashed", "error": null, "movedTo": "…", "bytes": 99 }
+        "error": null, "movedTo": "/Users/x/.dsh/trash/dsh-cleanup/…",
+        "entryId": "20261112T101500Z-proj-8f3a", "bytes": 1024 },
+      { "kind": "session", "id": "session-…", "status": "trashed", "error": null, "movedTo": "…",
+        "entryId": "20261112T101500Z-session-…", "bytes": 99 }
     ],
     "totals": { "trashed": 2, "deleted": 0, "failed": 0, "bytes": 1123 }
   }
@@ -301,6 +309,10 @@ usable, including a valid `planId` with a non-string `confirmationText`.
 
 A plan is all-or-nothing at admission: before touching anything, re-check state (§5.6). If the
 world changed, answer `{ ok: false, error: { code: "STATE_CHANGED", … } }` and change nothing.
+The permanent-deletion switch is re-read here, not trusted from the plan: a plan whose mode is
+`permanent` while `allowPermanentDeletion` is now false answers `PERMANENT_DISABLED` and changes
+nothing. This check runs after plan lookup/expiry and **before** the typed confirmation is validated,
+so a disabled mode answers the precise reason rather than a confirmation error.
 After admission, each item succeeds or fails independently; one failure does not roll back the
 others, and the result reports every item.
 
@@ -313,6 +325,12 @@ failure happens while the user's data is still in place: the item fails with `IO
 directory was removed keeps `movedTo: null` (nowhere to recover from).
 `totals.bytes` counts only items whose status is `trashed` or `deleted`; a failed item contributes to
 `totals.failed` only.
+
+Every item carries `entryId`: the trash entry id for `status: "trashed"` items, `null` for
+`deleted` items, and for a `failed` item it is the entry id **only** when the payload already moved
+into the trash and a later step failed (the same case that keeps `movedTo` non-null), otherwise
+`null`. The client uses it to offer a one-click undo (`trash.restore`) without re-reading the trash
+list.
 
 A Session item that removed its artifact directory — or found it already missing, including a
 Session that never materialized on disk — additionally reports
@@ -354,11 +372,37 @@ older builds carry no such fields and report `null` for both; a hand-edited or l
 that stores an empty string for either field also reports `null` (the client keeps its own
 non-empty guard only as defense in depth).
 
-`POST /api/cleanup.trash.restore` — request `{ "entryId": "…" }` → `{ ok: true, restoredTo: "/abs/dir" }`.
+`POST /api/cleanup.trash.restore` — request `{ "entryId": "…", "restoreMode?": "original" | "sibling" }`
+(default `original`) →
+
+```jsonc
+{
+  "ok": true,
+  "restoredTo": "/abs/dir",            // the original path, or the Host-generated sibling path
+  "reRegistered": true,               // workspace-dir: registration restored; false when unavailable/failed;
+                                      // session entries and v1 entries: null
+  "stateRestored": { "pinned": false, "archived": false }, // session entries with a v2 snapshot; else null
+  "warnings": [                       // best-effort registry failures; empty when clean
+    { "code": "RESTORE_REGISTER_FAILED", "message": "English fallback the client may show for an unknown code" }
+  ]
+}
+```
+
+`restoreMode: "sibling"` moves the payload to a Host-generated free path `<original> (restored)`,
+`<original> (restored 2)`, … when the original path is occupied. It is accepted **only** for a
+workspace-directory entry: a Session log directory is located by its DSH layout, so renaming it would
+make the Session undiscoverable (`RESTORE_FAILED`). The client never sends a path; it only asks for
+the mode. Restoring a v2 workspace entry registers the workspace again
+(`workspaceRegistry.create`); restoring a v2 Session entry puts its recorded pin/archive set back.
+Both are best effort: the files are already restored, so a failure is a `warnings[]` entry on a
+successful restore, never a failed restore. Entries written by 0.6.2 and earlier (meta `version: 1`)
+carry no state and restore exactly as before, with `reRegistered: null`/`stateRestored: null`; they
+also report their restore-state warning codes instead of silently claiming a full restore.
 
 `restorableCode` is `null` when the entry can be restored, otherwise one of `RESTORE_ENTRY_UNREADABLE`,
 `RESTORE_ORIGINAL_EXISTS`, `RESTORE_ORIGINAL_MISSING`, `RESTORE_PAYLOAD_INVALID`,
-`RESTORE_PAYLOAD_MISSING`, `RESTORE_UNREADABLE` (the client localizes every one).
+`RESTORE_PAYLOAD_MISSING`, `RESTORE_UNREADABLE` (the client localizes every one). A workspace entry
+with `RESTORE_ORIGINAL_EXISTS` is still restorable through `restoreMode: "sibling"`.
 `POST /api/cleanup.trash.purge` — request `{ "entryIds": ["…"] }`, or `{ "all": true }` to empty the whole
 trash → `{ ok: true, purged: 2, bytes: 1024 }`. Omitting both is a `BAD_REQUEST`: emptying the trash is an
 explicit action, never the absence of a parameter. Restoring refuses a payload that is not a plain
@@ -481,8 +525,13 @@ sizes are unknown. Out-of-range values are `BAD_REQUEST` with `details.field`.
 `POST /api/cleanup.settings.set` — request `{ "patch": { …subset of settings… } }` → validates, applies
 to the running engine immediately, and persists the merged overrides atomically to `settingsFile` (best
 effort: an unwritable location answers `ok:true` with `persisted:false` and a `persistError`). Invalid
-values are `BAD_REQUEST` with `details.field`. `trashRoot` is accepted but answered with an
-`EXISTING_DATA_STAYS` warning: existing trash stays at the old location. `deferredFile`/`auditFile`
+values are `BAD_REQUEST` with `details.field`. The patch applies to the running engine immediately,
+with one explicit consequence per field: a `trashRoot` change invalidates every retained plan
+(§4.3 `planId`s answer `PLAN_UNKNOWN`, because a plan embeds the volume assumptions it was reviewed
+under); `auditEnabled`/`auditMaxBytes` rebuild the audit log so the new ceiling is used by the next
+write; the permanent-deletion switch is re-read by the next `execute` (§4.4). Other fields affect the
+next plan/measure only, so a reviewed plan survives them. `trashRoot` is accepted but answered with
+an `EXISTING_DATA_STAYS` warning: existing trash stays at the old location. `deferredFile`/`auditFile`
 are deployment-level paths and are **not** editable from the Settings page (they are not part of the
 settings object). Bounds: `maxScanEntries`
 1..5,000,000; `scanTimeoutMs` 1..600,000; `planTtlMs` 1,000..86,400,000; `maxPlans` 1..1,000;
@@ -516,8 +565,9 @@ a non-array, a non-string element, or more than 200 ids answers `BAD_REQUEST`.
 ```
 
 One unreadable Session never fails the request: it appears in `failed` (`UNKNOWN_SESSION` when the
-persistence seam does not know the id, `READ_FAILED` when reading or replay validation throws) while
-every other named id still folds. `available: false` means the Host cannot fold usage at all: `usage`
+persistence seam does not know the id, `READ_FAILED` when reading or replay validation throws,
+`LOG_TOO_LARGE` when the log exceeds 50,000 events and is refused instead of folded synchronously)
+while every other named id still folds. `available: false` means the Host cannot fold usage at all: `usage`
 is `{}`, `failed` is omitted, and the client hides every usage surface. Folding rules are §5.11; a
 successful read is cached until that Session's log changes (§5.11), so repeated requests cost one
 read per changed Session.
@@ -639,9 +689,11 @@ except `node:path`/`node:fs` reads that have no reason to be faked.
   deleting it means dropping it from the registry sets only; report it as `deleted` with
   `bytes: 0` and no filesystem work.
 
-A live Agent's **effective** working directory (`ctx.workingDirectory.get(session)`, falling back to
-the Session header's `cwd`) counts as "using the directory" for §5.3: a `working_directory` change can
-move a session into a folder without touching its header.
+A live Agent's **effective** working directory (`ctx.workingDirectory.get(session)`) counts as
+"using the directory" for §5.3: a `working_directory` change can move a session into a folder without
+touching its header. When that probe exists but throws, the walk **fails closed**: the workspace
+inspection reports a blocker (`IO_ERROR`) instead of falling back to the header `cwd`, because the
+effective directory is exactly the fact the check exists to establish.
 
 **Cross-process writers.** The in-process `sessions`/`agents` services cannot see a Session opened by
 another Host that shares `$DSH_HOME`, so when the persistence backend exposes `open(id, 'write')` the
@@ -649,9 +701,15 @@ single-writer claim is the cross-process authority (a claim held elsewhere raise
 `SessionAlreadyOwnedError`, matched by name or message as "already owned").
 
 - The **plan** probes explicit session targets and reports a `SESSION_LIVE` blocker for a held claim.
-  Swept-in sessions are not probed during planning (that would be O(sessions × project directories)).
+  A **workspace** target additionally probes the first 32 stored sessions whose `cwd` lies inside the
+  directory (in plan order): another Host writing one of them means the directory is in use, so the
+  plan reports `WORKSPACE_HAS_LIVE_SESSIONS` up front instead of failing mid-execution. Swept-in
+  session *items* are otherwise not probed during planning (that would be O(sessions × project
+  directories)); the workspace probe is bounded and runs once per reviewed directory.
 - **Execution** probes every session item immediately before that item's mutation, after the plan's
-  admission. A held claim fails that item alone with `SESSION_LIVE`; nothing is mutated for it.
+  admission, and re-probes the workspace item's recorded inside set (first 32) immediately before the
+  directory is touched. A held claim fails that item alone with `SESSION_LIVE` (session item) or
+  `WORKSPACE_HAS_LIVE_SESSIONS` (workspace item); nothing is mutated for it.
 - The **deferred start-up run** probes the whole planned set once, before executing (§5.8).
 - A backend without `open()` degrades to the in-process signal. A claim held elsewhere is
   `SESSION_LIVE`. A log that is already missing, corrupt, or written in a format this build cannot open is **not** a live writer (the
@@ -678,9 +736,14 @@ Re-run at plan time and again at admission:
 - `realpath(path)` must equal the registry's stored path (`PATH_CHANGED` blocker otherwise: the
   directory was moved or replaced).
 - `lib/paths.js#classifyTargetPath` must accept it. Its codes are blockers as-is.
-- Any **live** session with `header.cwd` inside the directory → `WORKSPACE_HAS_LIVE_SESSIONS`
-  blocker, whether or not those sessions are in the deletion set ("a live session is using this
-  folder").
+- Any **live** session with `header.cwd` (or effective working directory) inside the directory →
+  `WORKSPACE_HAS_LIVE_SESSIONS` blocker, whether or not those sessions are in the deletion set ("a
+  live session is using this folder").
+- Any stored session whose `cwd` lies inside the directory and whose persistence write claim is held
+  by **another Host process** → the same `WORKSPACE_HAS_LIVE_SESSIONS` blocker at plan time and again
+  at admission/pre-mutation (bounded to the first 32 such sessions per pass). The inventory overview
+  deliberately does not run this probe: it is the destructive boundary, not the overview, that must
+  prove the directory is idle.
 - The target must not be one of `lib/paths.js#protectedRoots()` — the file-system root, the home
   directory and its parent, `$DSH_HOME`, the temporary directory, system directories, or the Harness
   process's own working directory and any directory that **contains** it (deleting the launch
@@ -712,6 +775,12 @@ whose stored layout is unrecognizable; it is skipped instead of failing the whol
 repository), `WORKSPACE_GIT_UNPUSHED` (n commits not on any remote). The git warnings are produced only
 when `gitSafetyCheck` is on: the probe is read-only and bounded (3 s, output cap), skips non-repositories
 and a missing `git` binary silently, and never changes a blocker into an allow or vice versa.
+
+A trash restore reports its best-effort registry failures as `warnings` entries of the same
+`{ code, message }` shape (§4.5): `RESTORE_REGISTER_UNSUPPORTED`, `RESTORE_REGISTER_FAILED`,
+`RESTORE_SESSION_ID_MISSING`, `RESTORE_PIN_UNSUPPORTED`, `RESTORE_PIN_FAILED`,
+`RESTORE_ARCHIVE_UNSUPPORTED`, `RESTORE_ARCHIVE_FAILED`, `RESTORE_STATE_UNREADABLE`. The client
+localizes every one and falls back to the Host message only for a code it does not know.
 
 ### 5.5 Deletion execution order
 
@@ -901,14 +970,22 @@ and is only decodable through the Host's own persistence stack. `readSession` re
 ```
 $trashRoot/<entryId>/                 entryId = <UTC yyyymmddThhmmssZ>-<slug>-<4 hex>
   .dsh-cleanup-entry                  ownership marker (new in 0.4.0), written before the payload moves
-  meta.json                           { version: 1, kind, title, originalPath, movedAt, bytes, files, dirs,
-                                        workspaceId?, sessionIds?, origin?, parentSessionId? }
+  meta.json                           { version: 2, kind, title, originalPath, movedAt, bytes, files, dirs,
+                                        workspaceId?, sessionIds?, origin?, parentSessionId?,
+                                        workspaceState?: { title }, sessionState?: { pinned, archived } }
   payload/                            the moved directory (session dir or workspace dir)
 ```
 
 `origin` and `parentSessionId` (new in 0.5.0) are copied from the Session header when a `session`
 entry is created and only when they are non-empty strings; other entries and entries written by
 older builds omit them, and §4.5 reports `null` for both.
+
+`workspaceState`/`sessionState` (new in 0.6.3, meta `version: 2`) record what a restore cannot infer:
+the workspace display title, and whether the Session was pinned or archived when it was deleted. They
+are written from the registry snapshot taken immediately before the sets are dropped (§5.5) and only
+for the matching kind. A v1 entry (0.6.2 and earlier) stays listable, restorable and purgeable: this
+build reads versions 1 and 2, writes 2, and never rewrites an existing entry's metadata (a 0.6.2 Host
+reading a v2 entry treats it as unreadable — downgrades should restore v2 entries first).
 
 An entry is **prepared before the payload moves**: allocate the directory, write the ownership
 marker, write `meta.json`, and only then `rename` the payload in. A failure while preparing discards
@@ -1024,8 +1101,16 @@ const ROUTE = {
 ```
 `fetch` is **document-relative** (no leading slash) exactly like the shipped session export. Send
 `POST`, `content-type: application/json`, `body: JSON.stringify(payload)`, and pass an
-`AbortSignal` from the modal/page lifetime. Treat a non-JSON body, a network failure, and
-`{ ok: false }` as three distinct failures with distinct copy.
+`AbortSignal` from the modal/page lifetime. Treat a non-JSON body, a network failure, a **deadline**
+and `{ ok: false }` as distinct failures with distinct copy.
+
+Every request carries a deadline composed with the caller's signal (`AbortSignal.any` when the
+runtime has it, otherwise a guarded controller): 20 s for view/read routes (inventory, trash,
+deferred, settings, open, restore, purge, cancel), 60 s for `plan`/`candidates`/`usage`/`defer`, and
+600 s for `delete` and `measure` — the two routes that legitimately walk large trees. A deadline
+answers the client-only `transport: "timeout"` failure; the dialog explains that a delete may still
+be running on the Host (deleting is not retried automatically, because a second plan could act twice)
+while read routes keep their ordinary retry.
 
 ## 9. Client: the review dialog
 
@@ -1043,8 +1128,14 @@ surface renders, so exactly one review is on screen. States:
 | `deleting` | progress line, buttons disabled |
 | `deferring` | the queued-deletion request is in flight; buttons and dismissal are disabled |
 | `deferred` | queued result: distinct title, the number of **items this plan deletes** (from the reviewed plan, not the Host's entry count), mode, the current queue size as a separate sentence, a replaced note, and where to review/cancel; a live region, never auto-closed |
-| `done` | result summary: counts and bytes, plus every distinct trash location when trashed. **Failure-aware**: when nothing succeeded and something failed it is presented as a failure (error title, failed count primary), and with any failed item it does not auto-close |
+| `done` | result summary: counts and bytes, plus every distinct trash location when trashed. **Failure-aware**: when nothing succeeded and something failed it is presented as a failure (error title, failed count primary), and with any failed item it does not auto-close. A fully successful trash-mode result additionally offers **撤销删除** (one `trash.restore` per `entryId`, sequentially; the undo result replaces the summary and reports per-entry failures) and, on the settings surface, **打开回收站**; a mixed result offers only the latter. The dwell is 8 s and pauses while the pointer is over the result or focus is inside it, so a slow reader or a screen reader never loses the summary before acting |
 | `failed` | code → localized message, `message` as a fallback line, "重试" and "关闭" |
+
+Selection is bounded in the UI: a 65th checked workspace/session is refused at the checkbox with an
+inline cap notice (the Host would refuse the plan), and a review that still ends in the client-only
+`TOO_MANY_TARGETS` failure offers `保留前 64 项并重新复核`, which trims the checked row/node set to the
+first 64 planned targets and re-plans -- the user never has to close the dialog, scroll back and
+re-select by hand.
 
 Review shows, in order: title (`删除会话` / `删除工作区目录`), the **target rows** (below), warning
 list, blocker list (red, with the localized reason), mode
@@ -1225,8 +1316,12 @@ workspace in batches inside the same dialog:
 
 A `settings.section` page titled "存储清理" with four tabs: **工作区**, **会话**, **回收站**, **清理设置**.
 
-- Header row: section title, one-paragraph explanation, `刷新` button, and a size-measuring
-  button when the active tab has unmeasured rows.
+- Header row: section title, one-paragraph explanation, `刷新` button (spinner + `aria-busy`
+  while a reload is in flight), and a size-measuring button when the active tab has unmeasured rows.
+  Below the title, a summary line renders from the current inventory when it has landed: workspaces,
+  sessions, trash entries with their byte total, scheduled deletions (only when non-zero), and
+  `数据更新于 <generatedAt>`, so a stale page is visible instead of silently trusted. The trash tab
+  carries its entry count as a badge.
 - Above the tabs, a **deferred notice** renders whenever `inventory.deferred.count > 0` or a
   `lastRun` exists: the notice counts queued **entries** (`N scheduled deletions · applied at the next
   DSH start`), an expandable list (fetched lazily through `/api/cleanup.deferred.list` on first
@@ -1254,14 +1349,24 @@ A `settings.section` page titled "存储清理" with four tabs: **工作区**, *
   batch selection for the same reason. Membership is inherited: a subagent log takes its parent's
   workspace through `parentSessionId`, so it never shows up under `未分组` while its parent is
   registered (and it folds under that parent in the workspace view); only a log whose parent is gone
-  stays ungrouped. A sort selector offers newest / oldest / largest (largest only among
-  measured rows, unmeasured last), an archive filter offers all / only archived / hide archived, and a
-  batch bar `删除选中 (n)` opens the review dialog with every selected session as a target. Pagination
+  stays ungrouped. A search box filters the list case-insensitively by title, session id and recorded `cwd`; changing
+  it restarts paging and clears the batch selection (like the workspace/archive filters), and the
+  list header states `已显示 X / 共 N` plus `匹配 M` while a query is active. An empty result renders
+  a localized no-match state with a clear-search action. A sort selector offers newest / oldest /
+  largest (largest only among measured rows, unmeasured last) and **最久未活动** (ascending activity
+  time; unknown times sort first), and each row's time column is its most recent activity with the
+  creation time in the `title` — the cleanup decision is "least recently used", not "oldest created".
+  An archive filter offers all / only archived / hide archived, and a batch bar `删除选中 (n)` opens
+  the review dialog with every selected session as a target. A 65th checked row is refused with the
+  inline cap notice (§9) instead of failing the plan later. Pagination
   stays at 300 rows with `显示更多`, and its expanded limit survives switching tabs. Row controls carry
   the row title in their accessible name.
 - Trash tab: one row per entry — title, original path, moved time, size, a `子代理` badge and a
   `父会话 …` line when the entry recorded a Session family (§4.5), `恢复` and
-  `彻底删除`; the `父会话` line shows the short id but carries the full Session id in its `title`.
+  `彻底删除`; a workspace entry whose original path came back (`RESTORE_ORIGINAL_EXISTS`) offers
+  **恢复为副本** (`restoreMode: "sibling"`) instead of a dead-end reason, and a successful restore
+  reports the restored path, whether the workspace was registered again, which registry set came
+  back, and any best-effort warnings (§4.5); the `父会话` line shows the short id but carries the full Session id in its `title`.
   A `清空回收站` action in the tab header, both permanent actions confirmed inline
   (a second click within the row, not a browser `confirm()`). When `inventory.trash` reports
   `overRetention`/`overCapacity`, a warning banner states the size/max and oldest-age/retention and
@@ -1274,7 +1379,8 @@ A `settings.section` page titled "存储清理" with four tabs: **工作区**, *
 - Settings tab: `settings.get` form (permanent-deletion toggle, trash retention days/capacity,
   audit toggle/rotation, scan budgets, read-only trash root), client-side bound checks, changed-only
   patch on save, inline `persisted:false`/`persistError` and per-field `details.field` errors, reset
-  to defaults; plus a **recent deletions** list from `inventory.audit.recent` and a last-start line
+  to defaults; save warnings are localized by their `code` (e.g. `warn.EXISTING_DATA_STAYS` with the
+  localized field label) and fall back to the Host message only for an unknown code; plus a **recent deletions** list from `inventory.audit.recent` and a last-start line
   from `inventory.audit.lastStartup`. A one-time page notice shows the last start-up result when it is
   within 24 h and not yet acknowledged (localStorage, guarded).
 - The deferred notice also lists `retained` (skipped/failed) entries with status/code/reason and
@@ -1329,6 +1435,11 @@ polling. Re-render from the store with `useSyncExternalStore`.
 - No `@deepseek-ai/*` require, no DOM reads of host components, no `document.body` appends
   outside the overlay root, no `alert`/`confirm`/`prompt`.
 - Every visible string goes through `t(...)`; no hard-coded Chinese or English in components.
+- Keyboard focus is always visible: one `:focus-visible` rule (2 px outline in
+  `--dsw-alias-brand-primary`, 1 px offset) covers tabs, inline row actions, tree/ride-along toggles
+  and the open-folder controls, and row/setting labels expose `:focus-within` where the visible
+  control is an inner input. `@media (prefers-reduced-motion: reduce)` disables the spinner and
+  skeleton animations; no other motion is load-bearing.
 - DSH 0.2.2-rc.1 ships **eight built-in UI languages** (`zh`, `en`, `ja`, `es`, `fr`, `de`, `ru`,
   `pt`): its locale plugin registers the six non-Chinese/English languages itself. This client plugin
   translates its visible strings into **zh and en only**; the other six built-in languages fall back

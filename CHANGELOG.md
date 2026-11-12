@@ -5,6 +5,78 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.3] - 2026-11-12
+
+### Added
+
+- **Undo after a deletion.** A fully successful trash-mode review result now offers `撤销删除`: the
+  client restores each result item by its new `entryId` through `trash.restore`, replaces the summary
+  with the per-entry undo result, and offers `打开回收站` on the settings surface. The result dwell
+  grew from 3.2 s to 8 s and pauses while the pointer is over it or focus is inside it.
+- **The Sessions list is searchable and activity-aware.** A search box filters by title, Session id
+  and recorded `cwd`; the header reports `shown / total` plus matches; an empty result renders a
+  localized no-match state with a clear action. A new **least recently active** sort orders by
+  activity time ascending, and each row's time column is its most recent activity with the creation
+  time in the `title`.
+- **A summary line on the storage-cleanup page.** Workspace/session counts, trash entries and bytes,
+  scheduled deletions, and `数据更新于 <generatedAt>`; the refresh button shows a spinner and
+  `aria-busy` while reloading, and the Trash tab carries its entry count as a badge.
+- **Trash restore now restores the DSH state.** Trash metadata moved to `version: 2` and records a
+  workspace's display title and a Session's pin/archive set. `trash.restore` re-registers a restored
+  workspace (`reRegistered`), puts a Session's recorded set back (`stateRestored`), and reports
+  best-effort failures as `warnings` without failing the restore. A workspace entry whose original
+  path came back can be restored as a copy (`restoreMode: "sibling"`, Host-generated `<name>
+  (restored)`); a Session log directory still refuses that mode because renaming it breaks the DSH
+  layout. Entries written by 0.6.2 and earlier (`version: 1`) remain listable, restorable and
+  purgeable.
+- **Deletion results carry `entryId`** for every trashed item, and the review dialog's failed state
+  can trim a `TOO_MANY_TARGETS` selection to the first 64 planned targets and re-plan
+  (`保留前 64 项并重新复核`) instead of dead-ending.
+- **Selection is capped in the UI**: checking a 65th workspace/session is refused with an inline
+  notice before a doomed plan is ever requested.
+
+### Fixed
+
+- **A workspace folder is no longer deleted while another Host process is writing inside it.** The
+  workspace inspection now probes the persistence write lease of the stored Sessions inside the
+  folder (bounded to the first 32 per pass) at plan time, at admission, and immediately before the
+  mutation; a held lease is `WORKSPACE_HAS_LIVE_SESSIONS`. The inventory overview deliberately does
+  not run this probe, so its rows stay cheap.
+- **An effective-working-directory probe failure fails closed.** A live Agent whose
+  `workingDirectory.get()` throws is no longer treated as if it still worked in its header `cwd`; the
+  workspace inspection refuses instead of guessing.
+- **The permanent-deletion switch is re-read at execute.** A plan produced while the switch was on
+  answers `PERMANENT_DISABLED` if it is turned off before execution; the plan's stale copy is never
+  trusted.
+- **Settings changes have explicit effect boundaries.** A `trashRoot` change invalidates every
+  retained plan (`PLAN_UNKNOWN`, a fresh review is required); `auditEnabled`/`auditMaxBytes` now
+  rebuild the audit log so the new ceiling and switch apply to the next write (they previously only
+  applied when `auditFile` changed); other fields leave a reviewed plan alive.
+- **`plan` and `measure` observe the request signal.** The persistence listing, every directory walk
+  and the per-target inspections check the caller's `AbortSignal` and answer `CANCELLED`, so closing
+  a review or a settings page no longer leaves a long scan running. `measure` gained the same
+  cancellation plumbing on its route.
+- **A pathological Session log is refused instead of blocking the Host.** Usage folding now refuses
+  a log over 50,000 events with `failed: "LOG_TOO_LARGE"` (rendered as an unknown `—`) instead of
+  folding it synchronously.
+- **Client requests have deadlines.** Read/view routes get 20 s, `plan`/`candidates`/`usage`/`defer`
+  60 s, and `delete`/`measure` 600 s, composed with the caller's signal; a timeout is its own
+  `transport: "timeout"` failure with distinct copy, and a timed-out delete tells the user it may
+  still be running instead of retrying automatically.
+- **Accessibility and localization polish.** One `:focus-visible` rule now covers tabs, inline row
+  actions, tree/ride-along toggles and open controls; `prefers-reduced-motion` disables the spinner
+  and skeleton animations; settings save warnings are localized by code (`warn.
+  EXISTING_DATA_STAYS` with the localized field label) and fall back to the Host message only for an
+  unknown code.
+
+### Changed
+
+- Docs, SPEC (§4.2–§4.5, §4.8, §4.10, §5.2, §5.3, §5.7, §8–§11), README (both languages), DETAIL
+  (both languages) and the FAQ describe the new behavior, the explicit settings effect boundaries,
+  the bounded cross-process workspace probe, and the best-effort restore contract.
+- Test baseline grew from 489 to 515 passing tests (engine, client, usage, index); `npm run check`
+  still passes (16 routes, 38 error + 28 warning codes, 507 locale keys, 29 shipped paths).
+
 ## [0.6.2] - 2026-11-12
 
 ### Changed

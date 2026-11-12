@@ -125,7 +125,7 @@ const PLAN_KEYS = [
 const TARGET_KEYS = ['id', 'kind', 'path', 'title']
 const TOTALS_KEYS = ['bytes', 'dirs', 'files', 'sessions', 'workspaces']
 const MESSAGE_KEYS = ['code', 'message', 'sessionId', 'workspaceId']
-const RESULT_ITEM_KEYS = ['bytes', 'error', 'id', 'kind', 'movedTo', 'status']
+const RESULT_ITEM_KEYS = ['bytes', 'entryId', 'error', 'id', 'kind', 'movedTo', 'status']
 const RESULT_TOTALS_KEYS = ['bytes', 'deleted', 'failed', 'trashed']
 const TRASH_ENTRY_KEYS = ['bytes', 'dirs', 'files', 'id', 'kind', 'movedAt', 'origin', 'originalPath', 'parentSessionId', 'restorable', 'restorableCode', 'title']
 
@@ -221,7 +221,7 @@ async function makeWorld(spec = {}) {
   for (const id of spec.running ?? []) agentStore.set(id, { status: 'running' })
   for (const id of spec.idleAgents ?? []) agentStore.set(id, { status: 'idle' })
 
-  /** @type {[string, string][]} */
+  /** @type {unknown[][]} */
   const registryCalls = []
   const registry = {
     list: () => [...entities.values()],
@@ -230,11 +230,27 @@ async function makeWorld(spec = {}) {
       registryCalls.push(['delete', id])
       entities.delete(id)
     },
+    create: async (workspacePath, title) => {
+      registryCalls.push(['create', workspacePath, title ?? null])
+      for (const entity of entities.values()) {
+        if (entity.path === workspacePath) return entity
+      }
+      const id = `restored-ws-${entities.size + 1}`
+      const entity = { id, title: title ?? path.basename(workspacePath), path: workspacePath }
+      entities.set(id, entity)
+      return entity
+    },
     unpinSession: async (id) => {
       registryCalls.push(['unpin', id])
     },
+    pinSession: async (id) => {
+      registryCalls.push(['pin', id])
+    },
     unarchiveSession: async (id) => {
       registryCalls.push(['unarchive', id])
+    },
+    archiveSession: async (id) => {
+      registryCalls.push(['archive', id])
     },
     archivedSessionIds: [...(spec.archived ?? [])],
     pinnedSessionIds: [...(spec.pinned ?? [])],
@@ -705,6 +721,13 @@ describe('inventory', () => {
 // #region measure (SPEC §4.2) -----------------------------------------------------------------
 
 describe('measure', () => {
+  test('a cancelled measure answers CANCELLED before walking anything', async () => {
+    const world = await makeWorld({ workspaces: [{ id: 'ws1' }] })
+    const engine = world.engine()
+    const response = await engine.measure({ workspaceIds: ['ws1'] }, { signal: { aborted: true } })
+    assertFail(response, 'CANCELLED')
+  })
+
   test('measures workspaces and sessions with bounded walks', async () => {
     const world = await makeWorld({
       workspaces: [{ id: 'ws1', files: { 'a.txt': 'abc', 'sub/b.txt': 'defg' } }],
@@ -1490,7 +1513,7 @@ describe('execute: trash mode', () => {
     for (const entry of entries) {
       assert.ok(entry.meta, `meta.json missing for ${entry.entryId}`)
       byKind.set(entry.meta.kind, entry)
-      assert.equal(entry.meta.version, 1)
+      assert.equal(entry.meta.version, 2)
       assert.ok(path.isAbsolute(entry.meta.originalPath))
       assert.equal(typeof entry.meta.movedAt, 'number')
       await assertExists(path.join(entry.entryDir, 'payload'), 'payload directory')
@@ -1499,6 +1522,7 @@ describe('execute: trash mode', () => {
     assert.equal(workspaceEntry.meta.title, 'proj')
     assert.equal(workspaceEntry.meta.originalPath, ws)
     assert.equal(workspaceEntry.meta.workspaceId, 'ws1')
+    assert.deepEqual(workspaceEntry.meta.workspaceState, { title: 'proj' })
     assert.equal(workspaceEntry.meta.bytes, 11)
     assert.equal(workspaceEntry.meta.files, 2)
     assert.equal(workspaceEntry.meta.dirs, 1)
@@ -1506,7 +1530,14 @@ describe('execute: trash mode', () => {
     const sessionEntry = entries.find((entry) => entry.meta.kind === 'session' && entry.meta.sessionIds?.[0] === 'sIn')
     assert.ok(sessionEntry, 'expected the sIn session entry')
     assert.equal(sessionEntry.meta.workspaceId, 'ws1')
+    assert.deepEqual(sessionEntry.meta.sessionState, { pinned: false, archived: false })
     assert.equal(sessionEntry.meta.originalPath, world.dirOfSession('sIn'))
+    // A trashed item carries the trash entry id, so the client can offer a one-click undo.
+    const entryIdByItem = new Map()
+    for (const item of result.items) entryIdByItem.set(`${item.kind}:${item.id}`, item.entryId)
+    assert.equal(entryIdByItem.get('workspace-dir:ws1'), workspaceEntry.entryId)
+    assert.equal(entryIdByItem.get('session:sIn'), sessionEntry.entryId)
+    for (const item of result.items) assert.equal(typeof item.entryId, 'string', `expected entryId for ${item.id}`)
 
     const calls = world.registryCalls
     assert.deepEqual(calls.filter(([name]) => name !== 'delete').map(([name, id]) => `${name}:${id}`), [
@@ -1516,6 +1547,51 @@ describe('execute: trash mode', () => {
       'unarchive:sChild',
     ])
     assert.deepEqual(calls.at(-1), ['delete', 'ws1'])
+  })
+
+  test('a cancellation that lands mid-plan leaves later items unattempted', async () => {
+    const world = await makeWorld({
+      sessions: [{ id: 's1', content: 'a\n' }, { id: 's2', content: 'b\n' }],
+    })
+    const signal = { aborted: false }
+    const fsOps = {
+      rename: async (...args) => {
+        const result = await nodeFs.rename(...args)
+        signal.aborted = true
+        return result
+      },
+    }
+    const engine = world.engine({ fsOps })
+    const plan = planOf(await engine.plan({
+      targets: [{ kind: 'session', id: 's1' }, { kind: 'session', id: 's2' }],
+      mode: 'trash',
+    }))
+    const response = await engine.execute({ planId: plan.planId }, { signal })
+    assert.equal(response.ok, true)
+    const byId = new Map(response.result.items.map((item) => [item.id, item]))
+    assert.equal(byId.get('s1').status, 'trashed')
+    assert.equal(byId.get('s2').status, 'failed')
+    assert.equal(byId.get('s2').error.code, 'CANCELLED')
+    await assertExists(world.dirOfSession('s2'), 'the cancelled item is untouched')
+  })
+
+  test('a workspace item whose payload moved but whose registration delete failed reports its entryId', async () => {
+    const world = await makeWorld({ workspaces: [{ id: 'ws1', files: { 'a.txt': 'x' } }] })
+    const wedgedRegistry = {
+      ...world.registry,
+      delete: async () => { throw new Error('registry is wedged') },
+    }
+    const engine = world.engine({ workspaceRegistry: wedgedRegistry })
+    const plan = planOf(await engine.plan({ targets: [{ kind: 'workspace', id: 'ws1' }], mode: 'trash', includeSessions: false }))
+    const response = await engine.execute({ planId: plan.planId })
+    assert.equal(response.ok, true)
+    const item = response.result.items[0]
+    assert.equal(item.status, 'failed')
+    assert.equal(item.error.code, 'IO_ERROR')
+    assert.equal(typeof item.movedTo, 'string')
+    assert.equal(typeof item.entryId, 'string', 'the payload is recoverable, so its entry id must travel with the failure')
+    const [entry] = await trashEntries(world)
+    assert.equal(entry.entryId, item.entryId)
   })
 
   test('drops registry sets before touching files and deletes sessions before directories', async () => {
@@ -1566,7 +1642,7 @@ describe('execute: trash mode', () => {
     const response = await engine.execute({ planId: plan.planId })
     assert.equal(response.ok, true)
     assert.deepEqual(response.result.items, [
-      { kind: 'session', id: 'unborn', status: 'deleted', error: null, movedTo: null, bytes: 0, cacheDropped: false },
+      { kind: 'session', id: 'unborn', status: 'deleted', error: null, movedTo: null, entryId: null, bytes: 0, cacheDropped: false },
     ])
     assert.deepEqual(await trashEntries(world), [])
     assert.deepEqual(world.registryCalls, [
@@ -1747,7 +1823,7 @@ describe('execute: permanent mode and typed confirmation', () => {
     const okResponse = await engine.execute({ planId: fourth.planId, confirmationText: expected })
     assert.equal(okResponse.ok, true)
     assert.deepEqual(okResponse.result.items, [
-      { kind: 'workspace-dir', id: 'ws1', status: 'deleted', error: null, movedTo: null, bytes: 0 },
+      { kind: 'workspace-dir', id: 'ws1', status: 'deleted', error: null, movedTo: null, entryId: null, bytes: 0 },
     ])
     await assertGone(world.dirOf('ws1'), 'workspace directory')
     assert.equal(world.entities.has('ws1'), false)
@@ -1873,6 +1949,28 @@ describe('admission re-check', () => {
 // #region plan lifetime (SPEC §4.4, config) ---------------------------------------------------
 
 describe('plan lifetime', () => {
+  test('an already-cancelled plan answers CANCELLED without touching the world', async () => {
+    const world = await makeWorld({ workspaces: [{ id: 'ws1' }] })
+    const engine = world.engine()
+    const response = await engine.plan({ targets: [{ kind: 'workspace', id: 'ws1' }], mode: 'trash' }, { signal: { aborted: true } })
+    assertFail(response, 'CANCELLED')
+    await assertExists(world.dirOf('ws1'), 'a cancelled plan reads nothing that matters and deletes nothing')
+  })
+
+  test('a cancellation raised during the scan aborts the plan instead of finishing it', async () => {
+    const world = await makeWorld({ workspaces: [{ id: 'ws1', files: { 'a.txt': 'x', 'sub/b.txt': 'y' } }] })
+    const signal = { aborted: false }
+    const fsOps = {
+      readdir: async (...args) => {
+        signal.aborted = true
+        return nodeFs.readdir(...args)
+      },
+    }
+    const engine = world.engine({ fsOps })
+    const response = await engine.plan({ targets: [{ kind: 'workspace', id: 'ws1' }], mode: 'trash' }, { signal })
+    assertFail(response, 'CANCELLED')
+  })
+
   test('a plan is single-use', async () => {
     const world = await makeWorld({ workspaces: [{ id: 'ws1' }] })
     const engine = world.engine()
@@ -2056,19 +2154,159 @@ describe('trash routes', () => {
     assertFail(restore, 'RESTORE_ORIGINAL_EXISTS')
   })
 
-  test('restores a trashed workspace directory and removes the entry', async () => {
+  test('restores a trashed workspace directory, re-registers it and removes the entry', async () => {
     const world = await makeWorld({ workspaces: [{ id: 'ws1', files: { 'a.txt': 'hello', 'sub/b.txt': 'world!' } }] })
     const engine = world.engine()
+    const plan = planOf(await engine.plan({ targets: [{ kind: 'workspace', id: 'ws1' }], mode: 'trash', includeSessions: false }))
+    assert.equal((await engine.execute({ planId: plan.planId })).ok, true)
+    const [trashed] = await trashEntries(world)
+    assert.equal(trashed.meta.version, 2)
+    assert.deepEqual(trashed.meta.workspaceState, { title: 'ws1' })
+    const [entry] = (await engine.trashList()).entries
+    const response = await engine.trashRestore({ entryId: entry.id })
+    assert.equal(response.ok, true)
+    assert.deepEqual(response, {
+      ok: true,
+      restoredTo: entry.originalPath,
+      reRegistered: true,
+      stateRestored: null,
+      warnings: [],
+    })
+    assert.deepEqual(world.registryCalls.filter((call) => call[0] === 'create'), [['create', entry.originalPath, 'ws1']])
+    await assertExists(path.join(world.dirOf('ws1'), 'a.txt'), 'restored file')
+    await assertExists(path.join(world.dirOf('ws1'), 'sub', 'b.txt'), 'restored nested file')
+    assert.deepEqual(await trashEntries(world), [])
+    assert.deepEqual((await engine.trashList()).entries, [])
+  })
+
+  test('restores a workspace as a sibling copy when its original path came back', async () => {
+    const world = await makeWorld({ workspaces: [{ id: 'ws1', files: { 'a.txt': 'hello' } }] })
+    const engine = world.engine()
+    const plan = planOf(await engine.plan({ targets: [{ kind: 'workspace', id: 'ws1' }], mode: 'trash', includeSessions: false }))
+    assert.equal((await engine.execute({ planId: plan.planId })).ok, true)
+    await fsp.mkdir(world.dirOf('ws1'), { recursive: true })
+    const [entry] = (await engine.trashList()).entries
+    assert.equal(entry.restorableCode, 'RESTORE_ORIGINAL_EXISTS')
+    const response = await engine.trashRestore({ entryId: entry.id, restoreMode: 'sibling' })
+    assert.equal(response.ok, true)
+    const sibling = `${entry.originalPath} (restored)`
+    assert.equal(response.restoredTo, sibling)
+    assert.equal(response.reRegistered, true)
+    await assertExists(path.join(sibling, 'a.txt'), 'restored sibling file')
+    assert.deepEqual(world.registryCalls.filter((call) => call[0] === 'create'), [['create', sibling, 'ws1']])
+  })
+
+  test('restores the pin or archive registry set a trashed session recorded', async () => {
+    for (const [state, expectedCall] of [['pinned', ['pin', 's1']], ['archived', ['archive', 's1']]]) {
+      const world = await makeWorld({
+        sessions: [{ id: 's1', content: 'log\n' }],
+        pinned: state === 'pinned' ? ['s1'] : [],
+        archived: state === 'archived' ? ['s1'] : [],
+      })
+      const engine = world.engine()
+      const plan = planOf(await engine.plan({ targets: [{ kind: 'session', id: 's1' }], mode: 'trash' }))
+      assert.equal((await engine.execute({ planId: plan.planId })).ok, true)
+      const [trashed] = await trashEntries(world)
+      assert.deepEqual(trashed.meta.sessionState, {
+        pinned: state === 'pinned',
+        archived: state === 'archived',
+      })
+      const [entry] = (await engine.trashList()).entries
+      const response = await engine.trashRestore({ entryId: entry.id })
+      assert.equal(response.ok, true)
+      assert.deepEqual(response.stateRestored, {
+        pinned: state === 'pinned',
+        archived: state === 'archived',
+      })
+      assert.deepEqual(response.warnings, [])
+      assert.ok(world.registryCalls.some((call) => call[0] === expectedCall[0] && call[1] === 's1'), `expected ${expectedCall[0]} call`)
+    }
+  })
+
+  test('refuses a sibling restore for a session log directory', async () => {
+    const world = await makeWorld({ sessions: [{ id: 's1', content: 'log\n' }] })
+    const engine = world.engine()
+    const plan = planOf(await engine.plan({ targets: [{ kind: 'session', id: 's1' }], mode: 'trash' }))
+    assert.equal((await engine.execute({ planId: plan.planId })).ok, true)
+    const [entry] = (await engine.trashList()).entries
+    const response = await engine.trashRestore({ entryId: entry.id, restoreMode: 'sibling' })
+    assertFail(response, 'RESTORE_FAILED')
+    assert.match(response.error.message, /workspace-directory/)
+    await assertExists(path.join(world.trashRoot, entry.id, 'payload'), 'payload stays in the trash')
+  })
+
+  test('rejects an unknown restoreMode instead of guessing', async () => {
+    const world = await makeWorld({ workspaces: [{ id: 'ws1' }] })
+    const engine = world.engine()
+    const plan = planOf(await engine.plan({ targets: [{ kind: 'workspace', id: 'ws1' }], mode: 'trash', includeSessions: false }))
+    assert.equal((await engine.execute({ planId: plan.planId })).ok, true)
+    const [entry] = (await engine.trashList()).entries
+    const response = await engine.trashRestore({ entryId: entry.id, restoreMode: 'copy' })
+    assertFail(response, 'BAD_REQUEST')
+    assert.match(response.error.message, /restoreMode/)
+  })
+
+  test('restores a v1 entry written by 0.6.2 and reports no recorded state', async () => {
+    const world = await makeWorld({})
+    const entryId = '2026-01-01-000000-legacy'
+    const entryDir = path.join(world.trashRoot, entryId)
+    const originalPath = path.join(world.root, 'legacy-workspace')
+    await fsp.mkdir(path.join(entryDir, 'payload'), { recursive: true })
+    await fsp.writeFile(path.join(entryDir, 'payload', 'file.txt'), 'legacy\n')
+    await fsp.writeFile(path.join(entryDir, '.dsh-cleanup-entry'), `${JSON.stringify({ plugin: 'dsh-cleanup', version: 1 })}\n`)
+    await fsp.writeFile(path.join(entryDir, 'meta.json'), `${JSON.stringify({
+      version: 1,
+      kind: 'workspace-dir',
+      title: 'legacy',
+      originalPath,
+      movedAt: 1000,
+      bytes: 7,
+      files: 1,
+      dirs: 0,
+      workspaceId: 'ws-legacy',
+    })}\n`)
+    await fsp.mkdir(path.dirname(originalPath), { recursive: true })
+    const engine = world.engine()
+    const list = await engine.trashList()
+    assert.equal(list.entries.length, 1)
+    assert.equal(list.entries[0].restorable, true)
+    const response = await engine.trashRestore({ entryId })
+    assert.equal(response.ok, true)
+    assert.equal(response.restoredTo, originalPath)
+    assert.equal(response.reRegistered, true)
+    assert.equal(response.stateRestored, null)
+    await assertExists(path.join(originalPath, 'file.txt'), 'legacy payload restored')
+  })
+
+  test('a restore whose Host cannot re-register the workspace still restores the files and warns', async () => {
+    const world = await makeWorld({ workspaces: [{ id: 'ws1', files: { 'a.txt': 'hello' } }] })
+    const legacyRegistry = {
+      list: () => [...world.entities.values()],
+      get: (id) => world.entities.get(id),
+      delete: async (id) => {
+        world.registryCalls.push(['delete', id])
+        world.entities.delete(id)
+      },
+      unpinSession: async (id) => {
+        world.registryCalls.push(['unpin', id])
+      },
+      unarchiveSession: async (id) => {
+        world.registryCalls.push(['unarchive', id])
+      },
+      archivedSessionIds: [],
+      pinnedSessionIds: [],
+    }
+    const engine = world.engine({ workspaceRegistry: legacyRegistry })
     const plan = planOf(await engine.plan({ targets: [{ kind: 'workspace', id: 'ws1' }], mode: 'trash', includeSessions: false }))
     assert.equal((await engine.execute({ planId: plan.planId })).ok, true)
     const [entry] = (await engine.trashList()).entries
     const response = await engine.trashRestore({ entryId: entry.id })
     assert.equal(response.ok, true)
-    assert.deepEqual(response, { ok: true, restoredTo: entry.originalPath })
-    await assertExists(path.join(world.dirOf('ws1'), 'a.txt'), 'restored file')
-    await assertExists(path.join(world.dirOf('ws1'), 'sub', 'b.txt'), 'restored nested file')
-    assert.deepEqual(await trashEntries(world), [])
-    assert.deepEqual((await engine.trashList()).entries, [])
+    assert.equal(response.reRegistered, false)
+    assert.equal(response.warnings.length, 1)
+    assert.equal(response.warnings[0].code, 'RESTORE_REGISTER_UNSUPPORTED')
+    assert.match(response.warnings[0].message, /cannot register a workspace again/)
+    await assertExists(path.join(world.dirOf('ws1'), 'a.txt'), 'the files are restored even when re-registration is unavailable')
   })
 
   test('refuses to restore when the original parent directory is gone', async () => {
@@ -2348,7 +2586,7 @@ describe('hardening regressions (0.4.0)', () => {
     assert.ok(plan.items[0].bytes > 0, 'the plan measured the log before it disappeared')
     const response = await engine.execute({ planId: plan.planId })
     assert.equal(response.ok, true)
-    assert.deepEqual(response.result.items, [{ kind: 'session', id: 's1', status: 'deleted', error: null, movedTo: null, bytes: 0, cacheDropped: false }])
+    assert.deepEqual(response.result.items, [{ kind: 'session', id: 's1', status: 'deleted', error: null, movedTo: null, entryId: null, bytes: 0, cacheDropped: false }])
     assert.deepEqual(response.result.totals, { trashed: 0, deleted: 1, failed: 0, bytes: 0 })
     assert.deepEqual(await trashEntries(world), [])
     await assertGone(world.dirOfSession('s1'))
@@ -3609,6 +3847,45 @@ describe('settings (SPEC §4.8)', () => {
     assert.match(response.warnings[0].message, /old location/)
   })
 
+  test('a trashRoot change invalidates every retained plan', async () => {
+    const world = await makeWorld({ workspaces: [{ id: 'ws1', files: { 'a.txt': 'x' } }] })
+    const engine = world.engine()
+    const plan = planOf(await engine.plan({ targets: [{ kind: 'workspace', id: 'ws1' }], mode: 'trash', includeSessions: false }))
+    assert.equal((await engine.settingsSet({ patch: { trashRoot: path.join(world.root, 'moved-trash') } })).ok, true)
+    const response = await engine.execute({ planId: plan.planId })
+    assertFail(response, 'PLAN_UNKNOWN')
+    await assertExists(world.dirOf('ws1'), 'the directory was not touched by a stale plan')
+    assert.deepEqual(await trashEntries(world), [])
+  })
+
+  test('execute re-checks the permanent-deletion switch instead of trusting the plan', async () => {
+    const world = await makeWorld({ sessions: [{ id: 's1', content: 'log\n' }] })
+    const engine = world.engine()
+    const plan = planOf(await engine.plan({ targets: [{ kind: 'session', id: 's1' }], mode: 'permanent' }))
+    assert.equal(plan.mode, 'permanent')
+    // A non-path setting keeps the reviewed plan alive, so the switch must be re-read at execute.
+    assert.equal((await engine.settingsSet({ patch: { allowPermanentDeletion: false } })).ok, true)
+    const response = await engine.execute({ planId: plan.planId })
+    assertFail(response, 'PERMANENT_DISABLED')
+    await assertExists(world.dirOfSession('s1'), 'the log survives a disabled permanent deletion')
+    assert.deepEqual(await trashEntries(world), [])
+  })
+
+  test('auditMaxBytes applies to the already-instantiated audit log', async () => {
+    const world = await makeWorld({ sessions: [{ id: 's1' }] })
+    const engine = world.engine({ config: { auditMaxBytes: 10_000 } })
+    // inventory() instantiates the audit instance with the original (large) ceiling.
+    assert.equal((await engine.inventory()).ok, true)
+    assert.equal((await engine.settingsSet({ patch: { auditMaxBytes: 1 } })).ok, true)
+    for (let index = 0; index < 3; index += 1) {
+      const queued = await engine.defer({ targets: [{ kind: 'session', id: 's1' }], mode: 'trash' })
+      assert.equal(queued.ok, true)
+    }
+    const rotated = `${world.auditFile}.1`
+    assert.equal(await exists(rotated), true, 'the rebuilt log now rotates at the new ceiling')
+    assert.equal((await readAudit(world)).length, 1, 'only the newest record stays in the current generation')
+  })
+
   test('an unwritable settings location answers persisted:false with persistError while applying at runtime', async () => {
     const world = await makeWorld({})
     const blocked = path.join(world.root, 'blocked-settings-parent')
@@ -4530,7 +4807,7 @@ describe('release hardening: cross-process liveness (SPEC §5.2)', () => {
     assert.deepEqual(world.registryCalls, [], 'a blocked plan drops no registry sets')
   })
 
-  test('a swept-in session held by another process fails alone at execution and its log survives', async () => {
+  test('a swept-in session held by another process blocks the workspace plan', async () => {
     const world = await makeWorld({
       workspaces: [{ id: 'ws1', files: { 'a.txt': 'x' } }],
       sessions: [{ id: 's1', content: 'log\n' }],
@@ -4539,15 +4816,16 @@ describe('release hardening: cross-process liveness (SPEC §5.2)', () => {
     const counters = { opens: 0 }
     const engine = world.engine({ sessionPersistence: heldPersistence(world, counters) })
     const plan = planOf(await engine.plan({ targets: [{ kind: 'workspace', id: 'ws1' }], mode: 'trash' }))
-    assert.deepEqual(plan.blockers, [], 'swept-in sessions are probed at execution, not at planning')
+    // A workspace whose directory is in use by a Session owned by another Host process is refused
+    // up front: deleting the folder under a live writer must not wait for the per-item execution
+    // re-check, because the folder itself is the shared resource.
+    assert.deepEqual(plan.blockers.map((entry) => entry.code), ['WORKSPACE_HAS_LIVE_SESSIONS'])
+    assert.equal(counters.opens, 1, 'the plan probes the sessions stored inside the directory once')
     const response = await engine.execute({ planId: plan.planId })
-    assert.equal(response.ok, true)
-    const byId = new Map(response.result.items.map((item) => [item.id, item]))
-    assert.equal(byId.get('ws1').status, 'trashed')
-    assert.equal(byId.get('s1').status, 'failed')
-    assert.equal(byId.get('s1').error.code, 'SESSION_LIVE')
-    assert.equal(counters.opens, 1, 'one probe for the one swept session item')
+    assertFail(response, 'STATE_CHANGED')
+    await assertExists(world.dirOf('ws1'), 'the workspace directory is left alone')
     await assertExists(world.dirOfSession('s1'), 'the log is left alone')
+    assert.deepEqual(await trashEntries(world), [])
   })
 
   test('a probe error other than ownership fails closed as IO_ERROR', async () => {
@@ -4791,7 +5069,7 @@ describe('release hardening: probe error classification (SPEC §5.2)', () => {
     const response = await engine.execute({ planId: plan.planId })
     assert.equal(response.ok, true)
     assert.deepEqual(response.result.items, [
-      { kind: 'session', id: 's1', status: 'deleted', error: null, movedTo: null, bytes: 0, cacheDropped: false },
+      { kind: 'session', id: 's1', status: 'deleted', error: null, movedTo: null, entryId: null, bytes: 0, cacheDropped: false },
     ])
     assert.deepEqual(await trashEntries(world), [])
   })
