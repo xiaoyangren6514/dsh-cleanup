@@ -686,7 +686,7 @@ test('dialog: un-checking a reviewed target re-plans without it, and the last ro
   // destructive button instead of sending a target set the Host would reject.
   const planCallsBefore = world.calls.filter((call) => call.url.endsWith('cleanup.plan')).length
   api.setDialogSelection('session:session-a', false)
-  // 0.6.4 D: the selection updates immediately, the plan is dropped after the debounce window.
+  // 0.6.3 D: the selection updates immediately, the plan is dropped after the debounce window.
   await waitFor(() => api.dialogStore.getSnapshot().plan === null, 'empty selection drops the plan')
   const cleared = api.dialogStore.getSnapshot()
   assert.deepEqual(cleared.selection, [])
@@ -3479,7 +3479,7 @@ function findButtonByText(tree, needle) {
 }
 
 /**
- * Force the next request deadline to fire immediately (0.6.4 H).
+ * Force the next request deadline to fire immediately (0.6.3 H).
  *
  * The deadline guard is one manual `AbortController` + `setTimeout`; this stub intercepts that
  * timer (delay >= 1s), fires it on the next macrotask, and makes the stalled fetch reject when the
@@ -3541,7 +3541,7 @@ test('0.6.3 request deadline: a stalled Host reports transport timeout and the l
   assert.match(source, /request\(ROUTE\.delete, body, signal, LONG_REQUEST_TIMEOUT_MS\)/)
   assert.match(source, /request\(ROUTE\.measure, payload, controller\.signal, LONG_REQUEST_TIMEOUT_MS\)/)
   assert.match(source, /if \(error\.transport === 'timeout'\) return t\('error\.timeout'\)/)
-  // 0.6.4 H: one manual controller + setTimeout; the timer and listener are released in dispose().
+  // 0.6.3 H: one manual controller + setTimeout; the timer and listener are released in dispose().
   assert.match(source, /function requestTimeoutGuard\(signal, timeoutMs\)/)
   assert.equal(/AbortSignal\.timeout\(/.test(source), false, 'the guard must not depend on AbortSignal.timeout')
   assert.equal(/AbortSignal\.any\(/.test(source), false, 'the guard must not depend on AbortSignal.any')
@@ -3879,10 +3879,10 @@ test('0.6.3 delete deadline: the failed view says the Host may still be executin
 })
 
 // =============================================================================================
-// 0.6.4 (docs/internal/0.6.4-plan.md §D–H): debounce, stop/measure progress, page prefs, audit.
+// 0.6.3 (docs/internal/0.6.3-plan.md §D–H): debounce, stop/measure progress, page prefs, audit.
 // =============================================================================================
 
-test('0.6.4 debounce: three edits send one plan and the selection stays interactive while it runs', async () => {
+test('0.6.3 debounce: three edits send one plan and the selection stays interactive while it runs', async () => {
   const world = createContext()
   const { mod } = await loadClient()
   mod.apply(world.ctx)
@@ -3935,7 +3935,7 @@ test('0.6.4 debounce: three edits send one plan and the selection stays interact
   api.disposeDialog()
 })
 
-test('0.6.4 typed confirmation: kept while the expected name is unchanged, cleared with a notice when it changes', async () => {
+test('0.6.3 typed confirmation: kept while the expected name is unchanged, cleared with a notice when it changes', async () => {
   const world = createContext()
   const { mod } = await loadClient()
   mod.apply(world.ctx)
@@ -3979,7 +3979,7 @@ test('0.6.4 typed confirmation: kept while the expected name is unchanged, clear
   api.disposeDialog()
 })
 
-test('0.6.4 clear: stop-after-batch ends the walk between batches and the result says so', async () => {
+test('0.6.3 clear: stop-after-batch ends the walk between batches and the result says so', async () => {
   const world = createContext()
   const { mod } = await loadClient()
   mod.apply(world.ctx)
@@ -4028,7 +4028,7 @@ test('0.6.4 clear: stop-after-batch ends the walk between batches and the result
   api.disposeDialog()
 })
 
-test('0.6.4 measure: serial chunks of at most 200 ids, stop between chunks, results merge', async () => {
+test('0.6.3 measure: serial chunks of at most 200 ids, stop between chunks, results merge', async () => {
   const world = createContext()
   const { mod } = await loadClient()
   mod.apply(world.ctx)
@@ -4073,7 +4073,7 @@ test('0.6.4 measure: serial chunks of at most 200 ids, stop between chunks, resu
   store.dispose()
 })
 
-test('0.6.4 measure: a failed chunk keeps the earlier sizes and stops the walk', async () => {
+test('0.6.3 measure: a failed chunk keeps the earlier sizes and stops the walk', async () => {
   const world = createContext()
   const { mod } = await loadClient()
   mod.apply(world.ctx)
@@ -4097,7 +4097,7 @@ test('0.6.4 measure: a failed chunk keeps the earlier sizes and stops the walk',
   store.dispose()
 })
 
-test('0.6.4 page prefs: validated restore, corrupt fallback and setter persistence', async () => {
+test('0.6.3 page prefs: validated restore, corrupt fallback and setter persistence', async () => {
   const world = createContext()
   const { mod } = await loadClient()
   mod.apply(world.ctx)
@@ -4172,7 +4172,7 @@ test('0.6.4 page prefs: validated restore, corrupt fallback and setter persisten
   }
 })
 
-test('0.6.4 audit: write health, per-item outcome and purged entries are shown', async () => {
+test('0.6.3 audit: write health, per-item outcome and purged entries are shown', async () => {
   const world = createContext()
   const { mod } = await loadClient()
   mod.apply(world.ctx)
@@ -4229,7 +4229,7 @@ test('0.6.4 audit: write health, per-item outcome and purged entries are shown',
   store.dispose()
 })
 
-test('0.6.4 deferred: a persistenceError is surfaced in the last-run details', async () => {
+test('0.6.3 deferred: a persistenceError is surfaced in the last-run details', async () => {
   const world = createContext()
   const { mod } = await loadClient()
   mod.apply(world.ctx)
@@ -4260,7 +4260,7 @@ test('0.6.4 deferred: a persistenceError is surfaced in the last-run details', a
   store.dispose()
 })
 
-test('0.6.4 clear: a stop during a page refill stops before the next batch', async () => {
+test('0.6.3 clear: a stop during a page refill stops before the next batch', async () => {
   const world = createContext()
   const { mod } = await loadClient()
   mod.apply(world.ctx)
@@ -4304,7 +4304,7 @@ test('0.6.4 clear: a stop during a page refill stops before the next batch', asy
   api.disposeDialog()
 })
 
-test('0.6.4 clear: a stop during a batch plan is honoured before execution', async () => {
+test('0.6.3 clear: a stop during a batch plan is honoured before execution', async () => {
   const world = createContext()
   const { mod } = await loadClient()
   mod.apply(world.ctx)
@@ -4345,7 +4345,7 @@ test('0.6.4 clear: a stop during a batch plan is honoured before execution', asy
   api.disposeDialog()
 })
 
-test('0.6.4 clear: unchecking a tree node also removes it from the queued batch', async () => {
+test('0.6.3 clear: unchecking a tree node also removes it from the queued batch', async () => {
   const world = createContext()
   const { mod } = await loadClient()
   mod.apply(world.ctx)
@@ -4392,7 +4392,7 @@ test('0.6.4 clear: unchecking a tree node also removes it from the queued batch'
   api.disposeDialog()
 })
 
-test('0.6.4 page prefs: a restored tab still loads its data when the inventory request fails', async () => {
+test('0.6.3 page prefs: a restored tab still loads its data when the inventory request fails', async () => {
   const world = createContext()
   const { mod } = await loadClient()
   mod.apply(world.ctx)
@@ -4420,7 +4420,7 @@ test('0.6.4 page prefs: a restored tab still loads its data when the inventory r
   }
 })
 
-test('0.6.4 review: switching include-sessions keeps a typed name whose expectation did not change', async () => {
+test('0.6.3 review: switching include-sessions keeps a typed name whose expectation did not change', async () => {
   const world = createContext()
   const { mod } = await loadClient()
   mod.apply(world.ctx)
@@ -4453,7 +4453,7 @@ test('0.6.4 review: switching include-sessions keeps a typed name whose expectat
   pageApi.disposeDialog()
 })
 
-test('0.6.4 page prefs: the persisted show-more limit is clamped to the readable bound', async () => {
+test('0.6.3 page prefs: the persisted show-more limit is clamped to the readable bound', async () => {
   const world = createContext()
   const { mod } = await loadClient()
   mod.apply(world.ctx)
@@ -4476,7 +4476,7 @@ test('0.6.4 page prefs: the persisted show-more limit is clamped to the readable
   }
 })
 
-test('0.6.4 measure: progress counts answered ids, not merely requested ones', async () => {
+test('0.6.3 measure: progress counts answered ids, not merely requested ones', async () => {
   const world = createContext()
   const { mod } = await loadClient()
   mod.apply(world.ctx)

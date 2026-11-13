@@ -1473,7 +1473,7 @@ describe('plan: workspace targets', () => {
 
 // #region execute: trash mode (SPEC §4.4/§5.5) -------------------------------------------------
 
-describe('session trash cross-device precheck (0.6.4)', () => {
+describe('session trash cross-device precheck (0.6.3)', () => {
   test('a session log directory on another device is refused at plan time', async () => {
     const world = await makeWorld({ sessions: [{ id: 's1', content: 'x\n' }] })
     const sessionDir = world.dirOfSession('s1')
@@ -3637,7 +3637,7 @@ async function writeQueueDocument(world, document) {
   )
 }
 
-describe('session trash availability precheck (0.6.4)', () => {
+describe('session trash availability precheck (0.6.3)', () => {
   test('an unusable trash location blocks a session-only trash plan at plan time', async () => {
     const world = await makeWorld({ sessions: [{ id: 's1', content: 'x\n' }] })
     const fsOps = { stat: async () => { throw new Error('EIO: trash volume unavailable') } }
@@ -3647,7 +3647,7 @@ describe('session trash availability precheck (0.6.4)', () => {
   })
 })
 
-describe('effective working-directory probe (0.6.4)', () => {
+describe('effective working-directory probe (0.6.3)', () => {
   test('a throwing effective-cwd probe blocks the workspace instead of falling back to the header', async () => {
     const world = await makeWorld({ workspaces: [{ id: 'ws1', files: { 'a.txt': 'x' } }] })
     world.agentStore.set('s1', {
@@ -3665,7 +3665,7 @@ describe('effective working-directory probe (0.6.4)', () => {
   })
 })
 
-describe('deferred in-flight ownership (0.6.4)', () => {
+describe('deferred in-flight ownership (0.6.3)', () => {
   beforeEach(resetDeferredMarker)
 
   test('a fresh in-flight entry is not overwritten by defer or removed by cancel', async () => {
@@ -3694,7 +3694,7 @@ describe('deferred in-flight ownership (0.6.4)', () => {
   })
 })
 
-describe('deferred partial execution (0.6.4)', () => {
+describe('deferred partial execution (0.6.3)', () => {
   beforeEach(resetDeferredMarker)
 
   test('a blocked root stays queued while the rest of the entry is deleted', async () => {
@@ -3904,7 +3904,7 @@ describe('audit log (SPEC §5.9)', () => {
     assert.equal(inventory.audit.recent[0].mode, 'trash')
     assert.equal(inventory.audit.recent[0].status, 'trashed')
     assert.ok(inventory.audit.recent[0].bytes > 0)
-    // 0.6.4: per-item detail and the trash entry ids travel with the record.
+    // 0.6.3: per-item detail and the trash entry ids travel with the record.
     assert.deepEqual(inventory.audit.recent[0].items, [{ kind: 'session', id: 's2', status: 'trashed', code: null }])
     assert.equal(inventory.audit.recent[0].entryIds.length, 1)
     assert.equal(typeof inventory.audit.recent[0].entryIds[0], 'string')
@@ -4051,7 +4051,7 @@ describe('audit log (SPEC §5.9)', () => {
       assert.ok(Array.isArray(inventory.audit.recent), 'the overview stays total')
       // Nothing reached the unwritable file: the log is diagnostic and never persisted a torn state.
       assert.deepEqual(await readAudit(world), [])
-      // 0.6.4: the failure is visible instead of the page pretending an audit trail exists.
+      // 0.6.3: the failure is visible instead of the page pretending an audit trail exists.
       assert.equal(inventory.audit.healthy, false)
       assert.ok(inventory.audit.writeFailures >= 1)
       assert.equal(typeof inventory.audit.lastError, 'string')
@@ -4061,7 +4061,7 @@ describe('audit log (SPEC §5.9)', () => {
   })
 })
 
-describe('audit module serialization and health (0.6.4)', () => {
+describe('audit module serialization and health (0.6.3)', () => {
   test('concurrent appends are serialized and health reports the last write', async () => {
     const root = path.join(TMP, `audit-module-${++caseId}`)
     await fsp.mkdir(root, { recursive: true })

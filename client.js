@@ -57,7 +57,7 @@ window.__ModuleLoader__.load({
     const CONFIRM_COOLDOWN_MS = 400
     /**
      * Review selection edits update the UI immediately and are coalesced into one plan request
-     * after this idle window (SPEC §9, 0.6.4 D). Rapid clicks must not queue one round trip each.
+     * after this idle window (SPEC §9, 0.6.3 D). Rapid clicks must not queue one round trip each.
      */
     const PLAN_DEBOUNCE_MS = 350
     /**
@@ -137,7 +137,7 @@ window.__ModuleLoader__.load({
     const PAGE_PREFS_LIMIT_MAX = 2000
     /** Host limit for one `POST api/cleanup.usage` request (SPEC §4.10). */
     const USAGE_CHUNK_MAX = 200
-    /** Ids per `POST api/cleanup.measure` request while a page measures (0.6.4 F). */
+    /** Ids per `POST api/cleanup.measure` request while a page measures (0.6.3 F). */
     const MEASURE_CHUNK_SIZE = 200
     /** Cache-hit rates are shown rounded to whole percent. */
     const USAGE_PERCENT_FORMAT = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 })
@@ -1484,7 +1484,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Restore the page layout (`tab/sort/filter/limit`) from `PAGE_PREFS_STORAGE_KEY` (0.6.4 G).
+     * Restore the page layout (`tab/sort/filter/limit`) from `PAGE_PREFS_STORAGE_KEY` (0.6.3 G).
      *
      * Every field is validated on its own: a corrupted blob, an unknown enum value or a nonsense
      * limit simply keeps the page default for that field instead of failing the whole restore.
@@ -2034,7 +2034,7 @@ window.__ModuleLoader__.load({
       return String(eventCount === null ? '' : eventCount) + ':' + String(sizeBytes === null ? '' : sizeBytes)
     }
 
-    /** Max `items`/`entries` per audit record the Host writes (SPEC §5.9, 0.6.4 A1). */
+    /** Max `items`/`entries` per audit record the Host writes (SPEC §5.9, 0.6.3 A1). */
     const AUDIT_ITEMS_MAX = 64
     const AUDIT_ENTRIES_MAX = 50
 
@@ -2047,7 +2047,7 @@ window.__ModuleLoader__.load({
         const target = normalizeDeferredTarget(rawTargets[i])
         if (target !== null) targets.push(target)
       }
-      // 0.6.4: a delete/purge record carries the per-item outcome, so "recent deletions" can say
+      // 0.6.3: a delete/purge record carries the per-item outcome, so "recent deletions" can say
       // how many of them failed instead of only the aggregate status.
       const items = []
       const rawItems = Array.isArray(value.items) ? value.items : []
@@ -2111,7 +2111,7 @@ window.__ModuleLoader__.load({
         const record = normalizeAuditRecord(rawRecent[i])
         if (record !== null) recent.push(record)
       }
-      // 0.6.4 A2/H: write health. A Host that could not read the log also reports healthy:false with
+      // 0.6.3 A2/H: write health. A Host that could not read the log also reports healthy:false with
       // `lastError`, so the section can explain an empty-looking history instead of hiding it.
       const rawHealth = value.health && typeof value.health === 'object' && !Array.isArray(value.health)
         ? value.health
@@ -2471,7 +2471,7 @@ window.__ModuleLoader__.load({
     // ------------------------------------------------------------------- HTTP
 
     /**
-     * One deadline-guarded abort signal for a single `request` call (SPEC §8, 0.6.4 H).
+     * One deadline-guarded abort signal for a single `request` call (SPEC §8, 0.6.3 H).
      *
      * One manual `AbortController` + `setTimeout`, never `AbortSignal.timeout`/`any`: the timer
      * handle and the forwarded listener have to be released deterministically when the call
@@ -3597,7 +3597,7 @@ window.__ModuleLoader__.load({
       const state = context.state
       const catalog = context.catalog
       const plan = state.plan && typeof state.plan === 'object' ? state.plan : null
-      // 0.6.4 D: a re-plan no longer freezes the whole review. `selectionLocked` is the destructive
+      // 0.6.3 D: a re-plan no longer freezes the whole review. `selectionLocked` is the destructive
       // in-flight lock (deleting/deferring); `semanticsLocked` additionally covers a re-plan, because
       // changing mode/include switches while the plan is being recomputed would race the request.
       const selectionLocked = state.phase === 'deleting' || state.phase === 'deferring'
@@ -3870,7 +3870,7 @@ window.__ModuleLoader__.load({
           )
           : null,
         // The typed confirmation can disappear with the new plan (permanent -> trash); explain the
-        // lost input here because the input itself is no longer rendered (0.6.4 D).
+        // lost input here because the input itself is no longer rendered (0.6.3 D).
         state.typedReset === true && confirmation === null
           ? h('div', { className: 'dsh-cleanup-muted', key: 'typed-reset' }, t('dialog.typedReset'))
           : null,
@@ -4551,7 +4551,7 @@ window.__ModuleLoader__.load({
               : null,
             // A workspace clear walks the workspace in batches; the batch number and the folded
             // count are the only honest progress facts (the Host does not stream per-item events).
-            // 0.6.4 E: when the pre-flight total is known it becomes the progress denominator.
+            // 0.6.3 E: when the pre-flight total is known it becomes the progress denominator.
             state.clear !== null
               ? h('span', { className: 'dsh-cleanup-progress-items' },
                 state.clear.total > 0
@@ -4573,7 +4573,7 @@ window.__ModuleLoader__.load({
             })),
           ),
           h('button', { key: 'cancel', type: 'button', className: 'dsh-cleanup-btn', disabled: true }, t('action.cancel')),
-          // 0.6.4 E: stop the walk between batches without cancelling the one in flight.
+          // 0.6.3 E: stop the walk between batches without cancelling the one in flight.
           state.clear !== null && state.clear.stopRequested !== true
             ? h('button', {
               key: 'stop-after-batch',
@@ -6307,7 +6307,7 @@ window.__ModuleLoader__.load({
                   h(Badge, { tone: tone }, statusText),
                   h('span', { className: 'dsh-cleanup-deferred-result-detail' }, detail),
                 ),
-                // 0.6.4 B2/H: the queue write failed, so the entry may run again next start.
+                // 0.6.3 B2/H: the queue write failed, so the entry may run again next start.
                 persistenceError !== null
                   ? h('div', { className: 'dsh-cleanup-muted' }, t('deferred.persistenceError', { error: persistenceError }))
                   : null,
@@ -6589,7 +6589,7 @@ window.__ModuleLoader__.load({
       const children = [
         h('div', { className: 'dsh-cleanup-section-title', key: 'title' }, t('audit.title')),
       ]
-      // 0.6.4 H: a log that cannot be written is a silent data-loss mode; say so above the list.
+      // 0.6.3 H: a log that cannot be written is a silent data-loss mode; say so above the list.
       if (audit.health && audit.health.healthy === false) {
         const lastError = typeof audit.health.lastError === 'string' && audit.health.lastError !== ''
           ? audit.health.lastError.slice(0, 120)
@@ -6649,7 +6649,7 @@ window.__ModuleLoader__.load({
             metaChildren.push(h(Sep, { key: 'sep-targets' }))
             metaChildren.push(h('span', { key: 'targets', title: targetsText }, middleEllipsis(targetsText, 80)))
           }
-          // 0.6.4 A1/H: per-item outcomes make a partial delete visible in the recent list.
+          // 0.6.3 A1/H: per-item outcomes make a partial delete visible in the recent list.
           if (Array.isArray(record.items) && record.items.length > 0) {
             let itemFailures = 0
             for (let i = 0; i < record.items.length; i += 1) {
@@ -7144,7 +7144,7 @@ window.__ModuleLoader__.load({
               'aria-busy': state.inventoryLoading === true ? 'true' : undefined,
               onClick: function () { store.refresh() },
             }, state.inventoryLoading === true ? h(Spinner, null) : null, t('page.refresh')),
-            // 0.6.4 F: chunked measuring shows progress and can be stopped between chunks.
+            // 0.6.3 F: chunked measuring shows progress and can be stopped between chunks.
             state.measuring
               ? h('span', {
                 key: 'measure-progress',
@@ -7523,7 +7523,7 @@ window.__ModuleLoader__.load({
       const dialogStore = createStore(initialDialogState())
       let dialogAbort = null
       let dialogToken = 0
-      /** Pending re-plan timer for coalesced selection edits (0.6.4 D). */
+      /** Pending re-plan timer for coalesced selection edits (0.6.3 D). */
       let planDebounceTimer = null
       let doneTimer = null
       /**
@@ -7621,7 +7621,7 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Coalesce rapid review-selection edits into one plan request (SPEC §9, 0.6.4 D).
+       * Coalesce rapid review-selection edits into one plan request (SPEC §9, 0.6.3 D).
        *
        * The checkbox/selection UI updates immediately; the in-flight plan is cancelled at once (its
        * response is dropped by the token) and a fresh plan is sent once the edits stop for
@@ -8044,7 +8044,7 @@ window.__ModuleLoader__.load({
             })
             return
           }
-          // 0.6.4 D: the typed folder name survives a re-plan while the expected name is the same;
+          // 0.6.3 D: the typed folder name survives a re-plan while the expected name is the same;
           // when the plan now asks for a different one (or none), clearing it is explained.
           const current = dialogStore.getSnapshot()
           const previousConfirmation = current.plan && isTypedConfirmation(current.plan.confirmation)
@@ -8129,7 +8129,7 @@ window.__ModuleLoader__.load({
           batches: 0,
           done: { count: 0, bytes: 0, failed: 0 },
           stop: null,
-          /** The user asked to stop after the batch on the wire (0.6.4 E). */
+          /** The user asked to stop after the batch on the wire (0.6.3 E). */
           stopRequested: false,
         }
       }
@@ -8570,7 +8570,7 @@ window.__ModuleLoader__.load({
       /**
        * Store patch for a new selection: exclusions are recorded immediately, while the typed
        * confirmation is left alone — whether it survives is decided when the re-plan lands
-       * (0.6.4 D: same `confirmation.expected` keeps it, a different one clears it with a notice).
+       * (0.6.3 D: same `confirmation.expected` keeps it, a different one clears it with a notice).
        */
       function selectionPatch(state, selection) {
         return {
@@ -8959,7 +8959,7 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Ask a running workspace clear to stop once the batch on the wire finishes (0.6.4 E).
+       * Ask a running workspace clear to stop once the batch on the wire finishes (0.6.3 E).
        *
        * Only a flag is set: the current batch still completes (its result must be counted and the
        * Host has already started mutating), and `advanceClear` settles with `stopped` instead of
@@ -9004,7 +9004,7 @@ window.__ModuleLoader__.load({
           batches: clear.batches + 1,
         })
         notifyMutation()
-        // 0.6.4 E: a stop request takes effect between batches, never mid-batch. The remainder is
+        // 0.6.3 E: a stop request takes effect between batches, never mid-batch. The remainder is
         // the queue plus the unread part of a truncated pre-flight total (queued is 0 when only
         // unread pages are left, so it would understate the work that remains).
         if (next.stopRequested === true) {
@@ -9086,7 +9086,7 @@ window.__ModuleLoader__.load({
 
       /**
        * Settle a stopped clear if the user asked for it while a plan/refill/resync request was in
-       * flight (0.6.4 E). Called before every continuation step: a stop request must stop the walk,
+       * flight (0.6.3 E). Called before every continuation step: a stop request must stop the walk,
        * not wait until after the next batch or a page refresh.
        * @returns {boolean} whether the clear was stopped (and settled).
        */
@@ -9405,7 +9405,7 @@ window.__ModuleLoader__.load({
         : { usage: false, projectionCache: false, openPath: false }
       const catalogApi = deps.catalog && typeof deps.catalog.getSnapshot === 'function' ? deps.catalog : null
       const scheduleRestoreRefresh = typeof deps.scheduleRestoreRefresh === 'function' ? deps.scheduleRestoreRefresh : null
-      // 0.6.4 G: a reopened settings page returns to the last tab/sort/filter/limit; each stored
+      // 0.6.3 G: a reopened settings page returns to the last tab/sort/filter/limit; each stored
       // field is validated independently (see readPagePrefs).
       const pageStore = createStore(Object.assign(initialPageState(), readPagePrefs()))
       // One tracker for every request family (inventory/trash/deferred/settings/...):
@@ -9558,7 +9558,7 @@ window.__ModuleLoader__.load({
           // Do not leave a stale value in the persisted layout after the fallback above: the next
           // mount must not restore it again.
           writePagePrefs(pageStore.getSnapshot())
-          // A restored tab (0.6.4 G) has to load its own data: the setters do that on a user click,
+          // A restored tab (0.6.3 G) has to load its own data: the setters do that on a user click,
           // but the page can mount directly into Trash or Settings from `pagePrefs`.
           const activeTab = pageStore.getSnapshot()
           if (activeTab.tab === 'trash' && activeTab.trashLoaded !== true && activeTab.trashLoading !== true) {
@@ -10315,7 +10315,7 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Measure the requested workspaces/Sessions in serial chunks (SPEC §4.2, 0.6.4 F).
+       * Measure the requested workspaces/Sessions in serial chunks (SPEC §4.2, 0.6.3 F).
        *
        * One request per `MEASURE_CHUNK_SIZE` ids keeps a 2000-Session page from becoming a single
        * minutes-long request: each finished chunk is merged into `measured` immediately and moves
@@ -10421,7 +10421,7 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Stop the running measure walk between chunks (0.6.4 F). The chunk on the wire still lands
+       * Stop the running measure walk between chunks (0.6.3 F). The chunk on the wire still lands
        * (its sizes are merged); the notice explains why the remaining rows stay unmeasured.
        */
       function stopMeasure() {
@@ -10722,7 +10722,7 @@ window.__ModuleLoader__.load({
         return openPath(lastOpenTarget.kind, lastOpenTarget.id)
       }
 
-      /** Persist the layout-only page preferences after a setter changed them (0.6.4 G). */
+      /** Persist the layout-only page preferences after a setter changed them (0.6.3 G). */
       function persistPagePrefs() {
         writePagePrefs(pageStore.getSnapshot())
       }
@@ -11375,7 +11375,7 @@ window.__ModuleLoader__.load({
         refreshing: false,
         typed: '',
         // True when a re-plan cleared the typed confirmation because `confirmation.expected`
-        // changed; the review explains it instead of silently emptying the field (0.6.4 D).
+        // changed; the review explains it instead of silently emptying the field (0.6.3 D).
         typedReset: false,
         error: null,
         failureStage: null,
@@ -11417,7 +11417,7 @@ window.__ModuleLoader__.load({
         measured: { workspaces: {}, sessions: {} },
         measuring: false,
         measureError: null,
-        // 0.6.4 F: chunked measuring reports {done,total}, accepts a stop, and explains a stop.
+        // 0.6.3 F: chunked measuring reports {done,total}, accepts a stop, and explains a stop.
         measureProgress: null,
         measureStopRequested: false,
         measureNotice: null,

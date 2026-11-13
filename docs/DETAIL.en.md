@@ -15,7 +15,7 @@ kind: "package-bundle"
 
 DSH itself only unregisters a workspace — the folder, its files, and its Session history stay on disk — and Sessions can only be archived, never deleted. `dsh-cleanup` fills that gap while keeping the destructive surface narrow: targets are addressed by DSH identity, never by arbitrary path; every deletion is planned, reviewed, and confirmed; and the default outcome is a recoverable trash.
 
-- Package: `dsh-cleanup` 0.6.4
+- Package: `dsh-cleanup` 0.6.3
 - Repository: <https://github.com/xiaoyangren6514/dsh-cleanup>
 - License: MIT © 2026 fly
 - Tested with: DSH 0.2.2-rc.1 / 0.2.2-rc.2
@@ -97,7 +97,7 @@ One plan carries at most 64 targets (the Host's safety budget). When the checked
 - **Restore restores the files and, best effort, the DSH state.** v2 trash metadata records a workspace's display title and a Session's pin/archive state: restoring a workspace registers it again (`reRegistered`), restoring a Session puts its pin/archive set back (`stateRestored`). Both are best-effort and reported as `warnings` without failing the restore. When the original path is occupied, a workspace entry can be **restored as a copy** (`<name> (restored)`); a Session log directory cannot be renamed, so the occupying path must move first. v1 entries written by 0.6.2 and earlier remain listable, restorable and purgeable.
 - **The safety switch is re-read at execute.** The permanent-deletion switch is checked at plan time and again at execute: turning it off after a plan was produced refuses with `PERMANENT_DISABLED` instead of honoring the plan's stale copy.
 
-### Observability and long-running work (0.6.4)
+### Observability and long-running work (0.6.3)
 
 - **A more honest audit trail.** A deletion record carries per-item results (≤64 `{kind,id,status,code}`) and the `entryIds` of the items that actually moved; a purge records what it really removed (id/kind/title/originalPath, ≤50). The log's write health (`healthy/writeFailures/lastWriteAt/lastError/lastRotationError`) travels with the inventory, and Recent deletions warns separately when the log stopped recording or rotation failed; appends are serialized per instance so concurrent records cannot race a rotation.
 - **Deferred entries execute what they can.** When a queued entry names several roots, blocked roots that a blocker attributes to them stay queued (a run only claims entries that existed when it started, so it cannot retry its own remainder) while the rest is deleted. A blocker on a swept-in item (for example a subagent log) keeps the whole entry untouched. If the deletion ran but the queue could not be written, the result carries `persistenceError` and the entry stays for the next start.
@@ -146,10 +146,10 @@ For Sessions opened in the current Host, the review dialog offers **Schedule del
 
 ```sh
 # From npm (after publication)
-dsh plugin --profile web add dsh-cleanup@0.6.4
+dsh plugin --profile web add dsh-cleanup@0.6.3
 
-# From GitHub, pinned to the v0.6.4 tag (a fixed commit; swap in `git rev-parse v0.6.4` for the raw sha)
-dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.4
+# From GitHub, pinned to the v0.6.3 tag (a fixed commit; swap in `git rev-parse v0.6.3` for the raw sha)
+dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.3
 
 # From a local checkout
 git clone https://github.com/xiaoyangren6514/dsh-cleanup.git

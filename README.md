@@ -16,7 +16,7 @@ Since 0.6.0 it also shows what it deletes: an opt-in **usage** view (per-Session
 | | |
 |---|---|
 | Package | `dsh-cleanup` (imports no `@deepseek-ai/*` package, zero runtime dependencies) |
-| Version | 0.6.4 |
+| Version | 0.6.3 |
 | Repository | <https://github.com/xiaoyangren6514/dsh-cleanup> |
 | Author | fly |
 | License | [MIT](LICENSE) |
@@ -100,10 +100,10 @@ Install the bundle into a DSH profile, then refresh the Web page once. The Host 
 
 ```sh
 # From npm (after the package is published)
-dsh plugin --profile web add dsh-cleanup@0.6.4
+dsh plugin --profile web add dsh-cleanup@0.6.3
 
-# From GitHub, pinned to the v0.6.4 tag (a fixed commit; swap in `git rev-parse v0.6.4` for the raw sha)
-dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.4
+# From GitHub, pinned to the v0.6.3 tag (a fixed commit; swap in `git rev-parse v0.6.3` for the raw sha)
+dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.3
 
 # From a local checkout
 git clone https://github.com/xiaoyangren6514/dsh-cleanup.git

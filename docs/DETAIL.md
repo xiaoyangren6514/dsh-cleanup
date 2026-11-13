@@ -15,7 +15,7 @@ kind: "package-bundle"
 
 DSH 本身对工作区只做「移除注册」——目录、文件与会话历史都留在磁盘上；对会话只有「归档」，没有删除。`dsh-cleanup` 补上这一段，同时把破坏面收窄：目标只能用 DSH 的身份指定、绝不用任意路径；每次删除都经过计划、复核与确认；默认结果是可恢复的回收站。
 
-- 包名：`dsh-cleanup` 0.6.4
+- 包名：`dsh-cleanup` 0.6.3
 - 仓库：<https://github.com/xiaoyangren6514/dsh-cleanup>
 - 许可证：MIT © 2026 fly
 - 验证环境：DSH 0.2.2-rc.1 / 0.2.2-rc.2
@@ -97,7 +97,7 @@ Host 平台有目录打开器时（macOS、Windows、Linux；`inventory.capabili
 - **恢复不再只是搬文件。** v2 回收站元数据记录工作区标题与会话的置顶/归档状态：恢复工作区会重新注册（`reRegistered`），恢复会话会把置顶/归档放回去（`stateRestored`）；两者都是尽力而为，失败只作为 `warnings` 报告，文件仍然恢复。原路径被占用时，工作区条目可以「恢复为副本」（`<原名> (restored)`），会话日志目录不能改名因此仍要求先移走占用项；0.6.2 及更早的 v1 条目照常可列出、恢复、清空。
 - **执行前会再读一次安全开关。** 永久删除开关在计划时与执行时各查一次；计划生成后关闭开关，执行以 `PERMANENT_DISABLED` 拒绝，而不是沿用计划里的旧值。
 
-### 可观测性与长任务体验（0.6.4）
+### 可观测性与长任务体验（0.6.3）
 
 - **审计更诚实。** 删除记录带每项结果（≤64 条 `{kind,id,status,code}`）与实际入回收站的 `entryIds`；清空回收站记录真正删掉的条目（id/kind/title/originalPath，≤50）。审计写入健康（`healthy/writeFailures/lastWriteAt/lastError/lastRotationError`）随盘点返回，「最近删除」在日志停止写入或轮转失败时分别显示警告；同一实例的追加写串行化，轮转不会再和并发记录互相踩踏。
 - **延迟队列部分执行。** 一次排队的多个目标里，被阻塞且能归因到排队根目标的会留在队列（本次启动只认启动时已存在的条目，不会重复尝试自己的残余），其余照常删除；被阻塞的是扫入的子代理日志等不可拆目标时，整条保持不动。删除已执行但队列写失败时结果带 `persistenceError`，条目留到下次启动。
@@ -146,10 +146,10 @@ DSH 会让 Agent 及其会话写句柄存活到进程结束，并且没有公开
 
 ```sh
 # 从 npm 安装（包发布之后）
-dsh plugin --profile web add dsh-cleanup@0.6.4
+dsh plugin --profile web add dsh-cleanup@0.6.3
 
-# 从 GitHub 安装（v0.6.4 是 tag，指向固定提交；需要严格 pin 时用 `git rev-parse v0.6.4` 换成完整 sha）
-dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.4
+# 从 GitHub 安装（v0.6.3 是 tag，指向固定提交；需要严格 pin 时用 `git rev-parse v0.6.3` 换成完整 sha）
+dsh plugin --profile web add github:xiaoyangren6514/dsh-cleanup#v0.6.3
 
 # 从本地 checkout 安装
 git clone https://github.com/xiaoyangren6514/dsh-cleanup.git

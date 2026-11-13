@@ -5,9 +5,35 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.4] - 2026-11-12
+## [0.6.3] - 2026-11-13
 
 ### Added
+
+- **Undo after a deletion.** A fully successful trash-mode review result now offers `撤销删除`: the
+  client restores each result item by its new `entryId` through `trash.restore`, replaces the summary
+  with the per-entry undo result, and offers `打开回收站` on the settings surface. The result dwell
+  grew from 3.2 s to 8 s and pauses while the pointer is over it or focus is inside it.
+- **The Sessions list is searchable and activity-aware.** A search box filters by title, Session id
+  and recorded `cwd`; the header reports `shown / total` plus matches; an empty result renders a
+  localized no-match state with a clear action. A new **least recently active** sort orders by
+  activity time ascending, and each row's time column is its most recent activity with the creation
+  time in the `title`.
+- **A summary line on the storage-cleanup page.** Workspace/session counts, trash entries and bytes,
+  scheduled deletions, and `数据更新于 <generatedAt>`; the refresh button shows a spinner and
+  `aria-busy` while reloading, and the Trash tab carries its entry count as a badge.
+- **Trash restore now restores the DSH state.** Trash metadata moved to `version: 2` and records a
+  workspace's display title and a Session's pin/archive set. `trash.restore` re-registers a restored
+  workspace (`reRegistered`), puts a Session's recorded set back (`stateRestored`), and reports
+  best-effort failures as `warnings` without failing the restore. A workspace entry whose original
+  path came back can be restored as a copy (`restoreMode: "sibling"`, Host-generated `<name>
+  (restored)`); a Session log directory still refuses that mode because renaming it breaks the DSH
+  layout. Entries written by 0.6.2 and earlier (`version: 1`) remain listable, restorable and
+  purgeable.
+- **Deletion results carry `entryId`** for every trashed item, and the review dialog's failed state
+  can trim a `TOO_MANY_TARGETS` selection to the first 64 planned targets and re-plan
+  (`保留前 64 项并重新复核`) instead of dead-ending.
+- **Selection is capped in the UI**: checking a 65th workspace/session is refused with an inline
+  notice before a doomed plan is ever requested.
 
 - **The audit trail now says what happened, and whether it is still recording.** A deletion record
   carries bounded per-item detail (`items`, ≤64 `{kind,id,status,code}`) plus the trash `entryIds` of
@@ -44,94 +70,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- **A wall-clock rollback can no longer starve a requeued remainder.** Run eligibility is the set of
-  entry ids present when the run claimed the queue (not a timestamp ordering), so the same run cannot
-  re-claim its own remainder, an entry queued mid-run waits, and an old entry is not skipped forever
-  after a restored VM / timezone change.
-- **A start-up audit record describes what actually ran.** Its `targets` are the executed roots (not
-  every root the entry named, which may still be queued), and it carries the executed bytes and trash
-  `entryIds`; the retained roots stay in the run summary.
-- **A wedged effective-working-directory probe fails closed again.** The plugin no longer swallows that
-  probe failure at the client facade, so a workspace a live Session is working in is refused instead
-  of falling back to the header `cwd`.
-- **A failed audit rotation is visible.** `lastRotationError` is reported in the audit view while
-  appends continue, instead of disappearing behind `healthy: true`.
-- **Replacing or cancelling a freshly claimed queue entry answers `DEFERRED_BUSY`.** Another Host that
-  is already executing the entry keeps its claim, so a new defer cannot silently lose that deletion.
-- **A failed queued root stays retryable after a partial execution**, and a requeued remainder drops
-  the permanent typed-name anchor when the workspace it named is no longer part of it; otherwise the
-  next start would wrongly answer `PATH_CHANGED`.
-- **Audit rotation failures and recovery are reported correctly.** A `rename` failure is no longer
-  swallowed (`lastRotationError` is set while appends continue), and a successful write after a failed
-  one makes `healthy` true again while `writeFailures` keeps the historical count.
-- **A stop requested during a clear's plan/refill/resync window is honoured before the next
-  mutation.** The refill writes back the latest snapshot (no more erasing `stopRequested`) and an
-  un-checked row or tree node is removed from the queued tail, so a later batch can neither keep
-  clearing after a stop nor trip `UNCHECKED_TARGET_LEAK`.
-- **Restored Trash/Settings tabs show their own error instead of an endless skeleton** when the
-  inventory request fails, because the page now loads that tab's data on failure and renders the
-  reason.
-- **Review semantics fixes:** a typed name survives include-sessions/descendant toggles whose expected
-  name did not change, a re-checked row no longer drops the dialog back to the planning skeleton, the
-  persisted show-more limit is clamped to the readable bound, and measurement progress counts only
-  ids the Host actually answered.
-- **A failed queue write no longer aborts the whole start-up run.** `finalize`/`requeue`/claim helper
-  write failures are caught: the result is reported with `persistenceError`, the in-flight marker is
-  released when possible, and the remaining entries still run.
-- **The request deadline guard no longer leaves a timer behind.** It uses one `AbortController` plus a
-  cleared timer (forwarding the caller's abort), instead of `AbortSignal.timeout`/`any` whose deadline
-  signal lived until its deadline even after the request settled.
-- **The audit log can no longer claim records it did not persist.** `recent` is updated only after a
-  successful append; a failed append is counted in the health block instead.
-
-### Changed
-
-- SPEC (§4.1, §4.3, §4.7, §5.8, §5.9, §9, §10), README (both languages), DETAIL (both languages) and
-  the FAQ document the new audit/health shape, partial queue execution, cross-volume precheck, the
-  review debounce/stop/measure behavior and the persisted page preferences.
-- Test baseline grew from 515 to 548 passing tests; `npm run check` still passes (16 routes,
-  38 error + 28 warning codes, 526 locale keys, 29 shipped paths).
-
-## [0.6.3] - 2026-11-12
-
-### Added
-
-- **Undo after a deletion.** A fully successful trash-mode review result now offers `撤销删除`: the
-  client restores each result item by its new `entryId` through `trash.restore`, replaces the summary
-  with the per-entry undo result, and offers `打开回收站` on the settings surface. The result dwell
-  grew from 3.2 s to 8 s and pauses while the pointer is over it or focus is inside it.
-- **The Sessions list is searchable and activity-aware.** A search box filters by title, Session id
-  and recorded `cwd`; the header reports `shown / total` plus matches; an empty result renders a
-  localized no-match state with a clear action. A new **least recently active** sort orders by
-  activity time ascending, and each row's time column is its most recent activity with the creation
-  time in the `title`.
-- **A summary line on the storage-cleanup page.** Workspace/session counts, trash entries and bytes,
-  scheduled deletions, and `数据更新于 <generatedAt>`; the refresh button shows a spinner and
-  `aria-busy` while reloading, and the Trash tab carries its entry count as a badge.
-- **Trash restore now restores the DSH state.** Trash metadata moved to `version: 2` and records a
-  workspace's display title and a Session's pin/archive set. `trash.restore` re-registers a restored
-  workspace (`reRegistered`), puts a Session's recorded set back (`stateRestored`), and reports
-  best-effort failures as `warnings` without failing the restore. A workspace entry whose original
-  path came back can be restored as a copy (`restoreMode: "sibling"`, Host-generated `<name>
-  (restored)`); a Session log directory still refuses that mode because renaming it breaks the DSH
-  layout. Entries written by 0.6.2 and earlier (`version: 1`) remain listable, restorable and
-  purgeable.
-- **Deletion results carry `entryId`** for every trashed item, and the review dialog's failed state
-  can trim a `TOO_MANY_TARGETS` selection to the first 64 planned targets and re-plan
-  (`保留前 64 项并重新复核`) instead of dead-ending.
-- **Selection is capped in the UI**: checking a 65th workspace/session is refused with an inline
-  notice before a doomed plan is ever requested.
-
-### Fixed
-
 - **A workspace folder is no longer deleted while another Host process is writing inside it.** The
   workspace inspection now probes the persistence write lease of the stored Sessions inside the
   folder (bounded to the first 32 per pass) at plan time, at admission, and immediately before the
   mutation; a held lease is `WORKSPACE_HAS_LIVE_SESSIONS`. The inventory overview deliberately does
   not run this probe, so its rows stay cheap.
 - **An effective-working-directory probe failure fails closed.** A live Agent whose
-  `workingDirectory.get()` throws is no longer treated as if it still worked in its header `cwd`; the
-  workspace inspection refuses instead of guessing.
+  `workingDirectory.get()` throws is no longer treated as if it still worked in its header `cwd`;
+  the plugin facade no longer swallows that throw, and the workspace inspection refuses instead of
+  guessing.
 - **The permanent-deletion switch is re-read at execute.** A plan produced while the switch was on
   answers `PERMANENT_DISABLED` if it is turned off before execution; the plan's stale copy is never
   trusted.
@@ -156,13 +103,53 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   EXISTING_DATA_STAYS` with the localized field label) and fall back to the Host message only for an
   unknown code.
 
+- **A wall-clock rollback can no longer starve a requeued remainder.** Run eligibility is the set of
+  entry ids present when the run claimed the queue (not a timestamp ordering), so the same run cannot
+  re-claim its own remainder, an entry queued mid-run waits, and an old entry is not skipped forever
+  after a restored VM / timezone change.
+- **A start-up audit record describes what actually ran.** Its `targets` are the executed roots (not
+  every root the entry named, which may still be queued), and it carries the executed bytes and trash
+  `entryIds`; the retained roots stay in the run summary.
+  probe failure at the client facade, so a workspace a live Session is working in is refused instead
+  of falling back to the header `cwd`.
+  appends continue, instead of disappearing behind `healthy: true`.
+- **Replacing or cancelling a freshly claimed queue entry answers `DEFERRED_BUSY`.** Another Host that
+  is already executing the entry keeps its claim, so a new defer cannot silently lose that deletion.
+- **A failed queued root stays retryable after a partial execution**, and a requeued remainder drops
+  the permanent typed-name anchor when the workspace it named is no longer part of it; otherwise the
+  next start would wrongly answer `PATH_CHANGED`.
+- **Audit rotation failures are reported and recovery is honest.** A `rename` failure is no longer
+  swallowed: `lastRotationError` is set, the audit view shows it while appends continue, and a
+  successful write after a failed one makes `healthy` true again while `writeFailures` keeps the
+  historical count.
+- **A stop requested during a clear's plan/refill/resync window is honoured before the next
+  mutation.** The refill writes back the latest snapshot (no more erasing `stopRequested`), an
+  un-checked row or tree node is filtered out when the next batch is formed (a re-check keeps it
+  eligible again), so a later batch can neither keep clearing after a stop nor trip
+  `UNCHECKED_TARGET_LEAK`.
+- **Restored Trash/Settings tabs show their own error instead of an endless skeleton** when the
+  inventory request fails, because the page now loads that tab's data on failure and renders the
+  reason.
+- **Review semantics fixes:** a typed name survives include-sessions/descendant toggles whose expected
+  name did not change, a re-checked row no longer drops the dialog back to the planning skeleton, the
+  persisted show-more limit is clamped to the readable bound, and measurement progress counts only
+  ids the Host actually answered.
+- **A failed queue write no longer aborts the whole start-up run.** `finalize`/`requeue`/claim helper
+  write failures are caught: the result is reported with `persistenceError`, the in-flight marker is
+  released when possible, and the remaining entries still run.
+- **The request deadline guard no longer leaves a timer behind.** It uses one `AbortController` plus a
+  cleared timer (forwarding the caller's abort), instead of `AbortSignal.timeout`/`any` whose deadline
+  signal lived until its deadline even after the request settled.
+- **The audit log can no longer claim records it did not persist.** `recent` is updated only after a
+  successful append; a failed append is counted in the health block instead.
+
 ### Changed
 
-- Docs, SPEC (§4.2–§4.5, §4.8, §4.10, §5.2, §5.3, §5.7, §8–§11), README (both languages), DETAIL
-  (both languages) and the FAQ describe the new behavior, the explicit settings effect boundaries,
-  the bounded cross-process workspace probe, and the best-effort restore contract.
-- Test baseline grew from 489 to 515 passing tests (engine, client, usage, index); `npm run check`
-  still passes (16 routes, 38 error + 28 warning codes, 507 locale keys, 29 shipped paths).
+- docs/SPEC/README/DETAIL/FAQ now describe the audit/health shape, partial queue execution,
+  cross-volume precheck, the review debounce/stop/measure behavior, the persisted page preferences,
+  and the explicit settings effect boundaries.
+- Test baseline grew from 489 to 548 passing tests; `npm run check` still passes (16 routes,
+  38 error + 28 warning codes, 526 locale keys, 29 shipped paths).
 
 ## [0.6.2] - 2026-11-12
 
