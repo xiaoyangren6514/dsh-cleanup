@@ -709,6 +709,33 @@ describe('route payloads', () => {
     await dispose()
   })
 
+  test('a throwing workingDirectory service reaches the engine as a fail-closed probe', async () => {
+    const world = await makeWorld()
+    const elsewhere = path.join(world.root, 'elsewhere')
+    const get = (name) => {
+      if (name === 'agents') {
+        return {
+          list: () => [{ id: 's1', status: 'idle', session: { id: 's1', header: { cwd: elsewhere } } }],
+        }
+      }
+      if (name === 'workingDirectory') {
+        return { get() { throw new Error('working-directory service is wedged') } }
+      }
+      return world.defaultGet(name)
+    }
+    const { registrations, dispose } = startPlugin(world, { get })
+    const response = await call(registrations, '/api/cleanup.plan', {
+      targets: [{ kind: 'workspace', id: 'ws1' }],
+      mode: 'trash',
+      includeSessions: false,
+    })
+    assert.equal(response.status, 200)
+    assert.equal(response.body.ok, true)
+    assert.deepEqual(response.body.plan.blockers.map((entry) => entry.code), ['IO_ERROR'])
+    assert.match(response.body.plan.blockers[0].message, /could not be verified/)
+    await dispose()
+  })
+
   test('forwards the request signal to measure so an aborted request answers CANCELLED', async () => {
     const world = await makeWorld()
     const { registrations, dispose } = startPlugin(world)

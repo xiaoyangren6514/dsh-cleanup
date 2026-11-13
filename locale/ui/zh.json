@@ -98,6 +98,7 @@
   "deferred.retained.forgotten_other": "已忽略 {count} 项",
   "audit.title": "最近删除",
   "audit.health.unhealthy": "审计日志写入异常，最近的错误：{error}",
+  "audit.health.rotation": "审计日志轮转失败（日志会继续增长）：{error}",
   "audit.items": "共 {count} 项 · {failed} 项失败",
   "audit.entries": "回收站条目 {count} 项",
   "audit.empty": "还没有删除记录。",

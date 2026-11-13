@@ -17,6 +17,7 @@ import { execFile as execFileCallback } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createEngine } from '../lib/engine.js'
 import { createAuditLog } from '../lib/audit.js'
+import { DEFERRED_CLAIM_STALE_MS } from '../lib/deferred.js'
 
 const execFile = promisify(execFileCallback)
 
@@ -310,7 +311,7 @@ async function makeWorld(spec = {}) {
       if (options.fsOps !== undefined) deps.fsOps = options.fsOps
       // 0.6.0 optional seams (SPEC §3, §4.10, §4.11, §5.5): each is absent by default so the
       // capability flags start false and no test can launch a real file manager.
-      for (const name of ['sessionQuery', 'projectionCache', 'emitSessionRemoved', 'platform', 'openDirectory']) {
+      for (const name of ['sessionQuery', 'projectionCache', 'emitSessionRemoved', 'platform', 'openDirectory', 'workingDirectory']) {
         if (options[name] !== undefined) deps[name] = options[name]
       }
       return createEngine(deps)
@@ -3636,6 +3637,63 @@ async function writeQueueDocument(world, document) {
   )
 }
 
+describe('session trash availability precheck (0.6.4)', () => {
+  test('an unusable trash location blocks a session-only trash plan at plan time', async () => {
+    const world = await makeWorld({ sessions: [{ id: 's1', content: 'x\n' }] })
+    const fsOps = { stat: async () => { throw new Error('EIO: trash volume unavailable') } }
+    const engine = world.engine({ fsOps })
+    const plan = planOf(await engine.plan({ targets: [{ kind: 'session', id: 's1' }], mode: 'trash' }))
+    assert.deepEqual(plan.blockers.map((entry) => entry.code), ['TRASH_UNAVAILABLE'])
+  })
+})
+
+describe('effective working-directory probe (0.6.4)', () => {
+  test('a throwing effective-cwd probe blocks the workspace instead of falling back to the header', async () => {
+    const world = await makeWorld({ workspaces: [{ id: 'ws1', files: { 'a.txt': 'x' } }] })
+    world.agentStore.set('s1', {
+      status: 'idle',
+      session: { id: 's1', header: { cwd: path.join(world.root, 'elsewhere') } },
+    })
+    const agents = { list: () => [...world.agentStore.entries()].map(([id, agent]) => ({ id, ...agent })) }
+    const engine = world.engine({
+      agents,
+      workingDirectory: { get() { throw new Error('working-directory service is wedged') } },
+    })
+    const plan = planOf(await engine.plan({ targets: [{ kind: 'workspace', id: 'ws1' }], mode: 'trash', includeSessions: false }))
+    assert.deepEqual(plan.blockers.map((entry) => entry.code), ['IO_ERROR'])
+    assert.match(plan.blockers[0].message, /could not be verified/)
+  })
+})
+
+describe('deferred in-flight ownership (0.6.4)', () => {
+  beforeEach(resetDeferredMarker)
+
+  test('a fresh in-flight entry is not overwritten by defer or removed by cancel', async () => {
+    const world = await makeWorld({ sessions: [{ id: 's1' }] })
+    const entry = queueEntry({ targets: [{ kind: 'session', id: 's1' }], inFlightAt: world.clock.now() - 1000 })
+    await writeQueueDocument(world, { entries: [entry] })
+    const engine = world.engine()
+    assertFail(await engine.defer({ targets: [{ kind: 'session', id: 's1' }], mode: 'trash' }), 'DEFERRED_BUSY')
+    assertFail(await engine.deferredCancel({ entryIds: [entry.id] }), 'DEFERRED_BUSY')
+    const document = await readQueueFile(world.deferredFile)
+    assert.equal(document.entries.length, 1)
+    assert.equal(document.entries[0].id, entry.id, 'the in-flight entry survives untouched')
+  })
+
+  test('a stale in-flight entry may be replaced, matching the claim takeover window', async () => {
+    const world = await makeWorld({ sessions: [{ id: 's1' }] })
+    const stale = queueEntry({
+      targets: [{ kind: 'session', id: 's1' }],
+      inFlightAt: world.clock.now() - DEFERRED_CLAIM_STALE_MS - 1000,
+    })
+    await writeQueueDocument(world, { entries: [stale] })
+    const response = await world.engine().defer({ targets: [{ kind: 'session', id: 's1' }], mode: 'trash' })
+    assert.equal(response.ok, true)
+    assert.equal(response.deferred.replaced, true)
+    assert.equal(response.deferred.count, 1)
+  })
+})
+
 describe('deferred partial execution (0.6.4)', () => {
   beforeEach(resetDeferredMarker)
 
@@ -3662,11 +3720,15 @@ describe('deferred partial execution (0.6.4)', () => {
     assert.equal(document.entries.length, 1)
     assert.deepEqual(document.entries[0].targets, [{ kind: 'session', id: 's1' }])
     assert.equal(document.entries[0].inFlightAt, null)
-    assert.equal(typeof document.entries[0].lastAttemptAt, 'number')
     assert.deepEqual(document.lastRun.results[0].retainedTargets, [{ kind: 'session', id: 's1' }])
     const startupAudit = (await readAudit(world)).filter((record) => record.source === 'startup' && record.action === 'delete')
     assert.equal(startupAudit.length, 1)
     assert.deepEqual(startupAudit[0].items, [{ kind: 'session', id: 's2', status: 'trashed', code: null }])
+    // The audit must describe what was actually executed, not every root the entry named.
+    assert.deepEqual(startupAudit[0].targets, [{ kind: 'session', id: 's2' }])
+    assert.ok(startupAudit[0].bytes > 0)
+    assert.equal(startupAudit[0].entryIds.length, 1)
+    assert.equal(typeof startupAudit[0].entryIds[0], 'string')
 
     // The next start retries only the blocked remainder, now that it is no longer live.
     world.liveStore.delete('s1')
@@ -3678,6 +3740,30 @@ describe('deferred partial execution (0.6.4)', () => {
     const after = await readQueueFile(world.deferredFile)
     assert.deepEqual(after.entries, [])
     assert.deepEqual(after.retained, [])
+  })
+
+  test('a wall-clock rollback does not starve a requeued remainder', async () => {
+    const world = await makeWorld({
+      sessions: [{ id: 's1', content: 'a\n' }, { id: 's2', content: 'b\n' }],
+      live: ['s1'],
+      startClock: 1_000_000,
+    })
+    await writeQueueDocument(world, {
+      entries: [queueEntry({ targets: [{ kind: 'session', id: 's1' }, { kind: 'session', id: 's2' }] })],
+    })
+    const first = await world.engine().runDeferred()
+    assert.equal(first.ran, true)
+    await assertExists(world.dirOfSession('s1'))
+    // The next Host starts with a clock far in the past (timezone/VN snapshot/restored VM). A
+    // wall-clock eligibility filter would skip the entry forever; the run-start id snapshot does
+    // not care about time at all.
+    world.clock.set(1)
+    world.liveStore.delete('s1')
+    resetDeferredMarker()
+    const second = await world.engine().runDeferred()
+    assert.equal(second.ran, true)
+    await assertGone(world.dirOfSession('s1'))
+    assert.deepEqual((await readQueueFile(world.deferredFile)).entries, [])
   })
 
   test('a queue write failure after execution is reported as persistenceError', { skip: process.platform === 'win32' }, async () => {

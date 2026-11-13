@@ -17,8 +17,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   through `inventory.audit`, and Recent deletions warns when the log stopped recording. Appends are
   serialized inside one instance, so concurrent records cannot race a rotation.
 - **Deferred entries delete the part that is possible.** When a queued entry names several roots and a
-  blocker attributes to some of them, those blocked roots stay queued (with `lastAttemptAt` so the
-  same start cannot retry them) while the rest is deleted; the result reports `retainedTargets`. A
+  blocker attributes to some of them, those blocked roots stay queued while the rest is deleted (the
+  run only claims entries that existed when it started, so it cannot re-claim its own remainder);
+  the result reports `retainedTargets`. A
   blocker on a swept-in item (a subagent log, a cross-process claim on a non-root item) keeps the
   whole entry untouched. A queue write failure after the deletion ran is reported as
   `persistenceError` and the claim is released best-effort so the next start retries.
@@ -43,12 +44,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A wall-clock rollback can no longer starve a requeued remainder.** Run eligibility is the set of
+  entry ids present when the run claimed the queue (not a timestamp ordering), so the same run cannot
+  re-claim its own remainder, an entry queued mid-run waits, and an old entry is not skipped forever
+  after a restored VM / timezone change.
+- **A start-up audit record describes what actually ran.** Its `targets` are the executed roots (not
+  every root the entry named, which may still be queued), and it carries the executed bytes and trash
+  `entryIds`; the retained roots stay in the run summary.
+- **A wedged effective-working-directory probe fails closed again.** The plugin no longer swallows that
+  probe failure at the client facade, so a workspace a live Session is working in is refused instead
+  of falling back to the header `cwd`.
+- **A failed audit rotation is visible.** `lastRotationError` is reported in the audit view while
+  appends continue, instead of disappearing behind `healthy: true`.
+- **Replacing or cancelling a freshly claimed queue entry answers `DEFERRED_BUSY`.** Another Host that
+  is already executing the entry keeps its claim, so a new defer cannot silently lose that deletion.
 - **A failed queued root stays retryable after a partial execution**, and a requeued remainder drops
   the permanent typed-name anchor when the workspace it named is no longer part of it; otherwise the
   next start would wrongly answer `PATH_CHANGED`.
 - **Audit rotation failures and recovery are reported correctly.** A `rename` failure is no longer
   swallowed (`lastRotationError` is set while appends continue), and a successful write after a failed
   one makes `healthy` true again while `writeFailures` keeps the historical count.
+- **A stop requested during a clear's plan/refill/resync window is honoured before the next
+  mutation.** The refill writes back the latest snapshot (no more erasing `stopRequested`) and an
+  un-checked row or tree node is removed from the queued tail, so a later batch can neither keep
+  clearing after a stop nor trip `UNCHECKED_TARGET_LEAK`.
+- **Restored Trash/Settings tabs show their own error instead of an endless skeleton** when the
+  inventory request fails, because the page now loads that tab's data on failure and renders the
+  reason.
+- **Review semantics fixes:** a typed name survives include-sessions/descendant toggles whose expected
+  name did not change, a re-checked row no longer drops the dialog back to the planning skeleton, the
+  persisted show-more limit is clamped to the readable bound, and measurement progress counts only
+  ids the Host actually answered.
 - **A failed queue write no longer aborts the whole start-up run.** `finalize`/`requeue`/claim helper
   write failures are caught: the result is reported with `persistenceError`, the in-flight marker is
   released when possible, and the remaining entries still run.
@@ -63,8 +89,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - SPEC (§4.1, §4.3, §4.7, §5.8, §5.9, §9, §10), README (both languages), DETAIL (both languages) and
   the FAQ document the new audit/health shape, partial queue execution, cross-volume precheck, the
   review debounce/stop/measure behavior and the persisted page preferences.
-- Test baseline grew from 515 to 535 passing tests; `npm run check` still passes (16 routes,
-  38 error + 28 warning codes, 525 locale keys, 29 shipped paths).
+- Test baseline grew from 515 to 548 passing tests; `npm run check` still passes (16 routes,
+  38 error + 28 warning codes, 526 locale keys, 29 shipped paths).
 
 ## [0.6.3] - 2026-11-12
 

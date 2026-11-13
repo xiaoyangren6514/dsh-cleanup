@@ -264,6 +264,7 @@ window.__ModuleLoader__.load({
       'deferred.retained.forgotten_other': '已忽略 {count} 项',
       'audit.title': '最近删除',
       'audit.health.unhealthy': '审计日志写入异常，最近的错误：{error}',
+      'audit.health.rotation': '审计日志轮转失败（日志会继续增长）：{error}',
       'audit.items': '共 {count} 项 · {failed} 项失败',
       'audit.entries': '回收站条目 {count} 项',
       'audit.empty': '还没有删除记录。',
@@ -796,6 +797,7 @@ window.__ModuleLoader__.load({
       'deferred.retained.forgotten_other': 'Forgot {count} entries',
       'audit.title': 'Recent deletions',
       'audit.health.unhealthy': 'The audit log could not be written; last error: {error}',
+      'audit.health.rotation': 'The audit log could not rotate (it keeps growing): {error}',
       'audit.items': '{count} items · {failed} failed',
       'audit.entries': '{count} trash entries',
       'audit.empty': 'No deletions recorded yet.',
@@ -1520,12 +1522,15 @@ window.__ModuleLoader__.load({
       if (!state || typeof state !== 'object') return
       try {
         if (typeof localStorage === 'undefined' || localStorage === null) return
+        const limit = typeof state.sessionLimit === 'number' && isFinite(state.sessionLimit)
+          ? Math.max(1, Math.min(Math.floor(state.sessionLimit), PAGE_PREFS_LIMIT_MAX))
+          : SESSION_PAGE_SIZE
         localStorage.setItem(PAGE_PREFS_STORAGE_KEY, JSON.stringify({
           tab: state.tab,
           sessionSort: state.sessionSort,
           sessionFilter: state.sessionFilter,
           sessionWorkspace: state.sessionWorkspace,
-          sessionLimit: state.sessionLimit,
+          sessionLimit: limit,
         }))
       } catch (error) {
         /* a blocked storage is not an error the page can act on */
@@ -5735,6 +5740,7 @@ window.__ModuleLoader__.load({
 
       if (!trash) {
         if (state.trashError) return renderErrorBlock(t, state.trashError, function () { store.loadTrash() })
+        if (state.inventoryError) return renderErrorBlock(t, state.inventoryError, function () { store.loadInventory() })
         return h('div', { className: 'dsh-cleanup-list', 'aria-busy': 'true' },
           h('div', { className: 'dsh-cleanup-sr' }, t('page.loading')),
           h(Skeleton, { lines: 3 }),
@@ -6594,6 +6600,17 @@ window.__ModuleLoader__.load({
           role: 'status',
         }, h('span', { className: 'dsh-cleanup-banner-text' }, t('audit.health.unhealthy', { error: lastError }))))
       }
+      // A failed rotation does not stop appends (the log keeps growing past its ceiling), so it is
+      // reported separately from a failed write instead of hiding behind `healthy: true`.
+      if (audit.health && typeof audit.health.lastRotationError === 'string' && audit.health.lastRotationError !== '') {
+        children.push(h('div', {
+          className: 'dsh-cleanup-banner dsh-cleanup-banner-warn',
+          key: 'rotation',
+          role: 'status',
+        }, h('span', { className: 'dsh-cleanup-banner-text' }, t('audit.health.rotation', {
+          error: audit.health.lastRotationError.slice(0, 120),
+        }))))
+      }
       if (startup) {
         children.push(h('div', { className: 'dsh-cleanup-muted', key: 'startup' }, t('audit.lastStartup', {
           time: formatTime(startup.at) || t('common.none'),
@@ -6692,6 +6709,10 @@ window.__ModuleLoader__.load({
         if (state.settingsError && state.settingsErrorSource !== 'save') {
           return h('div', { className: 'dsh-cleanup-panel' },
             renderErrorBlock(t, state.settingsError, function () { store.retrySettings() }))
+        }
+        if (state.inventoryError && state.settingsError === null) {
+          return h('div', { className: 'dsh-cleanup-panel' },
+            renderErrorBlock(t, state.inventoryError, function () { store.loadInventory() }))
         }
         return h('div', { className: 'dsh-cleanup-panel', 'aria-busy': 'true' },
           h('div', { className: 'dsh-cleanup-sr' }, t('page.loading')),
@@ -7038,7 +7059,7 @@ window.__ModuleLoader__.load({
       }
 
       const banners = []
-      if (inventory && state.inventoryError) {
+      if (state.inventoryError) {
         banners.push(h('div', { key: 'inventory-error', className: 'dsh-cleanup-banner dsh-cleanup-banner-error', role: 'alert' },
           h('span', { className: 'dsh-cleanup-banner-text' }, apiErrorText(t, state.inventoryError)),
           h('button', {
@@ -7906,8 +7927,6 @@ window.__ModuleLoader__.load({
         dialogStore.setState({
           selection: keptRows.map(targetKey),
           nodeSelection: keptNodes.map(function (node) { return node.id }),
-          typed: '',
-          typedReset: false,
           plan: null,
           error: null,
           failureStage: null,
@@ -7929,7 +7948,8 @@ window.__ModuleLoader__.load({
             refreshing: false,
             error: null,
             failureStage: null,
-            typed: '',
+            // Keep the typed name: the expected name is not known until the next plan returns, and a
+            // re-check of the same targets must not make the user retype it.
             typedReset: false,
           })
           return
@@ -7973,10 +7993,13 @@ window.__ModuleLoader__.load({
           return
         }
         const hasPlan = state.plan !== null && state.plan !== undefined
+        // Re-checking a row after emptying the selection must not drop back to the planning skeleton:
+        // the reviewed rows stay on screen while the new plan loads (SPEC §9).
+        const keepReview = hasPlan || state.phase === 'review'
         const handle = beginDialogFetch()
         dialogStore.setState({
-          phase: hasPlan ? 'review' : 'planning',
-          refreshing: hasPlan,
+          phase: keepReview ? 'review' : 'planning',
+          refreshing: keepReview,
           error: null,
           failureStage: null,
         })
@@ -8495,7 +8518,7 @@ window.__ModuleLoader__.load({
           }
           if (workspaceTargets > 1) return
         }
-        dialogStore.setState({ mode: mode, typed: '', typedReset: false, modeNotice: false })
+        dialogStore.setState({ mode: mode, modeNotice: false })
         startPlan()
       }
 
@@ -8503,7 +8526,7 @@ window.__ModuleLoader__.load({
         const state = dialogStore.getSnapshot()
         if (state.phase !== 'review' || state.refreshing === true) return
         if (state.includeSessions === (value === true)) return
-        dialogStore.setState({ includeSessions: value === true, typed: '', typedReset: false })
+        dialogStore.setState({ includeSessions: value === true })
         startPlan()
       }
 
@@ -8521,6 +8544,8 @@ window.__ModuleLoader__.load({
           if (included[key] === true) delete excluded[key]
           else excluded[key] = true
         }
+        // The queued tail is filtered when the next batch is formed (advanceClear), not here: an
+        // un-check followed by a re-check must keep the target eligible for a later batch.
         return Object.assign({}, clear, { excluded: excluded })
       }
 
@@ -8537,6 +8562,8 @@ window.__ModuleLoader__.load({
           if (checkedNodeSet[ids[i]] === true) delete excluded[key]
           else excluded[key] = true
         }
+        // As above: keep the queue intact so a re-check can make the target eligible again; the
+        // batch builder skips currently excluded targets.
         return Object.assign({}, clear, { excluded: excluded })
       }
 
@@ -8695,8 +8722,6 @@ window.__ModuleLoader__.load({
         dialogStore.setState({
           includeDescendants: value === true,
           nodeSelection: [],
-          typed: '',
-          typedReset: false,
           descendantsAutoOff: false,
         })
         startPlan()
@@ -8961,7 +8986,13 @@ window.__ModuleLoader__.load({
         // a later batch. Prune those ids before the next plan: planning a vanished target fails the
         // whole batch with UNKNOWN_SESSION (SPEC §9).
         const completed = completedTargetKeys(result)
-        const queued = clear.queued.filter(function (target) { return completed[targetKey(target)] !== true })
+        const queued = clear.queued.filter(function (target) {
+          const key = targetKey(target)
+          // A target the user un-checked must not be re-added by the next batch either: the queue may
+          // still hold it from the first candidates page (SPEC §9 unchecked/excluded rows).
+          if (clear.excluded && typeof clear.excluded === 'object' && clear.excluded[key] === true) return false
+          return completed[key] !== true
+        })
         const next = Object.assign({}, clear, {
           queued: queued,
           resyncs: 0,
@@ -8977,11 +9008,7 @@ window.__ModuleLoader__.load({
         // the queue plus the unread part of a truncated pre-flight total (queued is 0 when only
         // unread pages are left, so it would understate the work that remains).
         if (next.stopRequested === true) {
-          const excludedCount = next.excluded && typeof next.excluded === 'object' ? Object.keys(next.excluded).length : 0
-          const unread = next.truncated === true && typeof next.total === 'number' && next.total > 0
-            ? Math.max(0, next.total - next.done.count - next.skipped - excludedCount)
-            : 0
-          const remaining = Math.max(next.queued.length, unread)
+          const remaining = clearStopRemaining({ ...state, clear: next, targets: [] })
           dialogStore.setState({ targets: [], plan: null, refreshing: false, clear: next })
           // A stop that arrives with nothing left is not a stopped walk: everything was cleared, so
           // settle as drained instead of telling the user 0 items remain "uncleared".
@@ -9038,6 +9065,40 @@ window.__ModuleLoader__.load({
         scheduleDoneTimer()
       }
 
+      /**
+       * How many logs a stopped clear still has to delete, as a lower bound. The queue plus the batch
+       * that was not executed is always known; a truncated pre-flight adds an estimate for pages not
+       * read yet (the Host total minus what this walk already counted).
+       * @param {object} state - page/dialog snapshot.
+       * @returns {number}
+       */
+      function clearStopRemaining(state) {
+        const clear = state && state.clear ? state.clear : null
+        if (clear === null) return 0
+        const queued = Array.isArray(clear.queued) ? clear.queued.length : 0
+        const targets = Array.isArray(state.targets) ? state.targets.length : 0
+        const excludedCount = clear.excluded && typeof clear.excluded === 'object' ? Object.keys(clear.excluded).length : 0
+        const unread = clear.truncated === true && typeof clear.total === 'number' && clear.total > 0
+          ? Math.max(0, clear.total - clear.done.count - clear.skipped - excludedCount)
+          : 0
+        return Math.max(queued + targets, unread)
+      }
+
+      /**
+       * Settle a stopped clear if the user asked for it while a plan/refill/resync request was in
+       * flight (0.6.4 E). Called before every continuation step: a stop request must stop the walk,
+       * not wait until after the next batch or a page refresh.
+       * @returns {boolean} whether the clear was stopped (and settled).
+       */
+      function settleClearIfStopRequested() {
+        const state = dialogStore.getSnapshot()
+        if (state.clear === null || state.clear.stopRequested !== true) return false
+        const remaining = clearStopRemaining(state)
+        dialogStore.setState({ targets: [], plan: null, refreshing: false, clear: state.clear })
+        settleClear(remaining > 0 ? 'stopped' : null, remaining)
+        return true
+      }
+
       /** True when a clear batch plan brings back a target the user un-checked earlier. */
       function planLeaksExcludedTargets(plan, clear) {
         if (!clear || typeof clear !== 'object') return false
@@ -9064,6 +9125,7 @@ window.__ModuleLoader__.load({
 
       /** @param {boolean} includeDescendants - ask the Host for the subagent closure. */
       function requestClearBatchPlan(includeDescendants) {
+        if (settleClearIfStopRequested()) return
         let state = dialogStore.getSnapshot()
         if (state.clear === null || state.targets.length === 0) return
         // A batch normally asks for the descendant closure; when an un-checked node forced the
@@ -9125,6 +9187,9 @@ window.__ModuleLoader__.load({
             settleClear('blocked')
             return
           }
+          // The plan request may have been in flight when the user asked to stop: the batch has not
+          // started mutating yet, so stop here instead of executing one more batch.
+          if (settleClearIfStopRequested()) return
           const typed = isTypedConfirmation(plan.confirmation) ? String(plan.confirmation.expected) : ''
           dialogStore.setState({
             plan: plan,
@@ -9155,6 +9220,7 @@ window.__ModuleLoader__.load({
        * by CLEAR_RESYNC_MAX so a repeatedly failing Host cannot loop forever (SPEC §9).
        */
       function resyncClearQueue() {
+        if (settleClearIfStopRequested()) return
         const state = dialogStore.getSnapshot()
         const clear = state.clear
         if (clear === null) return
@@ -9165,6 +9231,7 @@ window.__ModuleLoader__.load({
           if (envelope.transport) { failDelete('plan', { transport: envelope.transport }); return }
           if (envelope.ok !== true) { failDelete('plan', toApiError(envelope)); return }
           if (!Array.isArray(envelope.candidates)) { failDelete('plan', { transport: 'badResponse' }); return }
+          if (settleClearIfStopRequested()) return
           const current = dialogStore.getSnapshot().clear
           if (current === null) return
           const picked = clearTargetsFrom(envelope.candidates, current.excluded)
@@ -9203,8 +9270,8 @@ window.__ModuleLoader__.load({
 
       /** Load the next candidates page after the queue drained mid-workspace. */
       function refillClearQueue() {
-        const state = dialogStore.getSnapshot()
-        const clear = state.clear
+        if (settleClearIfStopRequested()) return
+        const clear = dialogStore.getSnapshot().clear
         if (clear === null) return
         const handle = beginDialogFetch()
         request(ROUTE.candidates, clearCandidatesBody(clear), handle.controller.signal, PLAN_TIMEOUT_MS).then(function (envelope) {
@@ -9212,14 +9279,19 @@ window.__ModuleLoader__.load({
           if (envelope.transport) { failDelete('plan', { transport: envelope.transport }); return }
           if (envelope.ok !== true) { failDelete('plan', toApiError(envelope)); return }
           if (!Array.isArray(envelope.candidates)) { failDelete('plan', { transport: 'badResponse' }); return }
-          const picked = clearTargetsFrom(envelope.candidates, clear.excluded)
-          const absorbed = absorbSkipped(clear, picked.skippedTargets)
+          if (settleClearIfStopRequested()) return
+          // Re-read the snapshot after the request: the user may have requested a stop meanwhile, and
+          // writing the pre-request `clear` back would erase that flag and keep deleting.
+          const current = dialogStore.getSnapshot().clear
+          if (current === null) return
+          const picked = clearTargetsFrom(envelope.candidates, current.excluded)
+          const absorbed = absorbSkipped(current, picked.skippedTargets)
           // A page that yields nothing deletable may still hold matches. Only rows not already counted
           // as skipped mean the walk is actually blocked; a page that merely repeats known in-use
           // Sessions is drained, and reporting it as blocked would double count them (SPEC §9).
           const pageTotal = typeof envelope.total === 'number' ? envelope.total : envelope.candidates.length
           if (picked.targets.length === 0) {
-            dialogStore.setState({ clear: Object.assign({}, clear, { skipped: absorbed.skipped, skippedKeys: absorbed.skippedKeys }) })
+            dialogStore.setState({ clear: Object.assign({}, current, { skipped: absorbed.skipped, skippedKeys: absorbed.skippedKeys }) })
             settleClear(absorbed.added > 0 && pageTotal > 0 ? 'blocked' : null, pageTotal)
             return
           }
@@ -9228,12 +9300,12 @@ window.__ModuleLoader__.load({
             targets: nextBatch,
             selection: nextBatch.map(targetKey),
             plan: null,
-            clear: Object.assign({}, clear, {
+            clear: Object.assign({}, current, {
               queued: picked.targets.slice(CLEAR_BATCH_TARGETS),
               truncated: envelope.truncated === true,
               skipped: absorbed.skipped,
               skippedKeys: absorbed.skippedKeys,
-              rounds: clear.rounds + 1,
+              rounds: current.rounds + 1,
             }),
           })
           runClearBatch()
@@ -9400,6 +9472,7 @@ window.__ModuleLoader__.load({
           requests.end(handle)
           if (envelope.transport || envelope.ok !== true) {
             pageStore.setState({ inventoryLoading: false, inventoryError: toApiError(envelope) })
+            loadRestoredTabAfterInventoryFailure()
             return
           }
           const inventory = normalizeInventory(envelope)
@@ -9504,7 +9577,22 @@ window.__ModuleLoader__.load({
           if (isAbortError(error) || requests.stale(handle)) return
           requests.end(handle)
           pageStore.setState({ inventoryLoading: false, inventoryError: { transport: 'network' } })
+          loadRestoredTabAfterInventoryFailure()
         })
+      }
+
+      /**
+       * A tab restored from pagePrefs still needs its own data even when the inventory request
+       * failed; otherwise it would sit on an endless skeleton with no reason shown. Both inventory
+       * failure shapes (`{ok:false}` and a network throw) call this.
+       */
+      function loadRestoredTabAfterInventoryFailure() {
+        const snapshot = pageStore.getSnapshot()
+        if (snapshot.tab === 'trash' && snapshot.trashLoaded !== true && snapshot.trashLoading !== true) {
+          loadTrash()
+        } else if (snapshot.tab === 'settings') {
+          ensureSettingsLoaded()
+        }
       }
 
       function loadTrash() {
@@ -10300,7 +10388,18 @@ window.__ModuleLoader__.load({
               finish({ measureError: toApiError(envelope), measureNotice: null })
               return undefined
             }
-            done += chunk.length
+            // Count what the Host actually returned, not what was requested: an unknown/vanished id
+            // stays unmeasured, and the progress must not claim it was handled.
+            const returnedWorkspaces = envelope.workspaces && typeof envelope.workspaces === 'object' ? envelope.workspaces : {}
+            const returnedSessions = envelope.sessions && typeof envelope.sessions === 'object' ? envelope.sessions : {}
+            for (let i = 0; i < chunk.length; i += 1) {
+              const key = chunk[i].id
+              if (chunk[i].kind === 'workspace') {
+                if (Object.prototype.hasOwnProperty.call(returnedWorkspaces, key)) done += 1
+              } else if (Object.prototype.hasOwnProperty.call(returnedSessions, key)) {
+                done += 1
+              }
+            }
             pageStore.setState(function (current) {
               return Object.assign({}, current, {
                 measureProgress: { done: done, total: total },

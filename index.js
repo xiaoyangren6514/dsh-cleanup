@@ -214,6 +214,10 @@ function lazyServiceView(ctx, serviceName) {
 /**
  * Read one optional service as a getter-shaped facade for calls that take the service's own argument
  * (such as `workingDirectory.get(session)`), resolving it lazily on every call.
+ *
+ * A throwing resolution or call is **not** swallowed: the engine's liveness gate turns a failed
+ * effective-directory probe into a refusal (SPEC §5.3), and hiding the throw here would silently
+ * fall back to the header `cwd` and delete a directory a live Session is working in.
  * @param {object} ctx - plugin context.
  * @param {string} serviceName - optional service name.
  * @returns {{ get: (argument: unknown) => unknown }}
@@ -221,13 +225,9 @@ function lazyServiceView(ctx, serviceName) {
 function lazyServiceFacade(ctx, serviceName) {
   return {
     get(argument) {
-      try {
-        if (typeof ctx.get !== 'function') return undefined
-        const service = ctx.get(serviceName)
-        return typeof service?.get === 'function' ? service.get(argument) : undefined
-      } catch {
-        return undefined
-      }
+      if (typeof ctx.get !== 'function') return undefined
+      const service = ctx.get(serviceName)
+      return typeof service?.get === 'function' ? service.get(argument) : undefined
     },
   }
 }

@@ -98,6 +98,7 @@
   "deferred.retained.forgotten_other": "Forgot {count} entries",
   "audit.title": "Recent deletions",
   "audit.health.unhealthy": "The audit log could not be written; last error: {error}",
+  "audit.health.rotation": "The audit log could not rotate (it keeps growing): {error}",
   "audit.items": "{count} items · {failed} failed",
   "audit.entries": "{count} trash entries",
   "audit.empty": "No deletions recorded yet.",

@@ -380,6 +380,11 @@ describe('createUsageReader: per-id failure classification (SPEC §4.10)', () =>
     const result = await world.reader.readMany(['huge'])
     assert.deepEqual(Object.keys(result.usage), [])
     assert.deepEqual({ ...result.failed }, { huge: 'LOG_TOO_LARGE' })
+    // The refusal is keyed by the same snapshot identity as the fold cache: a second request must not
+    // re-read (and re-parse) the giant log just to refuse it again.
+    const second = await world.reader.readMany(['huge'])
+    assert.deepEqual({ ...second.failed }, { huge: 'LOG_TOO_LARGE' })
+    assert.deepEqual(world.calls, ['huge'], 'one read for two identical requests')
   })
 
   test('classifies a missing Session as UNKNOWN_SESSION and a broken read as READ_FAILED', async () => {

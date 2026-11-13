@@ -39,6 +39,7 @@ function createContext() {
   let deleteResponse = () => ({ ok: true, result: { items: [], totals: { trashed: 1, deleted: 0, failed: 0, bytes: 10 } } })
   let restoreResponse = () => ({ ok: true, restoredTo: '/tmp/x' })
   let candidatesResponse = () => ({ ok: true, candidates: [], total: 0, truncated: false, totals: { count: 0, bytes: 0 } })
+  let inventoryResponse = () => inventory
   let usageResponse = () => ({ ok: true, available: true, usage: {} })
   let openResponse = () => ({ ok: true, path: '/tmp/opened' })
   let measureResponse = () => ({ ok: true, workspaces: {}, sessions: { 'session-a': { bytes: 2048, files: 3 } } })
@@ -161,7 +162,7 @@ function createContext() {
       json: async () => payload,
       text: async () => JSON.stringify(payload),
     })
-    if (path.endsWith('cleanup.inventory')) return respond(inventory)
+    if (path.endsWith('cleanup.inventory')) return respond(await inventoryResponse())
     if (path.endsWith('cleanup.trash.list')) return respond(trash)
     if (path.endsWith('cleanup.trash.restore')) return respond(restoreResponse())
     if (path.endsWith('cleanup.trash.purge')) {
@@ -200,6 +201,7 @@ function createContext() {
     setDeleteResponse(fn) { deleteResponse = fn },
     setRestoreResponse(fn) { restoreResponse = fn },
     setCandidatesResponse(fn) { candidatesResponse = fn },
+    setInventoryResponse(fn) { inventoryResponse = fn },
     effects,
     /** Hold `ctx.get('sessions').refresh()` open until the returned resolver is called. */
     holdSessionRefresh() {
@@ -4177,7 +4179,7 @@ test('0.6.4 audit: write health, per-item outcome and purged entries are shown',
   const longError = 'disk full: /home/.dsh/cleanup/audit.jsonl is not writable — ' + 'x'.repeat(200)
   world.setAudit(() => ({
     enabled: true,
-    health: { healthy: false, writeFailures: 3, lastWriteAt: 5, lastError: longError, lastRotationError: null },
+    health: { healthy: false, writeFailures: 3, lastWriteAt: 5, lastError: longError, lastRotationError: 'EBUSY: rotated file is locked' },
     recent: [
       {
         at: 2,
@@ -4219,6 +4221,8 @@ test('0.6.4 audit: write health, per-item outcome and purged entries are shown',
   const text = collectText(page.render())
   assert.match(text, /审计日志写入异常/, 'an unhealthy audit log is surfaced above the list')
   assert.match(text, /disk full/, 'the last error is shown')
+  assert.match(text, /审计日志轮转失败/, 'a rotation failure is reported separately from a write failure')
+  assert.match(text, /EBUSY/, 'the rotation error text is shown')
   assert.equal(text.includes(longError.slice(150)), false, 'the long Host error is truncated')
   assert.match(text, /共 2 项 · 1 项失败/, 'per-item outcomes are summarized')
   assert.match(text, /回收站条目 2 项/, 'purged entries are summarized')
@@ -4253,5 +4257,236 @@ test('0.6.4 deferred: a persistenceError is surfaced in the last-run details', a
   const page = mountSettingsPage(world, store)
   const text = collectText(page.render())
   assert.match(text, /队列写入失败：EACCES/, 'the write failure is named instead of swallowed')
+  store.dispose()
+})
+
+test('0.6.4 clear: a stop during a page refill stops before the next batch', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  let candidateCalls = 0
+  let releaseRefill = null
+  world.setCandidatesResponse(() => {
+    candidateCalls += 1
+    if (candidateCalls === 1) {
+      return { ok: true, candidates: candidateRows(64), total: 130, truncated: true, totals: { count: 130, bytes: 0 } }
+    }
+    return new Promise(function (resolve) {
+      releaseRefill = function () {
+        resolve({ ok: true, candidates: candidateRows(66), total: 130, truncated: false, totals: { count: 130, bytes: 0 } })
+      }
+    })
+  })
+  let lastPlan = null
+  world.setPlanResponse((body) => { lastPlan = planEchoingTargets(body); return { ok: true, plan: lastPlan } })
+  world.setDeleteResponse(() => ({
+    ok: true,
+    result: {
+      items: lastPlan.items.map((item) => ({ kind: item.kind, id: item.id, status: 'trashed', error: null, movedTo: '/tmp/trash/' + item.id, bytes: item.bytes })),
+      totals: { trashed: lastPlan.items.length, deleted: 0, failed: 0, bytes: lastPlan.items.length },
+    },
+  }))
+  clearMenuAction(world).run()
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  const api = overlay.options.inject().api
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  api.confirmDelete()
+  await waitFor(() => releaseRefill !== null, 'the refill request is in flight')
+  api.requestClearStop()
+  releaseRefill()
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'done', 'done phase', 5000)
+  const state = api.dialogStore.getSnapshot()
+  assert.equal(state.clear.stop.code, 'stopped')
+  assert.equal(state.clear.stop.remaining, 66, 'the unread page is reported as remaining')
+  assert.equal(candidateCalls, 2, 'exactly the pre-flight and the held refill were requested')
+  await sleep(300)
+  assert.equal(world.calls.filter((call) => call.url.endsWith('cleanup.plan')).length, 1, 'no batch is planned after the refill returns')
+  api.disposeDialog()
+})
+
+test('0.6.4 clear: a stop during a batch plan is honoured before execution', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setCandidatesResponse(() => ({ ok: true, candidates: candidateRows(130), total: 130, truncated: false, totals: { count: 130, bytes: 0 } }))
+  let lastPlan = null
+  let planCalls = 0
+  let releaseSecondPlan = null
+  world.setPlanResponse((body) => {
+    planCalls += 1
+    lastPlan = planEchoingTargets(body)
+    if (planCalls === 2) {
+      return new Promise(function (resolve) {
+        releaseSecondPlan = function () { resolve({ ok: true, plan: lastPlan }) }
+      })
+    }
+    return { ok: true, plan: lastPlan }
+  })
+  world.setDeleteResponse(() => ({
+    ok: true,
+    result: {
+      items: lastPlan.items.map((item) => ({ kind: item.kind, id: item.id, status: 'trashed', error: null, movedTo: '/tmp/trash/' + item.id, bytes: item.bytes })),
+      totals: { trashed: lastPlan.items.length, deleted: 0, failed: 0, bytes: lastPlan.items.length },
+    },
+  }))
+  clearMenuAction(world).run()
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  const api = overlay.options.inject().api
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  api.confirmDelete()
+  await waitFor(() => releaseSecondPlan !== null, 'the second batch plan is in flight')
+  api.requestClearStop()
+  releaseSecondPlan()
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'done', 'done phase', 5000)
+  const state = api.dialogStore.getSnapshot()
+  assert.equal(state.clear.stop.code, 'stopped')
+  assert.equal(world.calls.filter((call) => call.url.endsWith('cleanup.delete')).length, 1, 'the held plan is not executed')
+  assert.equal(state.clear.stop.remaining, 66, 'the unexecuted queue is reported')
+  api.disposeDialog()
+})
+
+test('0.6.4 clear: unchecking a tree node also removes it from the queued batch', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setCandidatesResponse(() => ({ ok: true, candidates: candidateRows(130), total: 130, truncated: false, totals: { count: 130, bytes: 0 } }))
+  let lastPlan = null
+  let planCalls = 0
+  world.setPlanResponse((body) => {
+    planCalls += 1
+    lastPlan = planEchoingTargets(body)
+    // The first batch carries a subagent node that also sits in the queued tail; the user will
+    // un-check it, and it must never be planned by a later batch.
+    if (planCalls === 1) {
+      lastPlan.items.push({
+        kind: 'session', id: 'session-70', workspaceId: null, title: null, path: '/tmp/session-70',
+        bytes: 10, files: 1, parentSessionId: 'session-0', isDescendant: true,
+      })
+    }
+    return { ok: true, plan: lastPlan }
+  })
+  world.setDeleteResponse(() => ({
+    ok: true,
+    result: {
+      items: lastPlan.items.map((item) => ({ kind: item.kind, id: item.id, status: 'trashed', error: null, movedTo: '/tmp/trash/' + item.id, bytes: item.bytes })),
+      totals: { trashed: lastPlan.items.length, deleted: 0, failed: 0, bytes: lastPlan.items.length },
+    },
+  }))
+  clearMenuAction(world).run()
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  const api = overlay.options.inject().api
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'review', 'review phase')
+  await waitFor(() => api.dialogStore.getSnapshot().knownNodes['session-70'] !== undefined, 'tree node known')
+  api.setDialogNodeSelection('session-70', false)
+  await waitFor(() => api.dialogStore.getSnapshot().refreshing !== true, 'replan settled')
+  const clear = api.dialogStore.getSnapshot().clear
+  assert.equal(clear.excluded['session:session-70'], true)
+  // The queued tail stays intact so a re-check could restore the target; the next batch builder is
+  // what skips currently excluded entries.
+  assert.equal(clear.queued.some((target) => target.id === 'session-70'), true)
+  api.confirmDelete()
+  await waitFor(() => api.dialogStore.getSnapshot().phase === 'done', 'done phase', 8000)
+  const secondBatch = world.calls.filter((call) => call.url.endsWith('cleanup.plan'))[1]
+  assert.ok(secondBatch, 'a second batch was planned')
+  assert.equal(secondBatch.body.targets.some((target) => target.id === 'session-70'), false, 'the later batch never names the excluded node')
+  api.disposeDialog()
+})
+
+test('0.6.4 page prefs: a restored tab still loads its data when the inventory request fails', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  const KEY = 'dsh-cleanup.pagePrefs'
+  const previousLocalStorage = globalThis.localStorage
+  const bag = new Map([[KEY, JSON.stringify({ tab: 'trash', sessionSort: 'newest', sessionFilter: 'all', sessionWorkspace: '', sessionLimit: 300 })]])
+  globalThis.localStorage = {
+    getItem: (key) => (bag.has(key) ? bag.get(key) : null),
+    setItem: (key, value) => { bag.set(key, String(value)) },
+    removeItem: (key) => { bag.delete(key) },
+  }
+  world.setInventoryResponse(() => ({ ok: false, error: { code: 'IO_ERROR', message: 'inventory failed' } }))
+  try {
+    const store = slotApi(world, 'settings.section').createPageStore()
+    await store.loadInventory()
+    assert.ok(store.getSnapshot().inventoryError, 'the inventory failure is kept')
+    await waitFor(() => world.calls.some((call) => call.url.endsWith('cleanup.trash.list')), 'the restored trash tab still loads its own list')
+    const page = mountSettingsPage(world, store)
+    const text = collectText(page.render())
+    assert.equal(/dsh-cleanup-skeleton/.test(text), false, 'the tab is not stuck on a skeleton')
+    store.dispose()
+  } finally {
+    if (previousLocalStorage === undefined) delete globalThis.localStorage
+    else globalThis.localStorage = previousLocalStorage
+  }
+})
+
+test('0.6.4 review: switching include-sessions keeps a typed name whose expectation did not change', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setWorkspaces(() => [workspaceRow('ws-a', 'proj-a', '/tmp/proj-a')])
+  world.setPlanResponse((body) => {
+    const plan = planEchoingTargets(body)
+    plan.confirmation = { kind: 'typed-name', expected: 'proj-a', label: 'proj-a' }
+    plan.mode = 'permanent'
+    return { ok: true, plan }
+  })
+  const api = slotApi(world, 'settings.section').createPageStore()
+  store: {
+    const dialogApi = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+    void dialogApi
+  }
+  const overlay = world.registrations.find((entry) => entry.options.name === 'shell.overlay')
+  void overlay
+  // Use the page's dialog controller through the page api.
+  const pageApi = slotApi(world, 'settings.section')
+  pageApi.openDialog([{ kind: 'workspace', id: 'ws-a', title: 'proj-a' }], { surface: 'settings' })
+  const dialog = pageApi.dialogStore
+  await waitFor(() => dialog.getSnapshot().phase === 'review', 'review phase')
+  pageApi.setDialogMode('permanent')
+  await waitFor(() => dialog.getSnapshot().refreshing !== true && dialog.getSnapshot().plan !== null, 'permanent plan settled')
+  pageApi.setTypedText('proj-a')
+  pageApi.setIncludeSessions(false)
+  await waitFor(() => dialog.getSnapshot().refreshing !== true && dialog.getSnapshot().plan !== null, 'replan settled')
+  assert.equal(dialog.getSnapshot().typed, 'proj-a', 'the expected folder name did not change, so the input survives')
+  assert.equal(dialog.getSnapshot().typedReset, false)
+  pageApi.disposeDialog()
+})
+
+test('0.6.4 page prefs: the persisted show-more limit is clamped to the readable bound', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  const KEY = 'dsh-cleanup.pagePrefs'
+  const previousLocalStorage = globalThis.localStorage
+  const bag = new Map()
+  globalThis.localStorage = {
+    getItem: (key) => (bag.has(key) ? bag.get(key) : null),
+    setItem: (key, value) => { bag.set(key, String(value)) },
+    removeItem: (key) => { bag.delete(key) },
+  }
+  try {
+    const store = slotApi(world, 'settings.section').createPageStore()
+    for (let i = 0; i < 8; i += 1) store.showMoreSessions()
+    assert.equal(JSON.parse(bag.get(KEY)).sessionLimit, 2000, 'writes never exceed the readable maximum')
+    store.dispose()
+  } finally {
+    if (previousLocalStorage === undefined) delete globalThis.localStorage
+    else globalThis.localStorage = previousLocalStorage
+  }
+})
+
+test('0.6.4 measure: progress counts answered ids, not merely requested ones', async () => {
+  const world = createContext()
+  const { mod } = await loadClient()
+  mod.apply(world.ctx)
+  world.setMeasureResponse(() => ({ ok: true, workspaces: {}, sessions: { 'session-a': { bytes: 1, files: 1 } } }))
+  const store = slotApi(world, 'settings.section').createPageStore()
+  await store.loadInventory()
+  await store.measure({ sessionIds: ['session-a', 'session-missing'] })
+  const state = store.getSnapshot()
+  assert.equal(state.measuring, false)
+  assert.deepEqual(state.measureProgress, { done: 1, total: 2 })
+  assert.equal(Object.keys(state.measured.sessions).length, 1)
   store.dispose()
 })

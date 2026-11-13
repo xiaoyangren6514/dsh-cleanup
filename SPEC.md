@@ -477,7 +477,7 @@ with `DEFERRED_FULL`.
   "items": [{ "kind": "session", "id": "…", "status": "trashed" | "deleted" | "failed" }],
                                // `items` is present only when the entry executed
   "retainedTargets": [{ "kind": "session", "id": "…" }],
-                               // 0.6.4: blocked roots left queued after a partial execution
+                               // 0.6.4: blocked or failed roots left queued after a partial execution
   "persistenceError": "…" }    // 0.6.4: the queue file could not record this result
 ```
 
@@ -502,6 +502,10 @@ equivalent target set, exactly like `defer`). `deferred.list` projects them afte
                 "code": "SESSION_LIVE", "reason": "…",
                 "mode": "trash", "targets": [ { "kind": "session", "id": "…" } ] } ]
 ```
+
+Replacing an existing entry with the same target set clears the old claim by design; when that
+claim is still fresh the replacement (and a cancel naming it) answers `DEFERRED_BUSY` instead, because
+overwriting the entry would desynchronize the Host that is already executing it.
 
 ### 4.9 Cleanup wizard candidates
 
@@ -941,7 +945,10 @@ One action writes exactly one record: the start-up run suppresses the interactiv
 for the plans it executes and writes the `startup` record itself. A deletion record carries bounded
 per-item detail (`items`, ≤64) plus the trash `entryIds` of the items that really moved; a purge
 record carries the entries it actually removed (`entries`, ≤50 `{id,kind,title,originalPath}` plus
-their `entryIds`), so emptying the trash stays answerable afterwards.
+their `entryIds`), so emptying the trash stays answerable afterwards. A **startup** record for a
+partially executed entry describes only the roots that actually ran (its `targets` are the executed
+roots, not every root the entry named) and carries the executed `bytes`/`entryIds`; the retained roots
+are reported in the run summary's `reason`/`retainedTargets` (§4.7).
 
 `trashRetentionDays` / `trashMaxBytes` are **warnings only**: the inventory reports
 `oldestMovedAt`/`overRetention`/`overCapacity` and `suggestedEntryIds` (oldest entries whose purge brings
@@ -961,11 +968,16 @@ where the user can requeue or drop them.
 **Partial execution (0.6.4).** A queued entry may name several roots. When the freshly derived plan
 reports blockers, the run splits off the roots **a blocker attributes to** (an explicit queued session
 or workspace root) and plans the remainder again (at most two split rounds plus a final planning pass). The executable part runs;
-the blocked roots are written back into the same queue entry (with `lastAttemptAt` = this run) and are
-retried at the next start. A blocker on a swept-in item (a subagent log, a session pulled in by
-`includeSessions`, a cross-process write claim on a non-root item) cannot be isolated without changing
-what the user reviewed, so such an entry is not split at all: nothing runs and it is recorded
-`skipped`. `lastAttemptAt` also keeps the same run from claiming its own remainder again.
+the blocked roots — and any queued root whose own execution failed while a sibling part succeeded —
+are written back into the same queue entry and retried at the next start. A root that failed alone
+(no sibling succeeded) keeps the whole entry for the retained list instead of shrinking it. A
+blocker on a swept-in item (a subagent log, a session pulled in by `includeSessions`, a cross-process
+write claim on a non-root item) cannot be isolated without changing what the user reviewed, so such
+an entry is not split at all: nothing runs and it is recorded `skipped`.
+Eligibility for a run is the **set of entry ids present when that run claimed the queue**, not a
+wall-clock comparison: the same run cannot claim its own remainder again, an entry queued mid-run
+waits for the next start, and a clock rollback can neither hide an old entry nor leave a remainder
+unclaimed.
 A result whose queue write failed carries `persistenceError`: the entry's in-flight marker is cleared
 best-effort so the next start retries it instead of waiting out the 10-minute stale window.
 
@@ -1005,6 +1017,9 @@ and is only decodable through the Host's own persistence stack. `readSession` re
   is answered from memory; a snapshot with neither identity is simply not cached. The cache is never
   written to disk. At most four cold reads run concurrently and the request `AbortSignal` stops new
   reads (§4.10).
+- **Refusals are snapshot-keyed too.** A log refused for size (`LOG_TOO_LARGE`) is remembered under
+  the same snapshot identity, so a page refresh does not re-read and re-parse it just to refuse it
+  again; a changed snapshot retries.
 - **Read-only by construction.** Folding never opens a write handle, never makes a Session live, and
   never throws for one bad log: the failure is that id's entry in `failed` (§4.10).
 
@@ -1340,7 +1355,11 @@ workspace in batches inside the same dialog:
   immediately plans and executes the next batch without a second review. Progress reads
   `已清理 M / 共 T 条（第 N 批）` when the pre-flight knows the total (0.6.4). While a clear is running the
   footer offers **完成本批后停止**: it stops after the batch in flight (never mid-batch) and settles the
-  ordinary done state with a `stopped` reason and the remaining count. After each batch, the ids that batch reports as `trashed`/`deleted` are
+  ordinary done state with a `stopped` reason and the remaining count. A stop requested while a batch
+  plan, a page refill or a queue resync is in flight is honoured **before** the next mutation: the
+  in-flight response is discarded as a plan (nothing is deleted) and the walk settles stopped.
+  Un-checking a reviewed row or tree node also removes it from the queued tail of later batches, so
+  the exclusion cannot resurface as `UNCHECKED_TARGET_LEAK`. After each batch, the ids that batch reports as `trashed`/`deleted` are
   removed from the remaining queue, so a log an earlier batch already removed as a subagent
   descendant cannot make the next plan fail wholesale with `UNKNOWN_SESSION`. If a batch plan still
   answers `UNKNOWN_SESSION` (a target deleted outside this app run), the client re-reads the
@@ -1371,8 +1390,8 @@ A `settings.section` page titled "存储清理" with four tabs: **工作区**, *
 - Header row: section title, one-paragraph explanation, `刷新` button (spinner + `aria-busy`
   while a reload is in flight), and a size-measuring button when the active tab has unmeasured rows.
   Measuring runs in bounded chunks (at most 200 ids per request, serially; 0.6.4), reports
-  `测量中… n/m`, offers **停止** and keeps every already-measured row when stopped or when one chunk
-  fails.
+  `测量中… n/m` counting the ids the Host actually answered, offers **停止** and keeps every
+  already-measured row when stopped or when one chunk fails.
   Below the title, a summary line renders from the current inventory when it has landed: workspaces,
   sessions, trash entries with their byte total, scheduled deletions (only when non-zero), and
   `数据更新于 <generatedAt>`, so a stale page is visible instead of silently trusted. The trash tab
@@ -1442,14 +1461,17 @@ A `settings.section` page titled "存储清理" with four tabs: **工作区**, *
   two-step `重新安排` (`deferred.requeue`) / `忽略` (`deferred.cancel`) actions, and its collapsed head
   reports the retained count.
 - The audit view warns when the running log stopped recording (`audit.health.healthy === false`,
-  showing the last error), and each recent record shows its bounded detail when present (`items`:
-  `n 项 · m 失败`; `entries`: purge count). The deferred last-start summary shows a
+  showing the last error), separately warns when rotation failed (`lastRotationError`; appends continue
+  and the file may exceed its ceiling), and each recent record shows its bounded detail when present
+  (`items`: `n 项 · m 失败`; `entries`: purge count). The deferred last-start summary shows a
   `persistenceError` line when the queue could not record a run whose deletion already happened.
 - The page remembers its view across sheet re-mounts and reloads: active tab, session sort/archive/
   workspace filters and the `显示更多` limit live in one plugin-owned `localStorage` key
   (`dsh-cleanup.pagePrefs`); an invalid or hand-edited value falls back to the defaults, a
   workspace filter naming a workspace this profile no longer has falls back to "all workspaces", and
-  the selection/search/settings draft are never persisted.
+  the selection/search/settings draft are never persisted. A restored Trash/Settings tab loads its own
+  data even when the inventory request failed, so it renders that tab's error instead of an endless
+  skeleton.
 - Empty/loading/error states for each tab; errors show the localized reason and a `重试`.
 - Footer note: the recovery window is not time-limited — trash is manual — and permanent deletion
   cannot be undone.
