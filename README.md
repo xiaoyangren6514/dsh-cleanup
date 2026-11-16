@@ -20,7 +20,7 @@ Since 0.6.0 it also shows what it deletes: an opt-in **usage** view (per-Session
 | Repository | <https://github.com/xiaoyangren6514/dsh-cleanup> |
 | Author | fly |
 | License | [MIT](LICENSE) |
-| Tested with | DSH 0.2.2-rc.1 / 0.2.2-rc.2 |
+| Tested with | DSH 0.2.2-rc.1 / 0.2.2-rc.2 / 0.2.2-rc.3 |
 | Host platforms | macOS (`darwin`), Linux, and Windows (`win32`) |
 
 ## Features
@@ -118,7 +118,7 @@ A local checkout is installed as a linked directory: do not move or delete it wh
 
 ### Discover
 
-DSH 0.2.2 (rc.1 / rc.2) ships **no official plugin market or index**. The Discover tab comes from the optional experimental plugin-market bundle (shipped profiles keep it off), and no index source is configured by default — you add an index URL yourself in Discover or Settings → Plugins. Community-run catalogs that publish DSH plugin indexes include:
+DSH 0.2.2 (rc.1 / rc.2 / rc.3) ships **no official plugin market or index**. The Discover tab comes from the optional experimental plugin-market bundle (shipped profiles keep it off), and no index source is configured by default — you add an index URL yourself in Discover or Settings → Plugins. Community-run catalogs that publish DSH plugin indexes include:
 
 - [awesome-dsh-plugin.com](https://awesome-dsh-plugin.com) — index at <https://cdn.jsdelivr.net/npm/dsh-plugin-catalog/index.json>
 - [dshopen.org](https://dshopen.org)
@@ -127,7 +127,7 @@ Once `dsh-cleanup` is published and listed in one of those indexes, add that ind
 
 ## Requirements and compatibility
 
-- **DSH 0.2.2-rc.1 and 0.2.2-rc.2** (tested). `package.json` declares `engines.dsh: >=0.2.2-alpha.3 <0.3.0`; the plugin manager checks it before install/enable and refuses incompatible runtimes instead of running on a half-broken API. rc.2 also added an exact-version plugin guard: it disables plugins that pin exact `@deepseek-ai/*` peer requirements, while this plugin declares only a semver range and therefore stays enabled.
+- **DSH 0.2.2-rc.1, 0.2.2-rc.2 and 0.2.2-rc.3** (tested). `package.json` declares `engines.dsh: >=0.2.2-alpha.3 <0.3.0`; the plugin manager checks it before install/enable and refuses incompatible runtimes instead of running on a half-broken API. rc.2 also added an exact-version plugin guard: it disables plugins that pin exact `@deepseek-ai/*` peer requirements, while this plugin declares only a semver range and therefore stays enabled. 0.6.3 was re-verified against rc.3 in an isolated instance with no code change (rc.3 only adds one client slot; the Host/Client seams this plugin uses are identical to rc.2).
 - **Node.js ≥ 20** for the Host half.
 - **Web GUI.** The browser half is a web client module, registered through `window.__ModuleLoader__` and the `shell.overlay` / `settings.section` / `contextMenu.*` slots.
 - **macOS (`darwin`), Linux, and Windows (`win32`).** The bundle declares `dsh.bundle.platforms: ["darwin", "linux", "win32"]`. On Windows the plugin works with drive roots and backslash paths: drive roots, the system directories (`C:\Windows`, `Program Files`, `ProgramData`), and the home directory's parent are protected, path comparison is case-insensitive, and depth is counted below the drive root, so `C:\proj` is refused as a top-level path just like `/proj`. Junctions are refused like symlinks. These Windows semantics are implemented and unit-tested, but this release was validated on macOS only — see [Known limits](#known-limits).

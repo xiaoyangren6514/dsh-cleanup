@@ -145,6 +145,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **DSH 0.2.2-rc.3 verified.** The plugin (packaged tarball) was installed with rc.3's plugin
+  manager into an isolated profile and booted against an isolated `DSH_HOME`: inventory
+  capabilities, plan -> trash -> restore, `PERMANENT_DISABLED`, `PLAN_UNKNOWN`, sibling restore,
+  audit detail/health, purge records and the in-flight queue guard all behaved as on rc.2, and the
+  real Web GUI loaded the settings page and the workspace context-menu entries with no console
+  errors. No code change was needed: rc.3 adds one client slot and leaves the Host services / client
+  seams this plugin uses unchanged, while `engines.dsh: >=0.2.2-alpha.3 <0.3.0` already admits rc.3.
 - docs/SPEC/README/DETAIL/FAQ now describe the audit/health shape, partial queue execution,
   cross-volume precheck, the review debounce/stop/measure behavior, the persisted page preferences,
   and the explicit settings effect boundaries.

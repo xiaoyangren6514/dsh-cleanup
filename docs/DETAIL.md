@@ -18,7 +18,7 @@ DSH 本身对工作区只做「移除注册」——目录、文件与会话历�
 - 包名：`dsh-cleanup` 0.6.3
 - 仓库：<https://github.com/xiaoyangren6514/dsh-cleanup>
 - 许可证：MIT © 2026 fly
-- 验证环境：DSH 0.2.2-rc.1 / 0.2.2-rc.2
+- 验证环境：DSH 0.2.2-rc.1 / 0.2.2-rc.2 / 0.2.2-rc.3
 
 ## 能做什么
 
@@ -162,11 +162,11 @@ dsh plugin --profile web add ./dsh-cleanup
 
 ### Discover 与社区索引
 
-DSH 0.2.2（rc.1 / rc.2）**没有官方插件市场或官方索引**。Discover 页签由可选的实验性 plugin-market bundle 提供，且默认不配置任何索引源——需要用户自己添加索引 URL。社区维护的 DSH 插件索引包括 [awesome-dsh-plugin.com](https://awesome-dsh-plugin.com)（索引 <https://cdn.jsdelivr.net/npm/dsh-plugin-catalog/index.json>）与 [dshopen.org](https://dshopen.org)。本包发布并出现在此类索引之后，添加索引 URL 即可从 Discover 安装，或继续使用上面的 CLI 命令。
+DSH 0.2.2（rc.1 / rc.2 / rc.3）**没有官方插件市场或官方索引**。Discover 页签由可选的实验性 plugin-market bundle 提供，且默认不配置任何索引源——需要用户自己添加索引 URL。社区维护的 DSH 插件索引包括 [awesome-dsh-plugin.com](https://awesome-dsh-plugin.com)（索引 <https://cdn.jsdelivr.net/npm/dsh-plugin-catalog/index.json>）与 [dshopen.org](https://dshopen.org)。本包发布并出现在此类索引之后，添加索引 URL 即可从 Discover 安装，或继续使用上面的 CLI 命令。
 
 ## 环境与兼容性
 
-- **DSH 0.2.2-rc.1 与 0.2.2-rc.2** 已验证；`engines.dsh: >=0.2.2-alpha.3 <0.3.0` 会在安装/启用前检查，不兼容的运行时被拒绝，而不是半支持运行。rc.2 新增的精确版本插件兼容检查只影响把 `@deepseek-ai/*` 依赖写死到精确版本的插件，本插件声明的是版本区间，不受影响。
+- **DSH 0.2.2-rc.1、0.2.2-rc.2 与 0.2.2-rc.3** 已验证；`engines.dsh: >=0.2.2-alpha.3 <0.3.0` 会在安装/启用前检查，不兼容的运行时被拒绝，而不是半支持运行。rc.2 新增的精确版本插件兼容检查只影响把 `@deepseek-ai/*` 依赖写死到精确版本的插件，本插件声明的是版本区间，不受影响。0.6.3 在 rc.3 上重新跑过完整隔离验收：rc.3 只新增了一个客户端 slot，本插件使用的 Host 服务（`connection`/`workspaceRegistry`/`sessionPersistence`/`sessionQuery`/`storageDomain`）与客户端 seam（slot/contextMenus/locale/sessions）签名与 rc.2 相同，因此无需修改。
 - Host 半部需要 **Node.js ≥ 20**。
 - **Web 界面**——浏览器半部通过 DSH 客户端模块加载器与 `shell.overlay`、`settings.section`、`contextMenu.*` 扩展点注册。
 - **macOS（`darwin`）、Linux 与 Windows（`win32`）**——`dsh.bundle.platforms: ["darwin", "linux", "win32"]`。Windows 上使用盘符根与反斜杠路径：盘符根（`C:\`）、系统目录（`C:\Windows`、`Program Files`、`ProgramData`）与家目录的上级都受保护，路径比较按不区分大小写处理，目录层级按「相对盘符根的段数」计算，因此 `C:\proj` 与 `/proj` 一样被视为顶层目录而拒绝。映射为符号链接的 junction 与符号链接同等拒绝。POSIX 专属的权限用例在 Windows 上跳过。这些 Windows 语义已实现并有单元测试覆盖，但本版本只在 macOS 上做过完整验证（见[已知限制](#已知限制)）。
